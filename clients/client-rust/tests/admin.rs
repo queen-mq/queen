@@ -169,11 +169,13 @@ async fn a_transaction_rolls_back_when_an_ack_is_bogus() {
         trace_id: None,
         data: serde_json::json!(null),
         producer_sub: None,
+        headers: None,
         created_at: "2026-08-04T10:00:00Z".into(),
         partition_id: "00000000-0000-7000-8000-000000000000".into(),
         partition: "Default".into(),
         lease_id: String::new(),
         consumer_group: "g-rollback".into(),
+        offset: None,
     };
 
     let out = q

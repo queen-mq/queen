@@ -430,6 +430,14 @@
             }
           },
           {
+            "name": "where",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "x-queen-tenant",
             "in": "header",
             "required": false,
@@ -589,6 +597,14 @@
             "required": false,
             "schema": {
               "type": "boolean"
+            }
+          },
+          {
+            "name": "where",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -6250,7 +6266,7 @@
         },
         "x-queen-access-level": "admin",
         "x-queen-tenant-scoped": true,
-        "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_delete_queue",
+        "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_delete_queue_routed",
         "x-queen-query-params": "adapter",
         "x-queen-note": "Served by the broker's generic adapter, which reads its own query string and body: parameters and body are documented on the reference page for this route, not derived here.",
         "security": [

@@ -45,6 +45,7 @@ from typing import Any, Optional
 from ..util.logger import make_logger
 from ..util.backoff import sleep
 from ..operators.reduce_op import state_key_for, parse_state_key
+from ..operators.sink_op import LINK_MISSES, link_refusal, passes_messages_on
 from .streams_http_client import StreamsHttpClient, StreamsHttpError
 from .register import register_query
 from .state import get_state, list_state_partitions
@@ -155,11 +156,29 @@ class Runner:
         self._claims = _CLAIMS_UNKNOWN
         # Wakes the flush task early, on stop. Made in start(), inside the loop.
         self._wake: Optional[asyncio.Event] = None
+        # The sink links what it gets (PLAN_ROUTING.md §6): each record is its
+        # source message unchanged (no window, nothing but filters, key_by and
+        # a gate) and .to() did not say link=False. _links_refused: why the
+        # broker made it push instead (None: it has not).
+        stages = self.stream.stages
+        sink = stages.sink
+        self._link_sink = (
+            sink is not None
+            and sink.kind == "sink"
+            and getattr(sink, "link", True) is not False
+            and stages.window is None
+            and stages.reducer is None
+            and passes_messages_on(stages.pre)
+            and passes_messages_on(stages.post)
+        )
+        self._links_refused: Optional[str] = None
         self._stats = {
             "cyclesTotal": 0,
             "flushCyclesTotal": 0,
             "messagesTotal": 0,
             "pushItemsTotal": 0,
+            # Of the push items, the ones sent as links (PLAN_ROUTING.md §6).
+            "linkItemsTotal": 0,
             "stateOpsTotal": 0,
             "lateEventsTotal": 0,
             "errorsTotal": 0,
@@ -416,6 +435,7 @@ class Runner:
             push_items = stages.sink.build_push_items(
                 [{"key": e["key"], "value": e["value"], "sourceMsg": e.get("sourceMsg")} for e in emits],
                 partition_name,
+                link=self._linking(),
             )
         elif stages.sink and stages.sink.kind == "foreach":
             await stages.sink.run_effects(
@@ -441,8 +461,7 @@ class Runner:
         # 7. commit
         self._stats["stateOpsTotal"] += len(state_ops)
         self._stats["pushItemsTotal"] += len(push_items)
-        await commit_cycle(
-            self.http,
+        await self._commit(
             query_id=self._server_query_id,
             partition_id=partition_id,
             consumer_group=group["consumerGroup"],
@@ -520,6 +539,7 @@ class Runner:
             push_items = stages.sink.build_push_items(
                 [{"key": e["key"], "value": e["value"], "sourceMsg": e.get("sourceMsg")} for e in emits],
                 partition_name,
+                link=self._linking(),
             )
         elif stages.sink and stages.sink.kind == "foreach":
             await stages.sink.run_effects(
@@ -547,8 +567,7 @@ class Runner:
         self._stats["stateOpsTotal"] += len(state_ops)
         self._stats["pushItemsTotal"] += len(push_items)
 
-        await commit_cycle(
-            self.http,
+        await self._commit(
             query_id=self._server_query_id,
             partition_id=partition_id,
             consumer_group=group["consumerGroup"],
@@ -557,6 +576,37 @@ class Runner:
             ack=ack,
             release_lease=release_lease,
         )
+
+    # ------------------------------------------------------------- links
+
+    def _linking(self) -> bool:
+        """Whether this cycle's records go as links (see _link_sink)."""
+        return self._link_sink and self._links_refused is None
+
+    async def _commit(self, **cycle: Any) -> dict:
+        """commit_cycle. A cycle whose links the broker refuses (a cluster
+        before catalogue version 8) applied nothing, so it goes again with the
+        records pushed (each item carries its payload), and the runner pushes
+        from then on: it says so once. A link the broker could not resolve
+        this time (its source past retention) pushes that cycle only."""
+        items = cycle.get("push_items") or []
+        links = sum(1 for it in items if "link" in it)
+        try:
+            res = await commit_cycle(self.http, **cycle)
+        except Exception as err:
+            why = link_refusal(err) if links else None
+            if why is None:
+                raise
+            if why not in LINK_MISSES:
+                self._links_refused = why
+                self.logger.warn(
+                    "links refused: this stream pushes copies from now on",
+                    {"queryId": self.query_id, "reason": why, "error": str(err)},
+                )
+            pushes = [{k: v for k, v in it.items() if k != "link"} for it in items]
+            return await commit_cycle(self.http, **{**cycle, "push_items": pushes})
+        self._stats["linkItemsTotal"] += links
+        return res
 
     @staticmethod
     def _clone_state(v: Any) -> Any:

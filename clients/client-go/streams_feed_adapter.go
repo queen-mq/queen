@@ -124,6 +124,18 @@ func (t *feedTx) Push(queue, partition string, items []feedrt.PushItem) feedrt.T
 	return t
 }
 
+// Link makes the client's transaction a feedrt.LinkTx: a feed stream's output
+// that is its input unchanged goes as a link to the feed entry, named by its
+// queue, partition, offset and transaction id.
+func (t *feedTx) Link(queue, partition string, items []feedrt.LinkItem) feedrt.Tx {
+	sources := make([]LinkSource, len(items))
+	for i, it := range items {
+		sources[i] = LinkSource{Queue: it.Queue, Partition: it.Partition, Offset: it.Offset, TransactionID: it.TransactionID}
+	}
+	t.tb.Queue(queue).Partition(partition).Link(sources, LinkOptions{})
+	return t
+}
+
 func (t *feedTx) KVCheck(ns, key string, expect int64, required bool) feedrt.Tx {
 	t.tb.KV(KVCheckOp(ns, key, expect, KVWriteOptions{Required: required}))
 	return t

@@ -40,6 +40,7 @@ import { currentEpoch, onClusterChange } from '@/stores/identity'
 import { readSinceRefresh } from '@/composables/useRefresh'
 import { useFeedStore } from '@/stores/feedStore'
 import { withFeedReaders } from '@/console/streams/feedStreams'
+import { isHiddenQueue } from '@/console/queues/routeView'
 
 // Default cache TTL — long enough that incidental view-switching is free,
 // short enough that a stale list doesn't deceive the operator. Nothing
@@ -135,8 +136,10 @@ const fetchQueues = async ({ force = false, ttlMs = DEFAULT_TTL_MS } = {}) => {
       const all = r.data?.queues || r.data || []
       // Filter out queues with empty/whitespace names — these are stale
       // entries from the partition_lookup table that should be cleaned
-      // up server-side but show up in the API response today.
-      listed.value = all.filter(q => q.name && q.name.trim() !== '')
+      // up server-side but show up in the API response today. A filtered
+      // group's hidden queue is the group's (shown with it), never a queue
+      // of its own: the broker leaves it out, and so does this list.
+      listed.value = all.filter(q => q.name && q.name.trim() !== '' && !isHiddenQueue(q.name))
       // Re-read on every load, including the loads that carry none: a cell
       // that has stopped answering the usage fields must stop reporting the
       // figure it answered ten minutes ago.

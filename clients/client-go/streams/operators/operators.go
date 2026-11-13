@@ -33,6 +33,10 @@ type Envelope struct {
 	WindowKey     string
 	OperatorTag   string
 	GracePeriodMs int64
+	// Source is the queue message this envelope came from (a queue source),
+	// for a sink that links an unchanged input: carried as it is by the
+	// operators that do not compute a value.
+	Source *CycleLink
 }
 
 // EmitCtx is the context passed to post-reducer .map(value, ctx) and
@@ -200,7 +204,24 @@ type SinkOperator struct {
 	Route  RouteFn
 	// PartitionValueFn is a partition function answering any value (String() of it).
 	PartitionValueFn func(value interface{}) (interface{}, error)
+	// Link is whether an output that is its input message unchanged is
+	// written as a link to it (a cluster at catalogue version 8): nil or true,
+	// the default; false pushes every output. Not part of Config: it changes
+	// how an output is written, not what the chain computes.
+	Link *bool
 }
+
+// CycleLink is a /streams/v1/cycle push item's link: the input message, named
+// by its offset and transaction id in the cycle's own partition. The sink then
+// holds that message itself (same id and transactionId).
+type CycleLink struct {
+	Offset        int64  `json:"offset"`
+	TransactionID string `json:"transactionId"`
+}
+
+// Linking reports whether the sink writes an unchanged input as a link (Link
+// nil or true).
+func (s SinkOperator) Linking() bool { return s.Link == nil || *s.Link }
 
 // NewSinkOperator builds a sink with an optional partition resolver.
 //
@@ -252,10 +273,18 @@ func (s SinkOperator) ConfigKeys() []string {
 }
 
 // PushItem is the shape of an entry in /streams/v1/cycle.push_items.
+//
+// Link names the input message when the item is that message unchanged (a
+// cluster at catalogue version 8): the sink then holds the message itself.
+// The payload travels beside it all the same. A broker that takes links
+// stores nothing of it; one older than links does not read `link`, and takes a
+// push item without a payload as an empty object -- with the payload it
+// pushes the copy it always did.
 type PushItem struct {
 	Queue     string                 `json:"queue"`
 	Partition string                 `json:"partition,omitempty"`
 	Payload   map[string]interface{} `json:"payload"`
+	Link      *CycleLink             `json:"link,omitempty"`
 }
 
 // SinkEntry represents an emit handed to the sink.
@@ -263,21 +292,30 @@ type SinkEntry struct {
 	Key       string
 	Value     interface{}
 	SourceMsg map[string]interface{}
+	// Source is the input message, when the runner links unchanged inputs and
+	// this entry is one.
+	Source *CycleLink
 }
 
-// BuildPushItems shapes sink entries into push items.
+// BuildPushItems shapes sink entries into push items. An entry with a Source
+// whose value is an object -- a payload the push sends as it is -- is a link,
+// so a link never hands the sink another payload than the push would.
 func (s SinkOperator) BuildPushItems(entries []SinkEntry, sourcePartitionName string) []PushItem {
 	out := make([]PushItem, 0, len(entries))
 	for _, e := range entries {
 		var payload map[string]interface{}
+		var link *CycleLink
 		switch v := e.Value.(type) {
 		case map[string]interface{}:
 			payload = v
+			if v != nil {
+				link = e.Source
+			}
 		default:
 			payload = map[string]interface{}{"value": v}
 		}
 		part := s.resolvePartition(e.Value, sourcePartitionName)
-		out = append(out, PushItem{Queue: s.QueueName, Partition: part, Payload: payload})
+		out = append(out, PushItem{Queue: s.QueueName, Partition: part, Payload: payload, Link: link})
 	}
 	return out
 }
@@ -849,6 +887,9 @@ type ReduceEmit struct {
 	WindowEnd   int64
 	WindowKey   string
 	Value       interface{}
+	// Source is the input message of an emit that is that message (no
+	// window): what a linking sink links to.
+	Source *CycleLink
 }
 
 type ReduceResult struct {

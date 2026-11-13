@@ -1,0 +1,12 @@
+[13:49:14] abplan-homes start: homes1x | push spread
+[13:49:14] == push on homes1x
+h-push-homes1x [13:50:34] 3,000,000: offered 2,999,935 | pushed 2,999,839 | consumed 2,999,249 | shed 0 errors 0 | push p50 7.6 p99 118.8 | e2e p50 17.7 p99 157.7 | cores 15.2 / 7.3 / 5.2 | loader 18.7c  OK 
+h-push-homes1x [13:51:41] 3,250,000: offered 3,249,978 | pushed 3,250,492 | consumed 3,250,644 | shed 0 errors 0 | push p50 11.5 p99 151.6 | e2e p50 30.0 p99 186.4 | cores 16.5 / 8.0 / 5.6 | loader 19.8c  OK 
+h-push-homes1x [13:52:48] 3,500,000: offered 3,500,041 | pushed 3,364,330 | consumed 3,363,102 | shed 1,277,300 errors 0 | push p50 323.6 p99 1245.2 | e2e p50 364.5 p99 1294.3 | cores 17.8 / 10.7 / 5.8 | loader 21.0c  NOT CARRIED 
+h-push-homes1x [13:52:48] stopping at 3500000
+[13:52:53] == spread on homes1x
+h-spread-homes1x [13:54:14] 1,000,000: offered 999,992 | pushed 999,946 | consumed 999,836 | shed 0 errors 0 | push p50 4.2 p99 12.4 | e2e p50 11.0 p99 29.2 | cores 11.1 / 5.2 / 4.0 | loader 10.0c  OK 
+h-spread-homes1x [13:55:21] 1,500,000: offered 1,500,001 | pushed 1,499,988 | consumed 1,499,790 | shed 0 errors 0 | push p50 6.5 p99 70.7 | e2e p50 19.7 p99 131.1 | cores 13.6 / 6.6 / 4.9 | loader 14.3c  OK 
+h-spread-homes1x [13:56:28] 2,000,000: offered 1,999,929 | pushed 1,875,253 | consumed 1,873,979 | shed 760,300 errors 0 | push p50 376.8 p99 2261.0 | e2e p50 462.8 p99 2359.3 | cores 17.3 / 7.4 / 4.6 | loader 17.9c  NOT CARRIED 
+h-spread-homes1x [13:56:28] stopping at 2000000
+[13:56:31] ABPLAN_HOMES_DONE homes1x

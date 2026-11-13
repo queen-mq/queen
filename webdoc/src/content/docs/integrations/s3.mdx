@@ -28,6 +28,9 @@ sourceOfTruth:
 # reformatted, line wrapping only. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-11 (scoped keys and client tokens): proxy cp.rs the scoped-key
 # policy, rotation and block-list calls (9c7c0d515). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
+# states changes.
 ---
 
 The broker can copy its queues into an S3 bucket, as JSONL or Parquet files in folders that DuckDB, Spark or ClickHouse read directly. The sink runs inside the broker, on every node of a cluster, and it is exactly once: each record lands in one file, and a crash or a retried upload rewrites the same bytes under the same name instead of adding a copy.

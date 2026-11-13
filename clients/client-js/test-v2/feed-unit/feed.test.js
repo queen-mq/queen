@@ -225,8 +225,9 @@ describe('Stream.fromFeed runner', () => {
         broker.kvPut(POSITION_NAMESPACE, 'race', { position: winner, queryId: 'race' })
       }
     })
+    // Pushes: a copy chain links its messages (feedLinks.test.js has the link's duplicate).
     const runner = await Stream.fromFeed(queen, { from: 'earliest' })
-      .to(queen.queue('copy')).run({ queryId: 'race', ...fast({ exclusive: false }) })
+      .to(queen.queue('copy'), { link: false }).run({ queryId: 'race', ...fast({ exclusive: false }) })
     await until(() => runner.metrics().conflicts >= 1)
     b.push({ queue: 'orders', partition: 'c1', data: { n: 2 } })
     await until(() => b.messages('copy').length >= 1)

@@ -1,0 +1,30 @@
+[14:06:16] abplan-homes start: homes2 | t10kv push spread t10 t100 t10w
+[14:06:16] == t10kv on homes2
+h-t10kv-homes2 [14:07:30]   200,000: offered 199,999 | workers 19,996 txn/s = 199,955 msg/s | read 199,938 | shed 0 errors 0 aborts 0 | commit p50 4.5 p99 8.2 | e2e p50 53 p99 108 | feed push p50 3.8 p99 6.6 | cores 12.6 / 6.9 / 5.2 | loaders 9.2c  OK 
+h-t10kv-homes2 [14:08:37]   240,000: offered 239,993 | workers 20,046 txn/s = 200,459 msg/s | read 200,431 | shed 0 errors 0 aborts 0 | commit p50 5.1 p99 9.2 | e2e p50 3146 p99 7012 | feed push p50 4.0 p99 7.2 | cores 13.0 / 7.2 / 5.3 | loaders 9.4c  NOT CARRIED 
+h-t10kv-homes2 [14:08:37] stopping at 240000
+[14:08:39] == push on homes2
+h-push-homes2 [14:09:59] 3,000,000: offered 2,999,955 | pushed 2,999,895 | consumed 2,999,419 | shed 0 errors 0 | push p50 8.0 p99 135.2 | e2e p50 19.2 p99 172.0 | cores 15.9 / 7.8 / 5.5 | loader 18.7c  OK 
+h-push-homes2 [14:11:06] 3,250,000: offered 3,249,897 | pushed 3,249,957 | consumed 3,248,521 | shed 0 errors 0 | push p50 13.7 p99 163.8 | e2e p50 37.4 p99 206.8 | cores 17.1 / 8.5 / 5.9 | loader 19.8c  OK 
+h-push-homes2 [14:12:13] 3,500,000: offered 3,499,836 | pushed 3,284,098 | consumed 3,283,172 | shed 3,501,800 errors 0 | push p50 421.9 p99 1310.7 | e2e p50 458.8 p99 1359.9 | cores 17.9 / 10.8 / 6.1 | loader 20.8c  NOT CARRIED 
+h-push-homes2 [14:12:13] stopping at 3500000
+[14:12:16] == spread on homes2
+h-spread-homes2 [14:13:37] 1,000,000: offered 999,977 | pushed 999,967 | consumed 999,857 | shed 0 errors 0 | push p50 4.2 p99 11.9 | e2e p50 11.1 p99 28.9 | cores 11.5 / 5.5 / 4.2 | loader 9.9c  OK 
+h-spread-homes2 [14:14:44] 1,500,000: offered 1,500,008 | pushed 1,499,988 | consumed 1,499,650 | shed 0 errors 0 | push p50 6.3 p99 63.5 | e2e p50 19.7 p99 127.0 | cores 14.0 / 6.8 / 5.0 | loader 14.2c  OK 
+h-spread-homes2 [14:15:51] 2,000,000: offered 1,999,966 | pushed 1,850,529 | consumed 1,847,910 | shed 1,510,200 errors 0 | push p50 372.7 p99 2326.5 | e2e p50 466.9 p99 2392.1 | cores 17.4 / 7.5 / 4.9 | loader 17.7c  NOT CARRIED 
+h-spread-homes2 [14:15:51] stopping at 2000000
+[14:15:54] == t10 on homes2
+h-t10-homes2 [14:17:07]   240,000: offered 239,987 | workers 23,996 txn/s = 239,962 msg/s | read 239,966 | shed 0 errors 0 aborts 0 | commit p50 2.8 p99 5.3 | e2e p50 39 p99 77 | feed push p50 3.2 p99 5.6 | cores 12.2 / 6.6 / 5.0 | loaders 10.6c  OK 
+h-t10-homes2 [14:18:11]   280,000: offered 279,996 | workers 25,451 txn/s = 254,509 msg/s | read 254,516 | shed 0 errors 0 aborts 0 | commit p50 3.4 p99 6.2 | e2e p50 1458 p99 3506 | feed push p50 3.6 p99 6.4 | cores 12.7 / 7.0 / 5.3 | loaders 11.3c  NOT CARRIED 
+h-t10-homes2 [14:18:11] stopping at 280000
+[14:18:14] == t100 on homes2
+h-t100-homes2 [14:19:27]   750,000: offered 749,960 | workers 7,500 txn/s = 750,006 msg/s | read 750,059 | shed 0 errors 0 aborts 0 | commit p50 3.7 p99 6.6 | e2e p50 16 p99 24 | feed push p50 3.8 p99 6.6 | cores 9.9 / 5.6 / 4.0 | loaders 10.2c  OK 
+h-t100-homes2 [14:20:28]   900,000: offered 899,971 | workers 9,000 txn/s = 899,975 msg/s | read 899,771 | shed 0 errors 0 aborts 0 | commit p50 4.7 p99 8.8 | e2e p50 20 p99 31 | feed push p50 4.6 p99 8.4 | cores 11.6 / 6.5 / 4.7 | loaders 12.1c  OK 
+h-t100-homes2 [14:21:29] 1,050,000: offered 1,050,009 | workers 10,500 txn/s = 1,049,999 msg/s | read 1,050,243 | shed 0 errors 0 aborts 0 | commit p50 6.0 p99 11.1 | e2e p50 27 p99 42 | feed push p50 5.6 p99 10.6 | cores 13.3 / 7.5 / 5.2 | loaders 13.9c  OK 
+h-t100-homes2 [14:22:30] 1,200,000: offered 1,200,036 | workers 11,396 txn/s = 1,139,550 msg/s | read 1,139,410 | shed 0 errors 0 aborts 0 | commit p50 7.6 p99 13.7 | e2e p50 713 p99 1917 | feed push p50 7.0 p99 13.4 | cores 14.7 / 8.0 / 5.7 | loaders 15.4c  NOT CARRIED 
+h-t100-homes2 [14:22:30] stopping at 1200000
+[14:22:34] == t10w on homes2
+h-t10w-homes2 [14:23:40]   280,000: offered 279,998 | workers 28,000 txn/s = 280,004 msg/s | read 279,966 | shed 0 errors 0 aborts 0 | commit p50 4.4 p99 7.4 | e2e p50 59 p99 115 | feed push p50 4.2 p99 7.2 | cores 13.2 / 7.2 / 5.4 | loaders 12.0c  OK 
+h-t10w-homes2 [14:24:45]   320,000: offered 319,981 | workers 30,376 txn/s = 303,765 msg/s | read 303,735 | shed 0 errors 0 aborts 0 | commit p50 6.3 p99 10.6 | e2e p50 852 p99 2294 | feed push p50 5.4 p99 9.7 | cores 13.6 / 7.9 / 5.8 | loaders 12.7c  NOT CARRIED 
+h-t10w-homes2 [14:24:45] stopping at 320000
+[14:24:49] ABPLAN_HOMES_DONE homes2

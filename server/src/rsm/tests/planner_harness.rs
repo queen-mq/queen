@@ -80,6 +80,7 @@ pub fn qcfg() -> QueueConfig {
         retention_sink_hold: String::new(),
         retention_sink_hold_max_seconds: 0,
         created_at_us: BASE_US,
+        route: None,
     }
 }
 
@@ -167,6 +168,7 @@ pub fn push_cfg(id: u64, queue: &str, partition: &str, txns: &[&str], cfg: Queue
         partition: partition.to_string(),
         items: txns.iter().map(|t| item(t)).collect(),
         create_cfg: cfg,
+        links: Default::default(),
     })
 }
 

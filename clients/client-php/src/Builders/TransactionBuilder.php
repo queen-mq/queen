@@ -4,6 +4,7 @@ namespace Queen\Builders;
 
 use Queen\Http\HttpClient;
 use Queen\Lock;
+use Queen\Support\Headers;
 use Queen\Support\KvOp;
 use Queen\Support\TimerOp;
 use Queen\Support\Uuid;
@@ -186,8 +187,8 @@ class TransactionBuilder
     /**
      * The lock whose guard is the precondition a rolled-back bundle names, if
      * it is one of this bundle's. `failedIndex` is in the FLAT space of
-     * `results`: every pushed item and every ack first, then the `kv` rider,
-     * whose first operations are the guards.
+     * `results`: every pushed item, every link and every ack first, then the
+     * `kv` rider, whose first operations are the guards.
      */
     private function failedGuard(array $result): ?Lock
     {
@@ -250,9 +251,85 @@ class TransactionBuilder
                     $result['traceId'] = $item['traceId'];
                 }
 
+                // As in QueueBuilder::push: beside the payload, and left out
+                // when there are none. An item that is its own payload keeps
+                // every key in it.
+                $headers = isset($item['data']) || isset($item['payload'])
+                    ? Headers::wire($item['headers'] ?? null)
+                    : null;
+                if ($headers !== null) {
+                    $result['headers'] = $headers;
+                }
+
                 return $result;
             }, $items),
         ];
+    }
+
+    /**
+     * @internal Used by TransactionQueueBuilder: one `link` operation per
+     *           message, so each is one result of the bundle.
+     */
+    public function addLinkOperation(string $queueName, ?string $partition, array|object $messages, array $headers): void
+    {
+        $msgs = is_array($messages) && (isset($messages[0]) || empty($messages)) ? $messages : [$messages];
+        $wireHeaders = Headers::wire($headers);
+
+        foreach ($msgs as $msg) {
+            $operation = ['type' => 'link', 'queue' => $queueName];
+            if ($partition !== null) {
+                $operation['partition'] = $partition;
+            }
+            $operation['from'] = self::linkSource((array) $msg);
+            if ($wireHeaders !== null) {
+                $operation['headers'] = $wireHeaders;
+            }
+
+            $this->operations[] = $operation;
+        }
+    }
+
+    /**
+     * The message a link stands for, named as a pop returned it: its
+     * partitionId, offset and transactionId, and the consumerGroup that
+     * popped it, which a scoped credential must be allowed to consume the
+     * source with. A feed entry's partitionId is a UUID, so a message without
+     * a numeric one is named by its queue and partition instead.
+     */
+    private static function linkSource(array $msg): array
+    {
+        $transactionId = $msg['transactionId'] ?? null;
+        $offset = $msg['offset'] ?? null;
+        if (is_string($offset) && preg_match('/^\d+$/D', $offset) === 1) {
+            $offset = (int) $offset;
+        }
+        if (!is_string($transactionId) || $transactionId === '' || !is_int($offset) || $offset < 0) {
+            throw new \InvalidArgumentException('link: a message needs its transactionId and offset, as a pop returns them');
+        }
+
+        $partitionId = $msg['partitionId'] ?? null;
+        if (is_int($partitionId)) {
+            $partitionId = (string) $partitionId;
+        }
+        if (is_string($partitionId) && preg_match('/^\d+$/D', $partitionId) === 1) {
+            $from = ['partitionId' => $partitionId];
+        } elseif (is_string($msg['queue'] ?? null) && $msg['queue'] !== ''
+            && is_string($msg['partition'] ?? null) && $msg['partition'] !== '') {
+            $from = ['queue' => $msg['queue'], 'partition' => $msg['partition']];
+        } else {
+            throw new \InvalidArgumentException(
+                'link: a message needs its partitionId, as a pop returns it, or its queue and partition'
+            );
+        }
+        $from['offset'] = $offset;
+        $from['transactionId'] = $transactionId;
+
+        $group = $msg['consumerGroup'] ?? null;
+        if (is_string($group) && $group !== '') {
+            $from['consumerGroup'] = $group;
+        }
+
+        return $from;
     }
 
     /**
@@ -458,6 +535,35 @@ class TransactionQueueBuilder
     public function push(array $items): TransactionBuilder
     {
         $this->parent->addPushOperation($this->queueName, $this->partition, $items);
+        return $this->parent;
+    }
+
+    /**
+     * Forward messages this worker holds to this queue without sending their
+     * payloads again: each becomes a message here with the same id and
+     * transactionId, committed with the rest of the bundle or not at all.
+     *
+     *     $queen->transaction()
+     *         ->ack($message, 'completed', ['consumerGroup' => 'review'])
+     *         ->queue('manual-review')->partition($message['partition'])
+     *         ->link([$message], ['review-reason' => 'amount'])
+     *         ->commit();
+     *
+     * $messages is one message or a list, as a pop returned them (their
+     * partitionId, offset and transactionId name them). $headers are this
+     * link's own, over the message's: a reader gets the message's headers
+     * with these written over them. A second link of one message into one
+     * partition is a duplicate inside its dedup window, so a retried bundle
+     * links once.
+     *
+     * commit() throws when a link cannot be made: the message is gone
+     * (source_gone), the offset holds another message (source_mismatch), the
+     * target is a reading queue (reading_queue), or the cluster is older than
+     * catalogue version 8 (cluster_version).
+     */
+    public function link(array|object $messages, array $headers = []): TransactionBuilder
+    {
+        $this->parent->addLinkOperation($this->queueName, $this->partition, $messages, $headers);
         return $this->parent;
     }
 }

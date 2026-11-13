@@ -190,7 +190,8 @@ class Stream:
             .where("partition", "prefix", "booking-")
 
         Fields: queue, partition, transactionId, offset, position, data,
-        data.<path>. Ops: = != < <= > >= in exists prefix !prefix.
+        data.<path>, headers.<name>. Ops: = != < <= > >= in exists prefix
+        !prefix.
         """
         from ..feed.feed import condition_holds, where_condition
 
@@ -319,7 +320,7 @@ class Stream:
 
     # ---------------------------------------------------------------------- Sink
 
-    def to(self, target: Any, partition: Optional[Any] = None) -> "Stream":
+    def to(self, target: Any, partition: Optional[Any] = None, *, link: bool = True) -> "Stream":
         """
         Sink to Queen queues. The cycle commits state + push + ack atomically::
 
@@ -330,8 +331,22 @@ class Stream:
         A function gets ``(value, msg)`` and answers a queue (builder or name),
         ``{"queue", "partition"}``, a list of those, or None for nowhere.
         ``partition``: a string, or a function of the value.
+
+        ``link``: when what reaches the sink is the source message unchanged --
+        only where/filter, key_by or a gate before .to() -- each record is a
+        link to it (PLAN_ROUTING.md §6), not a copy: the same message, id and
+        transactionId, without its payload stored again. A target partition
+        that holds the message already takes nothing (a no-op). In the feed a
+        link reads as a message of its target queue, with the source's id,
+        transactionId and payload, so another feed stream reading that queue
+        sees it. On a feed source a record links only into a queue the stream
+        does not read itself (one its queues filter does not match; with no
+        filter it reads every queue): there it pushes a copy, which its reads
+        leave out, where a link would come back to it. A broker that refuses
+        links (one without them, a cluster before catalogue version 8) gets
+        the records pushed, as before. ``link=False`` always pushes copies.
         """
-        return self._extend(SinkOperator(target, partition=partition))
+        return self._extend(SinkOperator(target, partition=partition, link=link))
 
     def foreach(self, fn: Callable[..., Any]) -> "Stream":
         return self._extend(ForeachOperator(fn))

@@ -51,6 +51,10 @@ verifiedBy:
 # carry each request's client scope (None without a client token) and refuse a name outside it 403
 # scope_denied before any command is built (server/src/scope.rs, b24b53599). Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. real.rs takes a link
+# operation and headers on push operations; txn.rs commits a link its partition already holds as a
+# no-op (`"duplicate": true`) where a pushed duplicate rolls back. The page names all three.
 # sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
 # rewords the 504 a membership change answers; handlers/raft.rs changes a comment on ?timeoutMs.
 # Nothing this page states changes.
@@ -122,3 +126,6 @@ The JavaScript client returns a lost condition from `commit()` and throws for th
 - [KV, locks and timers](/writing-applications/kv-locks-timers/): the parts a transaction writes.
 - [Errors](/reference/errors/): every reason and status code.
 
+## `link`: forward a message without its payload
+
+A transaction can put the message it holds into another queue, with its ack: `{"type": "link", "queue", "partition", "from": {"partitionId", "offset", "transactionId"}, "headers"}`. The target gets the same message and id; the payload is not sent again. A link the target partition already holds is not a `duplicate` rollback: the transaction commits and the link's result says `"duplicate": true`. A push operation takes `headers` too. See [Routing](/writing-applications/routing/).

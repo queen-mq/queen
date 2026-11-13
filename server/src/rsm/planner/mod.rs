@@ -70,8 +70,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 
-use smallvec::SmallVec;
-
 use crate::rsm::fasthash::FxBuild;
 use std::rc::Rc;
 
@@ -84,6 +82,8 @@ use crate::rsm::state::Committed;
 use crate::rsm::store::rows::GroupRow;
 use crate::rsm::store::{keys, Keyspace, Reads, StoreError, TypedReads};
 
+/// Homes: the shard of a key's in-flight state, by its name.
+pub(crate) mod homes;
 /// KEEP_OVERLAY: the overlay kept between cycles on the planner thread.
 pub(crate) mod kept;
 /// The store keys an effect derives, measured before it is logged.
@@ -92,6 +92,8 @@ pub(crate) mod keycheck;
 /// `required`, and the leader's expiry sweep. WP-2.2.
 pub mod kv;
 pub mod push;
+/// Routing: links into the readers of a queue (PLAN_ROUTING.md).
+pub mod route;
 /// Timers: schedule/cancel, the fire step, backoff and the `__timer__` DLQ.
 /// WP-2.3.
 pub mod timers;
@@ -348,7 +350,39 @@ pub struct PushCommand {
     /// The config an implicit queue creation uses (first contact). Ignored
     /// when the queue already exists. `id` is the receiver-minted queue uuid.
     pub create_cfg: QueueConfig,
+    /// Whether an item is a link frame, when the command's maker knows: a
+    /// push that carries links plans alone, and finding out reads every frame
+    /// on the cycle thread. Never on the wire: a decoded command does not know.
+    #[serde(skip)]
+    pub links: Links,
 }
+
+/// [`PushCommand::links`]: known, or not (the default), and then the planner
+/// reads the frames. It takes no part in a command's equality.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Links(Option<bool>);
+
+impl Links {
+    /// Known from the items, by the thread that just built their frames.
+    pub fn of(items: &[PushItem]) -> Self {
+        Links(Some(items.iter().any(|it| route::is_link_frame(&it.frame))))
+    }
+
+    /// Whether an item of `items` is a link frame: read from them only when
+    /// not known.
+    pub fn any(self, items: &[PushItem]) -> bool {
+        self.0
+            .unwrap_or_else(|| items.iter().any(|it| route::is_link_frame(&it.frame)))
+    }
+}
+
+impl PartialEq for Links {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Links {}
 
 /// The subscription intent a pop carries for a group with no stored policy:
 /// the pop-carried `sub_mode`/`sub_from` fall-back.
@@ -433,6 +467,49 @@ pub struct DlqSnapshot {
     pub txn: String,
     #[serde(with = "serde_bytes")]
     pub payload: Vec<u8>,
+    /// The message's headers block (`crate::frames`), empty for none. Not in
+    /// the serde shape: an older leader decodes a forwarded ack by position
+    /// (postcard), so a forwarded command carries the blocks after itself
+    /// (`facade::remote`), as only a cluster at catalogue version 8 has any.
+    #[serde(skip)]
+    pub headers: Vec<u8>,
+}
+
+impl crate::rsm::batcher::Command {
+    /// Every DLQ snapshot the command carries, in one fixed order: the order
+    /// a forwarded command's headers blocks travel in (`facade::remote`).
+    pub fn dlq_snapshots_mut(&mut self) -> Vec<&mut DlqSnapshot> {
+        use crate::rsm::batcher::Command;
+        fn of(t: &mut [AckTarget]) -> Vec<&mut DlqSnapshot> {
+            t.iter_mut()
+                .flat_map(|t| t.items.iter_mut())
+                .filter_map(|i| i.snapshot.as_mut())
+                .collect()
+        }
+        match self {
+            Command::Ack(c) => of(&mut c.targets),
+            Command::Transaction(c) => of(&mut c.acks),
+            Command::DlqHead(c) => vec![&mut c.snapshot],
+            _ => Vec::new(),
+        }
+    }
+
+    /// [`Self::dlq_snapshots_mut`], to read.
+    pub fn dlq_snapshots(&self) -> Vec<&DlqSnapshot> {
+        use crate::rsm::batcher::Command;
+        fn of(t: &[AckTarget]) -> Vec<&DlqSnapshot> {
+            t.iter()
+                .flat_map(|t| t.items.iter())
+                .filter_map(|i| i.snapshot.as_ref())
+                .collect()
+        }
+        match self {
+            Command::Ack(c) => of(&c.targets),
+            Command::Transaction(c) => of(&c.acks),
+            Command::DlqHead(c) => vec![&c.snapshot],
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// One item of a hash-resolved ack.
@@ -559,9 +636,11 @@ struct Tagged<V> {
 }
 
 /// One `Append` the overlay remembers: its offset range, its stamp, and the
-/// per-frame hashes in frame order (for the delivered set and the dedup probe).
+/// per-frame hashes in frame order: the dedup probe scans them for a message
+/// still in flight ([`Planner::in_flight_min`]), and a seed of the dedup front
+/// reads them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct OverlayAppend {
+pub(crate) struct OverlayAppend {
     base: u64,
     end: u64,
     created_at_us: i64,
@@ -572,7 +651,7 @@ struct OverlayAppend {
 
 /// A partition as the overlay knows it, relative to committed state.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct OverlayPart {
+pub(crate) struct OverlayPart {
     /// `Some` when a `PartitionCreate` for this pid is in the overlay: committed
     /// state has no row for it, so the merged view is built from this. It MUST
     /// go when the create lands (KEEP_OVERLAY): the flag is not idempotent.
@@ -627,13 +706,13 @@ pub struct Overlay {
     queues: HashMap<(String, String), Tagged<Option<QueueConfig>>, FxBuild>,
     groups: HashMap<(String, String, String), Tagged<Option<GroupRow>>, FxBuild>,
     pids_by_key: HashMap<(String, String, String), Tagged<Pid>, FxBuild>,
-    parts: HashMap<Pid, OverlayPart, FxBuild>,
-    /// `(pid, hash) → [(offset, created_at)]`: the occurrences an overlay
-    /// `Append` added, merged with committed `dedup` on a probe or a resolve.
-    /// One key per in-flight message, so the value keeps its (almost always
-    /// single) occurrence inline. No tag: an occurrence's offset is unique in
-    /// its partition, so a landed `Append` removes exactly its own.
-    dedup: HashMap<(Pid, [u8; 16]), SmallVec<[DedupOccurrence; 1]>, FxBuild>,
+    /// The partitions in flight, with their appends. An append keeps its
+    /// frames' hashes, and that is all the dedup state in flight there is: no
+    /// row per message. The dedup front answers "new" for a message in flight
+    /// too (a plan inserts its hashes, a seed reads these appends), and any
+    /// other answer scans the partition's appends here
+    /// ([`Planner::dedup_probe_many`]).
+    parts: Shards<Pid, OverlayPart>,
     /// The outcome of every command in flight, by request id — kept by
     /// reference to its entry (B27: a push's outcome carries a verdict per
     /// message, and was cloned for every command of every entry).
@@ -679,6 +758,278 @@ pub struct Overlay {
     /// Every effect ever folded into this overlay, counted (KEEP_OVERLAY): the
     /// batcher checks a cycle folded exactly the effects its entry carries.
     folds: u64,
+    /// A group's overlay (the footprint scheduler, `rsm/scheduler.rs`): the
+    /// cycle's kept overlay, frozen while the groups plan, read under this
+    /// one's own maps. Its own folds stay here; its masks (a delete, a purge)
+    /// hide what the base holds for the keys they cover. `None` for every
+    /// other overlay.
+    base: Option<std::sync::Arc<Overlay>>,
+    /// The shards of the partition state this overlay's own folds wrote, a bit
+    /// each, [`NEW_SHARD`]'s too: a group's merge moves only those
+    /// ([`Overlay::take_written_shards`]).
+    shards_written: u128,
+    /// The shards a group's overlay may read and fold (the footprint
+    /// scheduler), `None` for all of them. A pid of any other shard marks the
+    /// overlay [`Overlay::strayed`], and its run is planned again on one thread.
+    allowed: Option<ShardMask>,
+    strayed: Stray,
+    /// It owns the shards `allowed` names for a run ([`Overlay::own`]): they
+    /// go back to the kept overlay ([`Overlay::give_back`]).
+    owner: bool,
+    /// What undoes the folds into the partition state, innermost last: a
+    /// transaction's ([`Overlay::save`]) and, under it, a planning thread's
+    /// cycle in the shards it owns ([`Overlay::own`]). Empty when nothing may
+    /// need undoing.
+    frames: Vec<Undo>,
+}
+
+/// [`Overlay::strayed`], set through `&self`: the frozen overlay a group's
+/// overlay reads through is shared by every planning thread.
+#[derive(Debug, Default)]
+struct Stray(std::sync::atomic::AtomicBool);
+
+impl Stray {
+    fn set(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn get(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Clone for Stray {
+    fn clone(&self) -> Self {
+        Stray(std::sync::atomic::AtomicBool::new(self.get()))
+    }
+}
+
+/// What undoes a run of folds into the partition state: each partition as the
+/// first fold of the run found it. Its appends since carry their frames'
+/// hashes, so their occurrences go with them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Undo {
+    seen: std::collections::HashSet<Pid, FxBuild>,
+    parts: Vec<PartWas>,
+}
+
+/// A partition as a run's first fold found it ([`Undo`]).
+#[derive(Clone, Debug)]
+struct PartWas {
+    pid: Pid,
+    appends: usize,
+    created: Option<Tagged<CreatedPart>>,
+    watermark: Option<Tagged<(u64, u64, Option<u64>)>>,
+}
+
+/// What a transaction may change in an overlay besides its partition state,
+/// kept by [`Overlay::save`]: the small maps and the counters. The partition
+/// state is not copied: the savepoint's undo frame records each partition as
+/// the transaction first finds it.
+pub(crate) struct Saved {
+    next_pid: u64,
+    next_kv_version: u64,
+    max_now_us: i64,
+    max_created_at_us: i64,
+    folds: u64,
+    shards_written: u128,
+    queues: HashMap<(String, String), Tagged<Option<QueueConfig>>, FxBuild>,
+    groups: HashMap<(String, String, String), Tagged<Option<GroupRow>>, FxBuild>,
+    pids_by_key: HashMap<(String, String, String), Tagged<Pid>, FxBuild>,
+    kv: HashMap<(String, String, String), Tagged<Option<crate::rsm::store::rows::KvRow>>, FxBuild>,
+    timers: HashMap<(String, String, String), TimerSlot, FxBuild>,
+    gone: HashMap<Pid, Tagged<()>, FxBuild>,
+    dropped_queues: HashMap<(String, String), Tagged<()>, FxBuild>,
+    purged_tenants: HashMap<String, Tagged<()>, FxBuild>,
+}
+
+/// A savepoint that was kept ([`Overlay::park`]), with what takes its folds
+/// back out later.
+pub(crate) struct Parked {
+    saved: Saved,
+    frame: Undo,
+}
+
+/// The top bit of a placeholder: a partition id or a KV version a group
+/// planned (the footprint scheduler), numbered in entry order once every
+/// group is done. No real id or version reaches it.
+pub const PLACEHOLDER: u64 = 1 << 63;
+
+/// Whether `n` is a placeholder ([`PLACEHOLDER`]).
+pub fn is_placeholder(n: u64) -> bool {
+    n & PLACEHOLDER != 0
+}
+
+/// The low 32 bits of a placeholder: its ordinal in its group. The bits
+/// between it and [`PLACEHOLDER`] name the group.
+pub const PLACEHOLDER_ORDINAL: u64 = (1 << 32) - 1;
+
+/// A placeholder's group and its ordinal there.
+pub fn placeholder_parts(n: u64) -> (u32, u64) {
+    (((n & !PLACEHOLDER) >> 32) as u32, n & PLACEHOLDER_ORDINAL)
+}
+
+/// How many shards an overlay's partition state is split into, by pid. The
+/// footprint scheduler gives each planning thread whole shards for a run, to
+/// plan its groups in place, and a cycle's landing works shard by shard on the
+/// planning threads too.
+pub(crate) const PART_SHARDS: usize = 64;
+
+/// The map after the shards: the partitions a group created this cycle, under
+/// their placeholder, until the entry numbers them. A group's own, and empty in
+/// a kept overlay.
+pub(crate) const NEW_SHARD: usize = PART_SHARDS;
+
+/// A set of shards ([`PART_SHARDS`]), a bit each.
+pub(crate) type ShardMask = u64;
+
+const _: () = assert!(PART_SHARDS == ShardMask::BITS as usize);
+
+/// The shards of planning thread `home`, of `threads`: every shard whose home
+/// it is ([`homes::home_of_shard`]).
+pub(crate) fn shards_of_home(home: usize, threads: usize) -> ShardMask {
+    (0..PART_SHARDS)
+        .filter(|s| homes::home_of_shard(*s, threads) == home)
+        .fold(0, |m, s| m | (1 << s))
+}
+
+/// A key of the partition state: its shard is its pid's.
+pub(crate) trait PidKey {
+    fn pid(&self) -> Pid;
+}
+
+impl PidKey for Pid {
+    fn pid(&self) -> Pid {
+        *self
+    }
+}
+
+pub(crate) type PartsMap = HashMap<Pid, OverlayPart, FxBuild>;
+
+/// A map split into [`PART_SHARDS`] maps by pid and [`NEW_SHARD`]'s, inline,
+/// so the empty overlay of a group costs no allocation. A key always lives in
+/// its pid's shard, so two of them compare shard by shard.
+#[derive(Clone, Debug)]
+pub(crate) struct Shards<K, V> {
+    maps: [HashMap<K, V, FxBuild>; PART_SHARDS + 1],
+    /// Where a pid's rows live ([`homes::Homes`]): its name's shard. `None`
+    /// (the single planner, a test's overlay): `pid % PART_SHARDS`.
+    homes: Option<std::sync::Arc<homes::Homes>>,
+}
+
+impl<K, V> Default for Shards<K, V> {
+    fn default() -> Self {
+        Shards {
+            maps: std::array::from_fn(|_| HashMap::default()),
+            homes: None,
+        }
+    }
+}
+
+impl<K, V> Shards<K, V> {
+    /// The shard of `pid`'s rows: [`NEW_SHARD`] for a placeholder (a partition
+    /// a planning thread created this cycle, not numbered yet).
+    pub(crate) fn shard_of(&self, pid: Pid) -> usize {
+        if is_placeholder(pid) {
+            return NEW_SHARD;
+        }
+        match &self.homes {
+            Some(h) => h.shard_of(pid),
+            None => (pid % PART_SHARDS as u64) as usize,
+        }
+    }
+}
+
+impl<K: PidKey + Eq + std::hash::Hash, V> Shards<K, V> {
+    pub(crate) fn get(&self, k: &K) -> Option<&V> {
+        self.maps[self.shard_of(k.pid())].get(k)
+    }
+
+    pub(crate) fn get_mut(&mut self, k: &K) -> Option<&mut V> {
+        self.maps[self.shard_of(k.pid())].get_mut(k)
+    }
+
+    pub(crate) fn contains_key(&self, k: &K) -> bool {
+        self.maps[self.shard_of(k.pid())].contains_key(k)
+    }
+
+    pub(crate) fn insert(&mut self, k: K, v: V) -> Option<V> {
+        self.maps[self.shard_of(k.pid())].insert(k, v)
+    }
+
+    pub(crate) fn remove(&mut self, k: &K) -> Option<V> {
+        self.maps[self.shard_of(k.pid())].remove(k)
+    }
+
+    pub(crate) fn entry(&mut self, k: K) -> std::collections::hash_map::Entry<'_, K, V> {
+        self.maps[self.shard_of(k.pid())].entry(k)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.maps.iter().flat_map(|m| m.iter())
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.maps.iter().map(HashMap::len).sum()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.maps.iter().all(HashMap::is_empty)
+    }
+
+    pub(crate) fn retain(&mut self, mut f: impl FnMut(&K, &mut V) -> bool) {
+        for m in &mut self.maps {
+            m.retain(&mut f);
+        }
+    }
+
+    /// Shard `s` itself.
+    pub(crate) fn shard(&self, s: usize) -> &HashMap<K, V, FxBuild> {
+        &self.maps[s]
+    }
+
+    pub(crate) fn shard_mut(&mut self, s: usize) -> &mut HashMap<K, V, FxBuild> {
+        &mut self.maps[s]
+    }
+}
+
+/// One shard of an overlay's partition state, moved out for a planning thread
+/// to work on ([`Overlay::take_shards`]).
+#[derive(Default)]
+pub(crate) struct PartShard {
+    pub(crate) parts: PartsMap,
+}
+
+impl PartShard {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+    }
+}
+
+/// What a shard's merge could not keep: the rows of partitions created this
+/// cycle, still under a placeholder whose shard is not their real pid's. The
+/// cycle thread files them once they are numbered ([`Overlay::file_spill`]).
+#[derive(Default)]
+pub(crate) struct Spill {
+    parts: Vec<(Pid, OverlayPart)>,
+}
+
+fn merge_part(mine: &mut OverlayPart, part: OverlayPart) {
+    if part.created.is_some() {
+        mine.created = part.created;
+    }
+    if part.watermark.is_some() {
+        mine.watermark = part.watermark;
+    }
+    mine.appends.extend(part.appends);
+}
+
+/// A two-level lookup's answer: the key's value in a layer, a mask in a
+/// layer that hides it (a delete, a purge), or nothing in any layer.
+enum Layered<T> {
+    Found(T),
+    Masked,
+    Absent,
 }
 
 /// One timer key's overlay state and the tags that decide what a landing does
@@ -712,9 +1063,6 @@ enum TimerOverlay {
         updated_at_us: i64,
     },
 }
-
-/// One overlay dedup occurrence: `(offset, created_at_us)`.
-type DedupOccurrence = (u64, i64);
 
 /// B27: a command in flight's outcome, by reference to the entry that carries
 /// it (compared and printed as the outcome).
@@ -779,8 +1127,7 @@ impl Overlay {
             queues: HashMap::default(),
             groups: HashMap::default(),
             pids_by_key: HashMap::default(),
-            parts: HashMap::default(),
-            dedup: HashMap::default(),
+            parts: Shards::default(),
             request_ids: HashMap::default(),
             kv: HashMap::default(),
             timers: HashMap::default(),
@@ -791,7 +1138,576 @@ impl Overlay {
             record_ids: true,
             tag: 0,
             folds: 0,
+            base: None,
+            shards_written: 0,
+            allowed: None,
+            strayed: Stray::default(),
+            owner: false,
+            frames: Vec::new(),
         }
+    }
+
+    /// Give this overlay its homes ([`homes::Homes`]): from now on a pid's rows
+    /// live in its name's shard. Only for an overlay that holds no partition
+    /// state yet: a row already filed under `pid % PART_SHARDS` would be lost.
+    pub(crate) fn set_homes(&mut self, homes: Option<std::sync::Arc<homes::Homes>>) {
+        debug_assert!(
+            self.parts.is_empty(),
+            "an overlay takes its homes before it holds partition state"
+        );
+        self.parts.homes = homes;
+    }
+
+    /// The homes of this overlay, if it has any.
+    pub(crate) fn homes(&self) -> Option<&std::sync::Arc<homes::Homes>> {
+        self.parts.homes.as_ref()
+    }
+
+    /// The shard of `pid`'s partition state in this overlay.
+    pub(crate) fn shard_of(&self, pid: Pid) -> usize {
+        self.parts.shard_of(pid)
+    }
+
+    /// `pid`'s shard as a mask: none for a placeholder's.
+    pub(crate) fn shard_bit(&self, pid: Pid) -> ShardMask {
+        if is_placeholder(pid) {
+            0
+        } else {
+            1 << self.parts.shard_of(pid)
+        }
+    }
+
+    /// `pid` is `tenant`'s partition `partition`: its shard is its name's from
+    /// now on, unless the pid has one already ([`homes::Homes::note_name`]).
+    /// Called wherever the planner learns a pid's name, BEFORE it reads or
+    /// writes that pid's rows here.
+    pub(crate) fn note_home(&self, pid: Pid, tenant: &str, partition: &str) {
+        if is_placeholder(pid) {
+            return;
+        }
+        if let Some(h) = &self.parts.homes {
+            h.note_name(pid, tenant, partition);
+        }
+    }
+
+    /// Group `group`'s overlay over `base`, the cycle's kept overlay
+    /// (the footprint scheduler): empty, reading through to `base`, its new
+    /// partition ids and KV versions placeholders of its own.
+    pub(crate) fn layered(base: std::sync::Arc<Overlay>, group: u32) -> Overlay {
+        let ph = PLACEHOLDER | (u64::from(group) << 32);
+        let mut ov = Overlay::new(ph, ph);
+        ov.cycle_pid_base = base.cycle_pid_base;
+        ov.cycle_kv_base = base.cycle_kv_base;
+        ov.max_now_us = base.max_now_us;
+        ov.max_created_at_us = base.max_created_at_us;
+        ov.record_ids = false;
+        ov.tag = base.tag;
+        ov.set_homes(base.homes().cloned());
+        ov.base = Some(base);
+        ov
+    }
+
+    /// How many partition ids and KV versions a group's overlay drew from its
+    /// placeholder counters ([`Overlay::layered`]).
+    pub(crate) fn drawn(&self) -> (u64, u64) {
+        (
+            self.next_pid & PLACEHOLDER_ORDINAL,
+            self.next_kv_version & PLACEHOLDER_ORDINAL,
+        )
+    }
+
+    /// Raise the running counters to `pid` and `kv`: what an entry handed out
+    /// that no row of this overlay shows (a version a later delete of the same
+    /// key replaced still counts, I18).
+    pub(crate) fn raise_counters(&mut self, pid: u64, kv: u64) {
+        self.next_pid = self.next_pid.max(pid);
+        self.next_kv_version = self.next_kv_version.max(kv);
+    }
+
+    /// Let go of the base a group's overlay reads through, so the cycle can
+    /// take the base back whole once every group is done.
+    pub(crate) fn detach(&mut self) {
+        self.base = None;
+    }
+
+    /// Whether this group's overlay can be [`Overlay::absorb`]ed: it holds no
+    /// sweep (a delete or a purge only a fold applies to the base) and no
+    /// request id.
+    pub(crate) fn absorbable(&self) -> bool {
+        self.dropped_queues.is_empty()
+            && self.purged_tenants.is_empty()
+            && self.gone.is_empty()
+            && self.request_ids.is_empty()
+    }
+
+    /// Move the catalog of a home's overlay into this one, the overlay it was
+    /// layered over (the scheduler's homes): what folding the home's logged
+    /// effects here would leave, without folding them again. The homes of a
+    /// cycle touch disjoint keys, so a key is the home's alone and it wins, as
+    /// the later fold would. The home's partition state is not moved here: it
+    /// was written in place, in the shards the home owned
+    /// ([`Overlay::own`]), and the partitions it created are filed apart
+    /// ([`Overlay::file_new`]). `pid` and `kv` give each placeholder its number
+    /// in the entry; `false` when one has none, and then this overlay is not
+    /// the fold of its entries.
+    pub(crate) fn absorb_catalog(
+        &mut self,
+        g: &mut Overlay,
+        pid: &impl Fn(u64) -> Option<u64>,
+        kv: &impl Fn(u64) -> Option<u64>,
+    ) -> bool {
+        let mut ok = true;
+        let mut real = |n: u64, f: &dyn Fn(u64) -> Option<u64>| -> u64 {
+            if !is_placeholder(n) {
+                return n;
+            }
+            f(n).unwrap_or_else(|| {
+                ok = false;
+                n
+            })
+        };
+        g.base = None;
+        self.queues.extend(g.queues.drain());
+        self.groups.extend(g.groups.drain());
+        for (k, mut v) in g.pids_by_key.drain() {
+            v.v = real(v.v, pid);
+            self.pids_by_key.insert(k, v);
+        }
+        for (k, mut v) in g.kv.drain() {
+            if let Some(row) = &mut v.v {
+                row.version = real(row.version, kv);
+                self.next_kv_version = self.next_kv_version.max(row.version.saturating_add(1));
+            }
+            self.kv.insert(k, v);
+        }
+        self.timers.extend(g.timers.drain());
+        self.max_now_us = self.max_now_us.max(g.max_now_us);
+        self.max_created_at_us = self.max_created_at_us.max(g.max_created_at_us);
+        self.folds += g.folds;
+        g.folds = 0;
+        ok
+    }
+
+    /// File what the shard merges spilled: the rows of partitions created this
+    /// cycle, under their numbers in the entry (`pid`). `false` when one has
+    /// none.
+    pub(crate) fn file_spill(&mut self, spill: Spill, pid: &impl Fn(u64) -> Option<u64>) -> bool {
+        let mut ok = true;
+        for (p, part) in spill.parts {
+            let Some(real) = pid(p) else {
+                ok = false;
+                continue;
+            };
+            if let Some(c) = &part.created {
+                self.next_pid = self.next_pid.max(real.saturating_add(1));
+                // Its name gives its shard, before any row of it is filed.
+                self.note_home(real, &c.v.tenant, &c.v.partition);
+            }
+            merge_part(self.parts.entry(real).or_default(), part);
+        }
+        ok
+    }
+
+    fn take_shard(&mut self, s: usize) -> PartShard {
+        PartShard {
+            parts: std::mem::take(self.parts.shard_mut(s)),
+        }
+    }
+
+    /// Put shard `s` back where it was taken from, which holds nothing.
+    fn put_shard(&mut self, s: usize, sh: PartShard) {
+        debug_assert!(
+            self.parts.shard(s).is_empty(),
+            "a shard comes back over one that holds state"
+        );
+        *self.parts.shard_mut(s) = sh.parts;
+    }
+
+    /// The shards of `mask`, moved out with their numbers: what a planning
+    /// thread owns for a run ([`Overlay::own`]). [`Overlay::put_shards`] puts
+    /// them back.
+    pub(crate) fn take_shards(&mut self, mask: ShardMask) -> Vec<(usize, PartShard)> {
+        let mut out = Vec::with_capacity(mask.count_ones() as usize);
+        let mut m = mask;
+        while m != 0 {
+            let s = m.trailing_zeros() as usize;
+            m &= m - 1;
+            out.push((s, self.take_shard(s)));
+        }
+        out
+    }
+
+    pub(crate) fn put_shards(&mut self, shards: Vec<(usize, PartShard)>) {
+        for (s, sh) in shards {
+            self.put_shard(s, sh);
+        }
+    }
+
+    /// Own `shards` for a run: a planning thread's overlay, layered over the
+    /// frozen kept overlay, which holds nothing of them meanwhile. Its folds
+    /// write them in place and keep what undoes them, and a pid of any other
+    /// shard is outside it.
+    pub(crate) fn own(&mut self, shards: Vec<(usize, PartShard)>, mask: ShardMask) {
+        self.put_shards(shards);
+        self.allowed = Some(mask);
+        self.owner = true;
+        self.frames.push(Undo::default());
+    }
+
+    /// Read and fold only the pids of `mask`'s shards: a group's overlay
+    /// planned beside the planning threads that own the others.
+    pub(crate) fn allow(&mut self, mask: ShardMask) {
+        self.allowed = Some(mask);
+    }
+
+    /// Whether it read or folded a pid outside its shards.
+    pub(crate) fn strayed(&self) -> bool {
+        self.strayed.get()
+    }
+
+    /// The shards it owned, moved back out, and what undoes its folds in
+    /// them: nothing for an overlay that owned none.
+    pub(crate) fn give_back(&mut self) -> (Vec<(usize, PartShard)>, Option<Undo>) {
+        let (true, Some(mask)) = (self.owner, self.allowed) else {
+            return (Vec::new(), None);
+        };
+        assert_eq!(self.frames.len(), 1, "a savepoint was left open");
+        self.owner = false;
+        let undo = self.frames.pop();
+        (self.take_shards(mask), undo)
+    }
+
+    /// Take back what the folds that `u` recorded did to the partition state:
+    /// each partition as the run's first fold found it.
+    pub(crate) fn undo(&mut self, u: &Undo) {
+        for was in &u.parts {
+            let Some(p) = self.parts.get_mut(&was.pid) else {
+                continue;
+            };
+            // The appends since go, and their frames' hashes with them.
+            p.appends.truncate(was.appends.min(p.appends.len()));
+            p.created = was.created.clone();
+            p.watermark = was.watermark.clone();
+            if p.is_empty() {
+                self.parts.remove(&was.pid);
+            }
+        }
+    }
+
+    /// A transaction's savepoint: its small maps and counters, copied, and an
+    /// undo frame for the partition state. [`Overlay::restore`] takes the
+    /// transaction back out; [`Overlay::commit`] keeps it.
+    pub(crate) fn save(&mut self) -> Saved {
+        self.frames.push(Undo::default());
+        Saved {
+            next_pid: self.next_pid,
+            next_kv_version: self.next_kv_version,
+            max_now_us: self.max_now_us,
+            max_created_at_us: self.max_created_at_us,
+            folds: self.folds,
+            shards_written: self.shards_written,
+            queues: self.queues.clone(),
+            groups: self.groups.clone(),
+            pids_by_key: self.pids_by_key.clone(),
+            kv: self.kv.clone(),
+            timers: self.timers.clone(),
+            gone: self.gone.clone(),
+            dropped_queues: self.dropped_queues.clone(),
+            purged_tenants: self.purged_tenants.clone(),
+        }
+    }
+
+    /// Back to `s`: what the transaction folded since is gone.
+    pub(crate) fn restore(&mut self, s: Saved) {
+        let frame = self.frames.pop().expect("a savepoint's frame");
+        self.undo(&frame);
+        self.reset_to(s);
+    }
+
+    /// The small maps and the counters as `s` holds them.
+    fn reset_to(&mut self, s: Saved) {
+        self.next_pid = s.next_pid;
+        self.next_kv_version = s.next_kv_version;
+        self.max_now_us = s.max_now_us;
+        self.max_created_at_us = s.max_created_at_us;
+        self.folds = s.folds;
+        self.shards_written = s.shards_written;
+        self.queues = s.queues;
+        self.groups = s.groups;
+        self.pids_by_key = s.pids_by_key;
+        self.kv = s.kv;
+        self.timers = s.timers;
+        self.gone = s.gone;
+        self.dropped_queues = s.dropped_queues;
+        self.purged_tenants = s.purged_tenants;
+    }
+
+    /// Keep what the transaction folded since `s`. The frame under it, if
+    /// any, takes the partitions it had not seen yet, as the transaction found
+    /// them: that is how they were when it began.
+    pub(crate) fn commit(&mut self, s: Saved) {
+        drop(s);
+        let frame = self.frames.pop().expect("a savepoint's frame");
+        if let Some(under) = self.frames.last_mut() {
+            for was in frame.parts {
+                if under.seen.insert(was.pid) {
+                    under.parts.push(was);
+                }
+            }
+        }
+    }
+
+    /// Keep what was folded since `s`, as [`Overlay::commit`] does, and hand
+    /// back what still takes it out: a planning thread's second round, which
+    /// stays or goes once every thread has voted (the scheduler, S8). By then
+    /// the shards this overlay owned are back in the overlay it was layered
+    /// over, so taking the round out is done in two places
+    /// ([`Overlay::unpark`]).
+    pub(crate) fn park(&mut self, s: Saved) -> Parked {
+        let frame = self.frames.pop().expect("a savepoint's frame");
+        if let Some(under) = self.frames.last_mut() {
+            for was in &frame.parts {
+                if under.seen.insert(was.pid) {
+                    under.parts.push(was.clone());
+                }
+            }
+        }
+        Parked { saved: s, frame }
+    }
+
+    /// Back to where `p` was taken ([`Overlay::park`]): this overlay's own maps
+    /// and counters, and the partition state it still holds (the partitions it
+    /// created). The frame this returns takes the rest back out of the overlay
+    /// that holds the shards now ([`Overlay::undo`]).
+    pub(crate) fn unpark(&mut self, p: Parked) -> Undo {
+        self.undo(&p.frame);
+        self.reset_to(p.saved);
+        p.frame
+    }
+
+    /// Mark the overlay strayed when `pid` is outside the shards it may touch.
+    fn check(&self, pid: Pid) {
+        if let Some(m) = self.allowed {
+            if !is_placeholder(pid) && m & self.shard_bit(pid) == 0 {
+                self.strayed.set();
+            }
+        }
+    }
+
+    /// Record `pid`'s partition as the innermost frame first finds it.
+    fn note_touch(&mut self, pid: Pid) {
+        let Some(u) = self.frames.last_mut() else {
+            return;
+        };
+        if !u.seen.insert(pid) {
+            return;
+        }
+        let p = self.parts.get(&pid);
+        u.parts.push(PartWas {
+            pid,
+            appends: p.map_or(0, |p| p.appends.len()),
+            created: p.and_then(|p| p.created.clone()),
+            watermark: p.and_then(|p| p.watermark.clone()),
+        });
+    }
+
+    /// File the partitions a group created ([`NEW_SHARD`]) under their
+    /// numbers in the entry (`pid`). `false` when one has none.
+    pub(crate) fn file_new(&mut self, sh: PartShard, pid: &impl Fn(u64) -> Option<u64>) -> bool {
+        self.file_spill(
+            Spill {
+                parts: sh.parts.into_iter().collect(),
+            },
+            pid,
+        )
+    }
+
+    /// The shards this overlay's own folds wrote, moved out with their
+    /// numbers: a push group's overlay holds one. The merge of a cycle's groups
+    /// takes these instead of all [`PART_SHARDS`].
+    pub(crate) fn take_written_shards(&mut self) -> Vec<(usize, PartShard)> {
+        let mut out = Vec::with_capacity(self.shards_written.count_ones() as usize);
+        for s in 0..=NEW_SHARD {
+            if self.shards_written & (1u128 << s) != 0 {
+                out.push((s, self.take_shard(s)));
+            }
+        }
+        self.shards_written = 0;
+        out
+    }
+
+    fn base(&self) -> Option<&Overlay> {
+        self.base.as_deref()
+    }
+
+    /// This layer's own mask over the queue's names and groups.
+    fn queue_dropped_here(&self, tenant: &str, queue: &str) -> bool {
+        if self.dropped_queues.is_empty() && self.purged_tenants.is_empty() {
+            return false;
+        }
+        self.purged_tenants.contains_key(tenant)
+            || self
+                .dropped_queues
+                .contains_key(&(tenant.to_string(), queue.to_string()))
+    }
+
+    /// This layer's own mask over the tenant's queues, KV rows and timers.
+    fn tenant_purged_here(&self, tenant: &str) -> bool {
+        !self.purged_tenants.is_empty() && self.purged_tenants.contains_key(tenant)
+    }
+
+    fn queue_lookup(&self, tenant: &str, queue: &str) -> Layered<&Option<QueueConfig>> {
+        if let Some(t) = self.queues.get(&(tenant.to_string(), queue.to_string())) {
+            return Layered::Found(&t.v);
+        }
+        if self.tenant_purged_here(tenant) {
+            return Layered::Masked;
+        }
+        match self.base() {
+            Some(b) => b.queue_lookup(tenant, queue),
+            None => Layered::Absent,
+        }
+    }
+
+    fn group_lookup(&self, tenant: &str, queue: &str, group: &str) -> Layered<&Option<GroupRow>> {
+        if let Some(t) =
+            self.groups
+                .get(&(tenant.to_string(), queue.to_string(), group.to_string()))
+        {
+            return Layered::Found(&t.v);
+        }
+        if self.queue_dropped_here(tenant, queue) {
+            return Layered::Masked;
+        }
+        match self.base() {
+            Some(b) => b.group_lookup(tenant, queue, group),
+            None => Layered::Absent,
+        }
+    }
+
+    fn pid_lookup(&self, tenant: &str, queue: &str, partition: &str) -> Layered<Pid> {
+        if !self.pids_by_key.is_empty() {
+            if let Some(t) = self.pids_by_key.get(&(
+                tenant.to_string(),
+                queue.to_string(),
+                partition.to_string(),
+            )) {
+                return Layered::Found(t.v);
+            }
+        }
+        if self.queue_dropped_here(tenant, queue) {
+            return Layered::Masked;
+        }
+        match self.base() {
+            Some(b) => b.pid_lookup(tenant, queue, partition),
+            None => Layered::Absent,
+        }
+    }
+
+    fn kv_lookup(
+        &self,
+        tenant: &str,
+        ns: &str,
+        key: &str,
+    ) -> Layered<&Option<crate::rsm::store::rows::KvRow>> {
+        if !self.kv.is_empty() {
+            if let Some(t) = self
+                .kv
+                .get(&(tenant.to_string(), ns.to_string(), key.to_string()))
+            {
+                return Layered::Found(&t.v);
+            }
+        }
+        if self.tenant_purged_here(tenant) {
+            return Layered::Masked;
+        }
+        match self.base() {
+            Some(b) => b.kv_lookup(tenant, ns, key),
+            None => Layered::Absent,
+        }
+    }
+
+    fn timer_lookup(&self, tk: &(String, String, String)) -> Layered<&TimerSlot> {
+        if let Some(s) = self.timers.get(tk) {
+            return Layered::Found(s);
+        }
+        if self.tenant_purged_here(&tk.0) {
+            return Layered::Masked;
+        }
+        match self.base() {
+            Some(b) => b.timer_lookup(tk),
+            None => Layered::Absent,
+        }
+    }
+
+    /// The create in flight of `pid`, in any layer.
+    fn created_of(&self, pid: Pid) -> Option<&CreatedPart> {
+        self.check(pid);
+        self.parts
+            .get(&pid)
+            .and_then(|o| o.created.as_ref().map(|t| &t.v))
+            .or_else(|| self.base()?.created_of(pid))
+    }
+
+    /// The last append in flight to `pid`: this layer's own, else the base's.
+    fn last_append(&self, pid: Pid) -> Option<&OverlayAppend> {
+        self.check(pid);
+        self.parts
+            .get(&pid)
+            .and_then(|o| o.appends.last())
+            .or_else(|| self.base()?.last_append(pid))
+    }
+
+    /// Every append in flight to `pid`, oldest first: the base's, then this
+    /// layer's own.
+    fn appends_of(&self, pid: Pid) -> Vec<&OverlayAppend> {
+        self.check(pid);
+        let mut out = self.base().map(|b| b.appends_of(pid)).unwrap_or_default();
+        if let Some(o) = self.parts.get(&pid) {
+            out.extend(o.appends.iter());
+        }
+        out
+    }
+
+    /// Every partition created in flight, in every layer, with its names.
+    fn created_parts(&self) -> Vec<(Pid, &CreatedPart)> {
+        // Every shard: an overlay that may touch only some cannot answer.
+        if self.allowed.is_some() {
+            self.strayed.set();
+        }
+        let mut out = self.base().map(|b| b.created_parts()).unwrap_or_default();
+        out.extend(
+            self.parts
+                .iter()
+                .filter_map(|(pid, p)| p.created.as_ref().map(|c| (*pid, &c.v))),
+        );
+        out
+    }
+
+    /// Every partition name in flight, in every layer: `(tenant, queue,
+    /// partition) → pid`, this layer's own winning, the base's masked by this
+    /// layer's deletes.
+    fn names_in_flight(&self) -> Vec<((&str, &str, &str), Pid)> {
+        let mut out: Vec<((&str, &str, &str), Pid)> = Vec::new();
+        if let Some(b) = self.base() {
+            for (k, pid) in b.names_in_flight() {
+                if !self.queue_dropped_here(k.0, k.1)
+                    && !self.pids_by_key.contains_key(&(
+                        k.0.to_string(),
+                        k.1.to_string(),
+                        k.2.to_string(),
+                    ))
+                {
+                    out.push((k, pid));
+                }
+            }
+        }
+        out.extend(
+            self.pids_by_key
+                .iter()
+                .map(|((t, q, p), v)| ((t.as_str(), q.as_str(), p.as_str()), v.v)),
+        );
+        out
     }
 
     /// Fold an entry still in flight into the overlay: its effects (so a later
@@ -876,7 +1792,10 @@ impl Overlay {
     }
 
     fn request_id(&self, id: &RequestId) -> Option<&Outcome> {
-        self.request_ids.get(id).map(|t| t.v.outcome())
+        self.request_ids
+            .get(id)
+            .map(|t| t.v.outcome())
+            .or_else(|| self.base()?.request_id(id))
     }
 
     /// Fold one effect into the overlay indexes. Used for in-flight entries and,
@@ -962,6 +1881,11 @@ impl Overlay {
                     (tenant.clone(), queue.clone(), partition.clone()),
                     Tagged { v: *pid, tag },
                 );
+                // The partition's name gives its shard, before any row of it.
+                self.note_home(*pid, tenant, partition);
+                self.check(*pid);
+                self.note_touch(*pid);
+                self.shards_written |= 1u128 << self.parts.shard_of(*pid);
                 self.parts.entry(*pid).or_default().created = Some(Tagged {
                     v: CreatedPart {
                         uuid: *uuid,
@@ -992,13 +1916,9 @@ impl Overlay {
                 let count = *count as usize;
                 let hs = append_hashes(hashes, count);
                 let end = base_offset + count as u64 - 1;
-                self.dedup.reserve(count);
-                for (i, h) in hs.iter().enumerate() {
-                    self.dedup
-                        .entry((*pid, *h))
-                        .or_default()
-                        .push((base_offset + i as u64, *created_at_us));
-                }
+                self.check(*pid);
+                self.note_touch(*pid);
+                self.shards_written |= 1u128 << self.parts.shard_of(*pid);
                 self.parts
                     .entry(*pid)
                     .or_default()
@@ -1018,6 +1938,9 @@ impl Overlay {
                 txns_start,
                 rows,
             } => {
+                self.check(*pid);
+                self.note_touch(*pid);
+                self.shards_written |= 1u128 << self.parts.shard_of(*pid);
                 self.parts.entry(*pid).or_default().watermark = Some(Tagged {
                     v: (*log_start, *txns_start, rows.map(|m| m.rows_start)),
                     tag,
@@ -1081,32 +2004,29 @@ impl Overlay {
 
     /// A pid a delete in flight takes away.
     fn is_gone(&self, pid: Pid) -> bool {
-        !self.gone.is_empty() && self.gone.contains_key(&pid)
+        (!self.gone.is_empty() && self.gone.contains_key(&pid))
+            || self.base().is_some_and(|b| b.is_gone(pid))
     }
 
     /// Whether a delete in flight dropped the queue's names and groups: its
     /// own `QueueDelete`, or a purge of its tenant.
     fn queue_dropped(&self, tenant: &str, queue: &str) -> bool {
-        if self.dropped_queues.is_empty() && self.purged_tenants.is_empty() {
-            return false;
-        }
-        self.purged_tenants.contains_key(tenant)
-            || self
-                .dropped_queues
-                .contains_key(&(tenant.to_string(), queue.to_string()))
+        self.queue_dropped_here(tenant, queue)
+            || self.base().is_some_and(|b| b.queue_dropped(tenant, queue))
     }
 
     /// Whether a purge of the tenant is in flight: its committed KV rows and
     /// timers are dead already.
     pub(crate) fn tenant_purged(&self, tenant: &str) -> bool {
-        !self.purged_tenants.is_empty() && self.purged_tenants.contains_key(tenant)
+        self.tenant_purged_here(tenant) || self.base().is_some_and(|b| b.tenant_purged(tenant))
     }
 
     /// Whether anything in flight (or planned this cycle) names the partition:
     /// an append, a create, a watermark. The leader's retention reads only
     /// committed state, and must not delete a partition a push just wrote.
     pub(crate) fn touches_partition(&self, pid: Pid) -> bool {
-        self.parts.contains_key(&pid)
+        self.check(pid);
+        self.parts.contains_key(&pid) || self.base().is_some_and(|b| b.touches_partition(pid))
     }
 
     /// For background retention ([`crate::rsm::retention_scan::judge`]):
@@ -1122,11 +2042,16 @@ impl Overlay {
         if self.is_gone(pid) || self.queue_dropped(tenant, queue) {
             return None;
         }
-        Some(
-            self.parts
-                .get(&pid)
-                .and_then(|o| o.watermark.as_ref().map(|t| t.v)),
-        )
+        Some(self.watermark_of(pid))
+    }
+
+    /// The watermark in flight of `pid`: this layer's own, else the base's.
+    fn watermark_of(&self, pid: Pid) -> Option<(u64, u64, Option<u64>)> {
+        self.check(pid);
+        self.parts
+            .get(&pid)
+            .and_then(|o| o.watermark.as_ref().map(|t| t.v))
+            .or_else(|| self.base()?.watermark_of(pid))
     }
 
     /// Fold one timer effect under `tag` (see [`TimerSlot`] for what `base` and
@@ -1175,7 +2100,19 @@ impl Overlay {
                     last_error: last_error.clone(),
                     updated_at_us: *updated_at_us,
                 };
-                let next = match self.timers.remove(&k) {
+                // A group's overlay patches the base's slot as its own copy.
+                let prior = match self.timers.remove(&k) {
+                    Some(s) => Some(s),
+                    None if !self.tenant_purged_here(tenant) => match self.base() {
+                        Some(b) => match b.timer_lookup(&k) {
+                            Layered::Found(s) => Some(s.clone()),
+                            _ => None,
+                        },
+                        None => None,
+                    },
+                    None => None,
+                };
+                let next = match prior {
                     // Patched: the value still depends on the fold that wrote
                     // the row (or the delete), so the chain keeps its base.
                     Some(TimerSlot {
@@ -1237,18 +2174,6 @@ impl Overlay {
     fn peek_pid(&self) -> Pid {
         self.next_pid
     }
-
-    /// Run `f` with `pid` as the next partition id, and keep the higher of
-    /// the two afterwards. A lane creates a new partition with the id the
-    /// router assigned it (lane-local creation, `batcher_lanes.rs`), whatever
-    /// ids the other lanes create in the same cycle.
-    pub(crate) fn with_next_pid<T>(&mut self, pid: Pid, f: impl FnOnce(&mut Overlay) -> T) -> T {
-        let saved = self.next_pid;
-        self.next_pid = pid;
-        let out = f(self);
-        self.next_pid = self.next_pid.max(saved);
-        out
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,6 +2214,95 @@ pub struct Planner<'a, R: Reads + ?Sized> {
     /// sealed-file list), cached so every committed read of a pid this cycle
     /// reuses one `partition_files` scan. `None` = no committed frames.
     seg_ctx_cache: RefCell<HashMap<Pid, Option<Rc<SegCtx>>>>,
+    /// The keys this planner's merged reads touched, when asked
+    /// ([`Planner::record_touches`]): the footprint scheduler checks that no
+    /// other group of the cycle wrote one of them.
+    touches: Option<RefCell<Vec<u64>>>,
+    /// The first partition id no committed entry had when the cycle began
+    /// ([`Planner::set_base_pid`]): a pid below it was committed before the
+    /// cycle, so no entry in flight creates it. `None`: not told.
+    base_pid: Option<u64>,
+}
+
+/// The keys the footprint scheduler (`rsm/batcher_scheduler.rs`) groups and
+/// checks commands on, each hashed to one `u64`, so recording one costs no
+/// allocation. Two keys that hash alike only ever make the scheduler more
+/// careful: it joins two commands it need not join, or plans a cycle on one
+/// thread. A real conflict always hashes alike.
+pub(crate) mod footprint {
+    use std::hash::Hasher;
+
+    use crate::rsm::effect::Pid;
+
+    /// A queue's row: its settings, its route, its groups.
+    pub(crate) fn queue(t: &str, q: &str) -> u64 {
+        h(1, &[t.as_bytes(), q.as_bytes()])
+    }
+
+    /// A partition by name: which pid it is, so whether a push creates it.
+    pub(crate) fn part(t: &str, q: &str, p: &str) -> u64 {
+        h(2, &[t.as_bytes(), q.as_bytes(), p.as_bytes()])
+    }
+
+    /// Every partition of a queue, declared by a push that a reader re-keys
+    /// from the payload: every `part` of the queue reads it.
+    pub(crate) fn any_part(t: &str, q: &str) -> u64 {
+        h(3, &[t.as_bytes(), q.as_bytes()])
+    }
+
+    /// A partition's log by pid: its appends, its dedup window, its watermark.
+    pub(crate) fn log(pid: Pid) -> u64 {
+        h(4, &[&pid.to_le_bytes()])
+    }
+
+    /// A pid's names and that it still exists: what a create or a delete
+    /// changes.
+    pub(crate) fn names(pid: Pid) -> u64 {
+        h(5, &[&pid.to_le_bytes()])
+    }
+
+    /// One group's cursor on one partition.
+    pub(crate) fn cursor(pid: Pid, group: &str) -> u64 {
+        h(6, &[&pid.to_le_bytes(), group.as_bytes()])
+    }
+
+    /// A partition's dead letters.
+    pub(crate) fn dlq(pid: Pid) -> u64 {
+        h(7, &[&pid.to_le_bytes()])
+    }
+
+    /// One dead letter, by id (a replay deletes it).
+    pub(crate) fn dlq_row(id: &[u8; 16]) -> u64 {
+        h(8, &[id])
+    }
+
+    pub(crate) fn kv(t: &str, ns: &str, k: &str) -> u64 {
+        h(9, &[t.as_bytes(), ns.as_bytes(), k.as_bytes()])
+    }
+
+    pub(crate) fn timer(t: &str, q: &str, k: &str) -> u64 {
+        h(10, &[t.as_bytes(), q.as_bytes(), k.as_bytes()])
+    }
+
+    /// A streams query's row.
+    pub(crate) fn streams_query(query: &[u8; 16]) -> u64 {
+        h(11, &[query])
+    }
+
+    /// One streams state cell.
+    pub(crate) fn streams_state(query: &[u8; 16], pid: Pid, key: &str) -> u64 {
+        h(12, &[query, &pid.to_le_bytes(), key.as_bytes()])
+    }
+
+    fn h(kind: u8, parts: &[&[u8]]) -> u64 {
+        let mut s = crate::rsm::fasthash::FxHasher::default();
+        s.write_u8(kind);
+        for p in parts {
+            s.write_usize(p.len());
+            s.write(p);
+        }
+        s.finish()
+    }
 }
 
 /// A partition merged across committed state and the overlay — the shape the
@@ -1349,7 +2363,79 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             qlog_reader: None,
             seg_cache: RefCell::new(HashMap::new()),
             seg_ctx_cache: RefCell::new(HashMap::new()),
+            touches: None,
+            base_pid: None,
         }
+    }
+
+    /// Tell the planner the committed partition counter the cycle read when it
+    /// began, before it read anything else: [`Planner::partition_exists`] then
+    /// knows which partitions only an entry in flight can have created.
+    pub(crate) fn set_base_pid(&mut self, base_pid: u64) -> &mut Self {
+        self.base_pid = Some(base_pid);
+        self
+    }
+
+    /// Record every key the merged reads touch from now on
+    /// ([`Planner::take_touches`]).
+    pub(crate) fn record_touches(&mut self) {
+        self.touches = Some(RefCell::new(Vec::new()));
+    }
+
+    /// The keys touched since the last take.
+    pub(crate) fn take_touches(&self) -> Vec<u64> {
+        self.touches
+            .as_ref()
+            .map(|t| std::mem::take(&mut *t.borrow_mut()))
+            .unwrap_or_default()
+    }
+
+    fn touched(&self, key: impl FnOnce() -> u64) {
+        if let Some(t) = &self.touches {
+            t.borrow_mut().push(key());
+        }
+    }
+
+    /// `f` with nothing it reads recorded ([`Planner::record_touches`]): the
+    /// caller records the weaker key it really depends on.
+    fn quietly<T>(&self, f: impl FnOnce() -> T) -> T {
+        let saved = self
+            .touches
+            .as_ref()
+            .map(|t| std::mem::take(&mut *t.borrow_mut()));
+        let out = f();
+        if let (Some(t), Some(saved)) = (&self.touches, saved) {
+            *t.borrow_mut() = saved;
+        }
+        out
+    }
+
+    /// The tenant, queue and partition names of `pid`: the overlay's create in
+    /// flight, else the committed row. `None` when the partition is unknown.
+    pub(crate) fn partition_key(
+        &self,
+        ov: &Overlay,
+        pid: Pid,
+    ) -> Result<Option<(String, String, String)>, Refusal> {
+        if let Some(c) = ov.created_of(pid) {
+            return Ok(Some((
+                c.tenant.clone(),
+                c.queue.clone(),
+                c.partition.clone(),
+            )));
+        }
+        if is_placeholder(pid) {
+            return Ok(None);
+        }
+        self.reads()
+            .partition_with(pid, |p| {
+                (
+                    p.tenant.to_string(),
+                    p.queue.to_string(),
+                    p.partition.to_string(),
+                )
+            })
+            .map_err(store_err)
     }
 
     /// Point the committed `DEDUP_INDEX=segment` dedup reads at the per-queue log
@@ -1378,6 +2464,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         self.check_partition_rows(ov, &c.effects)?;
         let mut effects = c.effects.clone();
         self.cover_dropped_partitions(ov, &mut effects)?;
+        // Routing's other side of a catalog change (route.rs).
+        self.complete_routes(ov, &mut effects)?;
         ov.apply_effects(&effects);
         // B26: the dedup front forgets the partitions this deletes now, not a
         // dedup window later (sound either way: an unknown pid is re-seeded).
@@ -1478,9 +2566,14 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// The tenant and queue of `pid`, from the overlay when it is created in
     /// flight, else from committed state. `None` when the partition is unknown
     /// (the caller's other checks refuse that case).
-    fn partition_names(&self, ov: &Overlay, pid: Pid) -> Result<Option<(String, String)>, Refusal> {
-        if let Some(c) = ov.parts.get(&pid).and_then(|o| o.created.as_ref()) {
-            return Ok(Some((c.v.tenant.clone(), c.v.queue.clone())));
+    pub(crate) fn partition_names(
+        &self,
+        ov: &Overlay,
+        pid: Pid,
+    ) -> Result<Option<(String, String)>, Refusal> {
+        self.touched(|| footprint::names(pid));
+        if let Some(c) = ov.created_of(pid) {
+            return Ok(Some((c.tenant.clone(), c.queue.clone())));
         }
         self.reads()
             .partition_with(pid, |p| (p.tenant.to_string(), p.queue.to_string()))
@@ -1494,12 +2587,17 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     ) -> Result<(), Refusal> {
         for e in effects {
             if let Effect::CursorSet { pid, .. } | Effect::DlqInsert { pid, .. } = e {
-                if self.partition(ov, *pid)?.is_none() {
+                // A cursor or a dead letter needs its partition to exist, not
+                // its head: the footprint scheduler counts this read as one of
+                // the partition's names, which only a delete changes.
+                if !self.quietly(|| self.partition_exists(ov, *pid))? {
+                    self.touched(|| footprint::names(*pid));
                     return Err(Refusal::retry(
                         "partition_gone",
                         format!("partition {pid} is gone or being deleted"),
                     ));
                 }
+                self.touched(|| footprint::names(*pid));
             }
         }
         Ok(())
@@ -1620,12 +2718,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 }
             }
         }
-        for (pid, part) in &ov.parts {
-            if let Some(c) = &part.created {
-                if c.v.tenant == tenant && queue.is_none_or(|q| c.v.queue == q) && !ov.is_gone(*pid)
-                {
-                    pids.insert(*pid);
-                }
+        for (pid, c) in ov.created_parts() {
+            if c.tenant == tenant && queue.is_none_or(|q| c.queue == q) && !ov.is_gone(pid) {
+                pids.insert(pid);
             }
         }
         Ok(pids.into_iter().collect())
@@ -1669,19 +2764,18 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
 
     /// The effective queue config: overlay upsert (or tombstone → gone), else
     /// committed — unless a purge of the tenant is in flight.
-    fn queue_cfg(
+    pub(crate) fn queue_cfg(
         &self,
         ov: &Overlay,
         tenant: &str,
         queue: &str,
     ) -> Result<Option<QueueConfig>, Refusal> {
-        if let Some(t) = ov.queues.get(&(tenant.to_string(), queue.to_string())) {
-            return Ok(t.v.clone());
+        self.touched(|| footprint::queue(tenant, queue));
+        match ov.queue_lookup(tenant, queue) {
+            Layered::Found(v) => Ok(v.clone()),
+            Layered::Masked => Ok(None),
+            Layered::Absent => self.committed.queue(tenant, queue).map_err(store_err),
         }
-        if ov.tenant_purged(tenant) {
-            return Ok(None);
-        }
-        self.committed.queue(tenant, queue).map_err(store_err)
     }
 
     /// Whether `(tenant, queue, group)` is registered: a registration or a
@@ -1694,43 +2788,38 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         queue: &str,
         group: &str,
     ) -> Result<Option<GroupRow>, Refusal> {
-        if let Some(t) = ov
-            .groups
-            .get(&(tenant.to_string(), queue.to_string(), group.to_string()))
-        {
-            return Ok(t.v.clone());
+        self.touched(|| footprint::queue(tenant, queue));
+        match ov.group_lookup(tenant, queue, group) {
+            Layered::Found(v) => Ok(v.clone()),
+            Layered::Masked => Ok(None),
+            Layered::Absent => self.reads().group(tenant, queue, group).map_err(store_err),
         }
-        if ov.queue_dropped(tenant, queue) {
-            return Ok(None);
-        }
-        self.reads().group(tenant, queue, group).map_err(store_err)
     }
 
     /// The live pid of a partition NAME. A name a delete in flight sweeps
     /// resolves to nothing, so a push re-creates the partition with a new pid
     /// instead of appending to one that is going away.
-    fn pid_of(
+    pub(crate) fn pid_of(
         &self,
         ov: &Overlay,
         tenant: &str,
         queue: &str,
         partition: &str,
     ) -> Result<Option<Pid>, Refusal> {
-        // No partition created in flight (steady state): no key to build.
-        let created = if ov.pids_by_key.is_empty() {
-            None
-        } else {
-            ov.pids_by_key
-                .get(&(tenant.to_string(), queue.to_string(), partition.to_string()))
-        };
-        let pid = match created {
-            Some(t) => Some(t.v),
-            None if ov.queue_dropped(tenant, queue) => None,
-            None => self
+        self.touched(|| footprint::part(tenant, queue, partition));
+        let pid = match ov.pid_lookup(tenant, queue, partition) {
+            Layered::Found(p) => Some(p),
+            Layered::Masked => None,
+            Layered::Absent => self
                 .committed
                 .pid_of(tenant, queue, partition)
                 .map_err(store_err)?,
         };
+        // The name gives the pid its shard (`homes`), before anything reads
+        // or writes the pid's rows in the overlay.
+        if let Some(p) = pid {
+            ov.note_home(p, tenant, partition);
+        }
         Ok(pid.filter(|p| !ov.is_gone(*p)))
     }
 
@@ -1738,23 +2827,26 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// or taken away by a delete in flight. The committed row is read in place
     /// (task 7): its numbers are copied, its names only compared.
     fn partition(&self, ov: &Overlay, pid: Pid) -> Result<Option<PartView>, Refusal> {
+        self.touched(|| footprint::log(pid));
         if ov.is_gone(pid) {
             return Ok(None);
         }
-        let overlay = ov.parts.get(&pid);
-        let (mut last_offset, mut last_created) = match (
-            self.committed_part(ov, pid)?,
-            overlay.and_then(|o| o.created.as_ref()),
-        ) {
+        // A placeholder is a partition a group created: never committed.
+        let committed = if is_placeholder(pid) {
+            CommittedPart::None
+        } else {
+            self.committed_part(ov, pid)?
+        };
+        let (mut last_offset, mut last_created) = match (committed, ov.created_of(pid)) {
             // Every committed partition predates the entries in flight, so
             // one of a queue a delete in flight drops is going away with it
             // — named in the delete's garbage or not.
             (CommittedPart::Dropped, _) => return Ok(None),
             (CommittedPart::Head(h), _) => (h.last_offset, h.last_created_at_us),
-            (CommittedPart::None, Some(c)) => (-1, c.v.created_at_us - 1),
+            (CommittedPart::None, Some(c)) => (-1, c.created_at_us - 1),
             (CommittedPart::None, None) => return Ok(None),
         };
-        if let Some(last) = overlay.and_then(|o| o.appends.last()) {
+        if let Some(last) = ov.last_append(pid) {
             last_offset = last.end as i64;
             last_created = last.created_at_us;
         }
@@ -1767,6 +2859,31 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// The committed half of [`Planner::partition`]: `Committed::partition`
     /// (no row for a garbage pid) through the in-place reads, and whether a
     /// delete in flight drops the row's queue.
+    /// Whether partition `pid` exists: [`Planner::partition`] is `Some`. The
+    /// overlay's partition state is read only for a partition not committed
+    /// yet, so a row naming a committed partition plans on whichever planning
+    /// thread (the footprint scheduler: the thread need not own its shard).
+    fn partition_exists(&self, ov: &Overlay, pid: Pid) -> Result<bool, Refusal> {
+        if ov.is_gone(pid) {
+            return Ok(false);
+        }
+        if is_placeholder(pid) {
+            return Ok(ov.created_of(pid).is_some());
+        }
+        Ok(match self.committed_part(ov, pid)? {
+            CommittedPart::Dropped => false,
+            CommittedPart::Head(_) => true,
+            // No committed row. A pid below the counter the cycle began with
+            // was committed before it, and its row is gone: nothing in flight
+            // creates it, so the overlay is not read (a planning thread plans
+            // the row of a partition that is not in its shards). A pid at or
+            // above it can only be one an entry in flight created.
+            CommittedPart::None => {
+                self.base_pid.is_none_or(|base| pid >= base) && ov.created_of(pid).is_some()
+            }
+        })
+    }
+
     fn committed_part(&self, ov: &Overlay, pid: Pid) -> Result<CommittedPart, Refusal> {
         let reads = self.reads();
         if reads.is_garbage(pid).map_err(store_err)? {
@@ -1931,51 +3048,79 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         hash: &[u8; 16],
         window_floor_us: i64,
     ) -> Result<Option<u64>, Refusal> {
-        // The front decides whether the committed authority must be read: a
-        // "skip" is a proof that it holds no in-window occurrence of this hash
-        // (see [`DedupFront`]). Under `rows` the read is a single LMDB get on
-        // the `(pid, hash)` row; under `txns` a "maybe" names the generation
-        // offset bands, and the read is a bounded ordered scan of the txns rows
-        // (PERF-E). The overlay merge below is UNCONDITIONAL — the front fronts
-        // only the committed read, never the in-flight state, so an in-flight
-        // duplicate is still caught even on a skip. `front_prepare` must have
-        // run for this pid this command.
-        let mut best = match self.cfg.index_mode {
+        // The front decides whether anything must be read: a "skip" is a proof
+        // that no in-window occurrence of this hash exists, committed or in
+        // flight (see [`DedupFront`]: a plan inserts every survivor's hash
+        // before it commits, and a seed reads the overlay's appends beside the
+        // committed rows). Under `rows` the committed read is a single LMDB
+        // get on the `(pid, hash)` row; under `txns` a "maybe" names the
+        // generation offset bands, and the read is a bounded ordered scan of
+        // the txns rows (PERF-E). Any answer but "skip" also reads the appends
+        // in flight to the partition. A partition created this cycle is not in
+        // the front (its id is a placeholder): its appends are always read.
+        // `front_prepare` must have run for this pid this command.
+        if is_placeholder(pid) {
+            return Ok(Self::in_flight_min(
+                &ov.appends_of(pid),
+                hash,
+                window_floor_us,
+                None,
+            ));
+        }
+        let (best, absent) = match self.cfg.index_mode {
             IndexMode::Rows => {
                 if self.front.should_probe(pid, hash, window_floor_us) {
-                    dedup::probe_one(self.reads(), pid, hash, window_floor_us).map_err(store_err)?
+                    let found = dedup::probe_one(self.reads(), pid, hash, window_floor_us)
+                        .map_err(store_err)?;
+                    (found, false)
                 } else {
-                    None
+                    (None, true)
                 }
             }
-            IndexMode::Txns => self.dedup_probe_txns(pid, hash, window_floor_us)?,
-            IndexMode::Segment => self.dedup_probe_segment(pid, hash, window_floor_us)?,
+            IndexMode::Txns | IndexMode::Segment => {
+                let mut ranges: Vec<(u64, u64)> = Vec::new();
+                let verdict = self
+                    .front
+                    .probe_plan(pid, hash, window_floor_us, &mut ranges);
+                let found = self.dedup_committed(pid, hash, window_floor_us, verdict, &ranges)?;
+                (found, verdict == ProbeVerdict::Skip)
+            }
         };
-        if let Some(occ) = ov.dedup.get(&(pid, *hash)) {
-            for (off, created) in occ {
-                if *created >= window_floor_us {
-                    best = Some(best.map_or(*off, |b| b.min(*off)));
+        if absent {
+            return Ok(None);
+        }
+        Ok(Self::in_flight_min(
+            &ov.appends_of(pid),
+            hash,
+            window_floor_us,
+            best,
+        ))
+    }
+
+    /// `best` lowered to the earliest in-window occurrence of `hash` among
+    /// `appends`, the appends in flight to its partition
+    /// ([`Overlay::appends_of`]: every layer, oldest first). A scan: an append
+    /// keeps its frames' hashes and nothing else indexes them. It runs for a
+    /// hash the front could not rule out (a real duplicate, a false positive,
+    /// a partition with no warm filter), never for a hash it called new.
+    fn in_flight_min(
+        appends: &[&OverlayAppend],
+        hash: &[u8; 16],
+        window_floor_us: i64,
+        mut best: Option<u64>,
+    ) -> Option<u64> {
+        for a in appends {
+            if a.created_at_us < window_floor_us {
+                continue;
+            }
+            for (i, h) in a.hashes.iter().enumerate() {
+                if h == hash {
+                    let off = a.base + i as u64;
+                    best = Some(best.map_or(off, |b| b.min(off)));
                 }
             }
         }
-        Ok(best)
-    }
-
-    /// The committed leg of a push probe under `DEDUP_INDEX=txns`: ask the front
-    /// for the offset bands to scan, then scan the txns rows for the hash. A
-    /// warm filter bounds the scan to one generation's band; an unseeded /
-    /// fallback / disabled front scans the whole txns window (exact).
-    fn dedup_probe_txns(
-        &self,
-        pid: Pid,
-        hash: &[u8; 16],
-        window_floor_us: i64,
-    ) -> Result<Option<u64>, Refusal> {
-        let mut ranges: Vec<(u64, u64)> = Vec::new();
-        let verdict = self
-            .front
-            .probe_plan(pid, hash, window_floor_us, &mut ranges);
-        self.dedup_committed(pid, hash, window_floor_us, verdict, &ranges)
+        best
     }
 
     /// The committed leg of a probe the front has planned (`verdict`, and for
@@ -2021,6 +3166,15 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         items: &[PushItem],
         window_floor_us: i64,
     ) -> Result<Vec<Option<u64>>, Refusal> {
+        // A partition a group created this cycle: nothing committed, and never
+        // in the dedup front (whose entries a real pid owns).
+        if is_placeholder(pid) {
+            let appends = ov.appends_of(pid);
+            return Ok(items
+                .iter()
+                .map(|it| Self::in_flight_min(&appends, &it.hash, window_floor_us, None))
+                .collect());
+        }
         if self.cfg.index_mode == IndexMode::Rows {
             self.front_prepare(ov, pid, window_floor_us)?;
             return items
@@ -2065,6 +3219,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 .collect();
         }
         let mut out = Vec::with_capacity(items.len());
+        // The appends in flight to this partition: read once, and only when a
+        // hash needs them.
+        let mut in_flight: Option<Vec<&OverlayAppend>> = None;
         for (it, plan) in items.iter().zip(&plans) {
             let mut best = self.dedup_committed(
                 pid,
@@ -2073,41 +3230,16 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 plan.verdict,
                 &bands[plan.from..plan.to],
             )?;
-            if let Some(occ) = ov.dedup.get(&(pid, it.hash)) {
-                for (off, created) in occ {
-                    if *created >= window_floor_us {
-                        best = Some(best.map_or(*off, |b| b.min(*off)));
-                    }
-                }
+            // A "skip" is the front's proof that the hash has no in-window
+            // occurrence, committed or in flight ([`Planner::dedup_probe_one`]).
+            // Any other verdict reads the appends in flight.
+            if plan.verdict != ProbeVerdict::Skip {
+                let appends = in_flight.get_or_insert_with(|| ov.appends_of(pid));
+                best = Self::in_flight_min(appends, &it.hash, window_floor_us, best);
             }
             out.push(best);
         }
         Ok(out)
-    }
-
-    /// The committed leg of a push probe under `DEDUP_INDEX=segment`: the front
-    /// still decides Skip vs scan (its seed and inserts are mode-agnostic — the
-    /// same in-window hashes either way), and a scan returns the exact MIN
-    /// in-window offset.
-    ///
-    /// PLAN_RAFT_DRAIN_FIX P3.1: with the qlog on, a `Ranges` verdict reads ONLY
-    /// the committed records overlapping the generation bands the front matched
-    /// ([`Planner::dedup_probe_qlog_bands`]) — O(band), not O(partition
-    /// history). `Whole` (unseeded / fallback / disabled front) and the segment
-    /// source keep the whole committed window (RAM-cached per pid this cycle); a
-    /// "maybe" band is a sound over-approximation, so the whole-window minimum
-    /// matches the `txns` verdict.
-    fn dedup_probe_segment(
-        &self,
-        pid: Pid,
-        hash: &[u8; 16],
-        window_floor_us: i64,
-    ) -> Result<Option<u64>, Refusal> {
-        let mut ranges: Vec<(u64, u64)> = Vec::new();
-        let verdict = self
-            .front
-            .probe_plan(pid, hash, window_floor_us, &mut ranges);
-        self.dedup_committed(pid, hash, window_floor_us, verdict, &ranges)
     }
 
     /// PLAN_RAFT_DRAIN_FIX P3.1: the band-limited committed probe over the qlog.
@@ -2252,20 +3384,18 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 return Ok(Seed::Overflow);
             }
         }
-        if let Some(o) = ov.parts.get(&pid) {
-            for a in &o.appends {
-                if a.created_at_us >= floor_us {
-                    for (i, h) in a.hashes.iter().enumerate() {
-                        buf.push(SeedHash {
-                            hash: *h,
-                            created_us: a.created_at_us,
-                            base_off: a.base,
-                            msg_off: a.base + i as u64,
-                        });
-                    }
-                    if buf.len() > dedup::FRONT_SEED_MAX {
-                        return Ok(Seed::Overflow);
-                    }
+        for a in ov.appends_of(pid) {
+            if a.created_at_us >= floor_us {
+                for (i, h) in a.hashes.iter().enumerate() {
+                    buf.push(SeedHash {
+                        hash: *h,
+                        created_us: a.created_at_us,
+                        base_off: a.base,
+                        msg_off: a.base + i as u64,
+                    });
+                }
+                if buf.len() > dedup::FRONT_SEED_MAX {
+                    return Ok(Seed::Overflow);
                 }
             }
         }

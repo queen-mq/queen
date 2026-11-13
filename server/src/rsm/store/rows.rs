@@ -120,7 +120,14 @@ pub const UNIT: &[u8] = &[];
 
 pub fn queue_encode(c: &QueueConfig) -> Vec<u8> {
     let mut w = Writer::with_capacity(160);
-    head(&mut w);
+    // A queue that takes part in a route (catalogue version 8) is the second
+    // layout: the first one's fields, then its route. Every other queue keeps
+    // the first layout, byte for byte.
+    if c.route().is_some() {
+        head_v2(&mut w);
+    } else {
+        head(&mut w);
+    }
     w.bytes16(&c.id);
     w.opt_str(c.namespace.as_deref());
     w.opt_str(c.task.as_deref());
@@ -144,13 +151,22 @@ pub fn queue_encode(c: &QueueConfig) -> Vec<u8> {
     w.str(&c.retention_sink_hold);
     w.i32(c.retention_sink_hold_max_seconds);
     w.i64(c.created_at_us);
+    if let Some(route) = c.route() {
+        route.write(&mut w);
+    }
     w.into_inner()
 }
 
 pub fn queue_decode(b: &[u8]) -> Result<QueueConfig, CodecError> {
     let mut r = Reader::new(b);
-    expect_v1(&mut r, "queue row version")?;
-    Ok(QueueConfig {
+    let version = r.u8("queue row version")?;
+    if version != ROW_V1 && version != ROW_V2 {
+        return Err(CodecError::UnknownVersion {
+            kind: 0,
+            version: version as u16,
+        });
+    }
+    let mut cfg = QueueConfig {
         id: r.bytes16("queue id")?,
         namespace: r.opt_str("namespace")?,
         task: r.opt_str("task")?,
@@ -174,7 +190,12 @@ pub fn queue_decode(b: &[u8]) -> Result<QueueConfig, CodecError> {
         retention_sink_hold: r.str("retention_sink_hold")?,
         retention_sink_hold_max_seconds: r.i32("retention_sink_hold_max_seconds")?,
         created_at_us: r.i64("created_at_us")?,
-    })
+        route: None,
+    };
+    if version == ROW_V2 {
+        cfg.route = Some(Box::new(crate::rsm::effect::RouteCfg::read(&mut r)?));
+    }
+    Ok(cfg)
 }
 
 // ---------------------------------------------------------------------------
@@ -735,11 +756,18 @@ pub struct DlqRow {
     pub error: String,
     pub retry_count: u32,
     pub failed_at_us: i64,
+    /// The message's headers block (`crate::frames`), empty for none: a row
+    /// that holds one is a [`ROW_V2`] row, the block last.
+    pub headers: Vec<u8>,
 }
 
 pub fn dlq_encode(d: &DlqRow) -> Vec<u8> {
-    let mut w = Writer::with_capacity(128 + d.payload.len());
-    head(&mut w);
+    let mut w = Writer::with_capacity(128 + d.payload.len() + d.headers.len());
+    if d.headers.is_empty() {
+        head(&mut w);
+    } else {
+        head_v2(&mut w);
+    }
     w.u64(d.pid);
     w.str(&d.group);
     w.i64(d.offset);
@@ -749,12 +777,21 @@ pub fn dlq_encode(d: &DlqRow) -> Vec<u8> {
     w.str(&d.error);
     w.u32(d.retry_count);
     w.i64(d.failed_at_us);
+    if !d.headers.is_empty() {
+        w.blob(&d.headers);
+    }
     w.into_inner()
 }
 
 pub fn dlq_decode(b: &[u8]) -> Result<DlqRow, CodecError> {
     let mut r = Reader::new(b);
-    expect_v1(&mut r, "dlq row version")?;
+    let version = r.u8("dlq row version")?;
+    if version != ROW_V1 && version != ROW_V2 {
+        return Err(CodecError::UnknownVersion {
+            kind: 0,
+            version: version as u16,
+        });
+    }
     Ok(DlqRow {
         pid: r.u64("pid")?,
         group: r.str("group")?,
@@ -765,6 +802,11 @@ pub fn dlq_decode(b: &[u8]) -> Result<DlqRow, CodecError> {
         error: r.str("error")?,
         retry_count: r.u32("retry_count")?,
         failed_at_us: r.i64("failed_at_us")?,
+        headers: if version == ROW_V2 {
+            r.blob("headers")?
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -1531,8 +1573,21 @@ mod tests {
             error: "boom".into(),
             retry_count: 2,
             failed_at_us: 5,
+            headers: Vec::new(),
         };
         assert_eq!(dlq_decode(&dlq_encode(&d)).unwrap(), d);
+        assert_eq!(
+            dlq_encode(&d)[0],
+            ROW_V1,
+            "no headers: the row it always was"
+        );
+        let h = DlqRow {
+            headers: crate::frames::encode_headers([("type", "order")]),
+            ..d
+        };
+        let b = dlq_encode(&h);
+        assert_eq!(b[0], ROW_V2, "a row with headers is a version 2 row");
+        assert_eq!(dlq_decode(&b).unwrap(), h);
     }
 
     #[test]

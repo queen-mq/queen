@@ -2,7 +2,7 @@
  * Reads by offset and partition discovery, as two queue methods:
  *
  *   const read = await queen.queue('orders').fetch(['customer-42', 'customer-7'])
- *   read.get('customer-42').records   // [{ offset, transactionId, payload, ts }, ...]
+ *   read.get('customer-42').records   // [{ offset, transactionId, payload, ts, headers? }, ...]
  *
  *   const { partitions, safeTime } = await queen.queue('orders').changedSince(since)
  *
@@ -89,7 +89,8 @@ function positiveInteger(value, what) {
  * Answers a Map, in the order the partitions were named, of
  * `{ partition, records, highWatermark, logStartOffset, nextOffset }`:
  * - `records`: `{ offset, transactionId, payload, ts }` in offset order. `ts` is
- *   the time the push that wrote the record was stored.
+ *   the time the push that wrote the record was stored; `headers` is there
+ *   when the message has some.
  * - `highWatermark`: the next offset the partition will assign;
  *   `logStartOffset`: the oldest one retention kept.
  * - `nextOffset`: where to start next time to read only what is new.
@@ -164,7 +165,9 @@ export async function fetchPartitions(httpClient, queue, partitions, options = {
         if (records.length > 0) {
           delivered += records.length
           for (const r of records) {
-            s.records.push({ offset: r.offset, transactionId: r.transactionId, payload: r.payload, ts: r.ts })
+            const record = { offset: r.offset, transactionId: r.transactionId, payload: r.payload, ts: r.ts }
+            if (r.headers) record.headers = r.headers
+            s.records.push(record)
           }
           s.nextOffset = records[records.length - 1].offset + 1
           if (s.nextOffset < s.end) again.push(name)

@@ -1,0 +1,11 @@
+[20:42:32] abplan-sched6 start
+[20:42:32] == push on sched6
+s6-push-sched6 [20:43:54] 3,000,000: offered 2,999,963 | pushed 2,999,710 | consumed 2,999,793 | shed 0 errors 0 | push p50 8.3 p99 108.5 | e2e p50 19.5 p99 151.6 | cores 15.9 / 7.8 / 5.8 | loader 19.2c  OK 
+s6-push-sched6 [20:45:08] 3,500,000: offered 3,499,991 | pushed 3,252,131 | consumed 3,251,677 | shed 4,459,500 errors 0 | push p50 630.8 p99 1310.7 | e2e p50 671.7 p99 1359.9 | cores 18.0 / 10.0 / 6.2 | loader 21.0c  NOT CARRIED 
+s6-push-sched6 [20:45:08] stopping at 3500000
+[20:45:11] == t100 on sched6
+s6-t100-sched6 [20:46:25]   750,000: offered 750,025 | workers 7,500 txn/s = 749,959 msg/s | read 749,929 | shed 0 errors 0 aborts 0 | commit p50 3.7 p99 6.8 | e2e p50 16 p99 24 | feed push p50 3.8 p99 6.6 | cores 10.2 / 5.4 / 4.0 | loaders 10.4c  OK 
+[20:46:27] == spread on sched6
+s6-spread-sched6 [20:48:00] 2,000,000: offered 1,999,925 | pushed 1,823,027 | consumed 1,820,463 | shed 2,323,900 errors 0 | push p50 405.5 p99 2392.1 | e2e p50 487.4 p99 2457.6 | cores 17.3 / 7.7 / 4.9 | loader 17.8c  NOT CARRIED 
+s6-spread-sched6 [20:48:00] stopping at 2000000
+[20:48:03] ABPLAN_SCHED6_DONE

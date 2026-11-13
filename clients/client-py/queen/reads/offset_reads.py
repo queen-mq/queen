@@ -30,7 +30,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
 
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 # The broker refuses more than 1024 entries in one call; 1000 leaves room.
 ENTRIES_PER_CALL = 1000
@@ -48,12 +48,14 @@ UNKNOWN_TOPIC_OR_PARTITION = "UNKNOWN_TOPIC_OR_PARTITION"
 
 class FetchedRecord(TypedDict):
     """One record: its offset, the transactionId it was pushed with, its payload
-    as pushed, and the time the push that wrote it was stored."""
+    as pushed, and the time the push that wrote it was stored. ``headers`` only
+    when the message has some (``record.get("headers")`` is None otherwise)."""
 
     offset: int
     transactionId: str
     payload: Any
     ts: str
+    headers: NotRequired[Dict[str, str]]
 
 
 class FetchedPartition(TypedDict):
@@ -205,14 +207,16 @@ async def fetch_partitions(
                 if records:
                     delivered += len(records)
                     for r in records:
-                        s["records"].append(
-                            {
-                                "offset": r.get("offset"),
-                                "transactionId": r.get("transactionId"),
-                                "payload": r.get("payload"),
-                                "ts": r.get("ts"),
-                            }
-                        )
+                        record: Dict[str, Any] = {
+                            "offset": r.get("offset"),
+                            "transactionId": r.get("transactionId"),
+                            "payload": r.get("payload"),
+                            "ts": r.get("ts"),
+                        }
+                        # Only on a record that has headers, as the broker sends them.
+                        if r.get("headers") is not None:
+                            record["headers"] = r["headers"]
+                        s["records"].append(record)
                     s["nextOffset"] = records[-1]["offset"] + 1
                     if s["nextOffset"] < s["end"]:
                         again.append(name)

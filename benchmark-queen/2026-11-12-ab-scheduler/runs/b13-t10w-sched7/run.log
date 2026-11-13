@@ -1,0 +1,7 @@
+[13:01:32] run b13-t10w-sched7: build sched7, txn, 900 partitions, steps of 40s at: 280000 320000 360000 400000 | TXN_SIZE=10 KV=0 CONS=55 PROCS=8 BATCH=100 SPREAD=1 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames -txn-wire bin | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: b1-in, b1-out x 900 partitions
+[13:02:33]   280,000: offered 280,012 | workers 27,993 txn/s = 279,932 msg/s | read 279,937 | shed 0 errors 0 aborts 0 | commit p50 5.1 p99 8.8 | e2e p50 70 p99 143 | feed push p50 4.7 p99 8.1 | cores 12.8 / 7.1 / 5.2 | loaders 11.9c  OK 
+[create] done: b2-in, b2-out x 900 partitions
+[13:03:36]   320,000: offered 320,018 | workers 29,305 txn/s = 293,053 msg/s | read 293,110 | shed 0 errors 0 aborts 0 | commit p50 6.5 p99 11.1 | e2e p50 1491 p99 3441 | feed push p50 5.6 p99 9.9 | cores 13.2 / 7.7 / 5.7 | loaders 12.4c  NOT CARRIED 
+[13:03:36] stopping at 320000
+RUN_DONE

@@ -17,7 +17,12 @@ use UnexpectedValueException;
  * All integers little-endian. A record's bytes are `count` frames:
  *
  *     u32 body_len | u8 flags | u8[16] message id | [u8[16] trace id, flag 1]
- *     | u16 len, transactionId | [u16 len, producer, flag 2] | payload
+ *     | u16 len, transactionId | [u16 len, producer, flag 2]
+ *     | [u16 len, headers, flag 8] | payload
+ *
+ * A broker answers JSON instead whenever a record holds an encrypted
+ * message, a message with headers or a link (flags 4, 8, 16): the headers
+ * are read here all the same, and the other two refused as damage.
  *
  * Message i of a record has offset base_offset+i and belongs to the delivery
  * when that lies in the claim's start..=end. The JSON object in front holds
@@ -32,6 +37,8 @@ final class PopFrames
     private const FLAG_TRACE = 1;
     private const FLAG_PRODUCER = 2;
     private const FLAG_ENCRYPTED = 4;
+    private const FLAG_HEADERS = 8;
+    private const FLAG_LINK = 16;
 
     /** Whether a pop answer's bytes are the framed one. */
     public static function isFrames(string $bytes): bool
@@ -122,8 +129,12 @@ final class PopFrames
                     $trace = $flags & self::FLAG_TRACE ? self::take($frame, $p, 16, $malformed) : null;
                     $transactionId = self::text($frame, $p, $malformed);
                     $producerSub = $flags & self::FLAG_PRODUCER ? self::text($frame, $p, $malformed) : null;
+                    $headers = $flags & self::FLAG_HEADERS ? self::headers(self::text($frame, $p, $malformed), $malformed) : null;
                     if ($flags & self::FLAG_ENCRYPTED) {
                         throw self::damaged('a frame is encrypted');
+                    }
+                    if ($flags & self::FLAG_LINK) {
+                        throw self::damaged('a frame is a link');
                     }
                     $offset = $base + $i;
                     if ($offset < $start || $offset > $end) {
@@ -135,12 +146,18 @@ final class PopFrames
                     } catch (\JsonException $error) {
                         throw self::damaged('a payload: ' . $error->getMessage());
                     }
-                    $messages[] = [
+                    $message = [
                         'id' => PushBinary::uuidText($id),
                         'transactionId' => $transactionId,
                         'traceId' => $trace === null ? null : PushBinary::uuidText($trace),
                         'data' => $data,
                         'producerSub' => $producerSub,
+                    ];
+                    // Where the JSON answer places them, and only when there are some.
+                    if ($headers !== null) {
+                        $message['headers'] = $headers;
+                    }
+                    $messages[] = $message + [
                         'createdAt' => $createdAt,
                         'partitionId' => $partitionId,
                         'partition' => $partition,
@@ -175,6 +192,25 @@ final class PopFrames
     private static function damaged(string $what): UnexpectedValueException
     {
         return new UnexpectedValueException("framed pop answer: {$what}");
+    }
+
+    /**
+     * A headers block, `u16 count | (u8 len, name | u16 len, value) x count`,
+     * as the [name => value] array the JSON answer decodes to.
+     */
+    private static function headers(string $block, string $malformed): array
+    {
+        $at = 0;
+        $headers = [];
+        for ($n = self::u16($block, $at, $malformed); $n > 0; $n--) {
+            $name = self::take($block, $at, self::u8($block, $at, $malformed), $malformed);
+            $headers[$name] = self::text($block, $at, $malformed);
+        }
+        if ($at !== strlen($block)) {
+            throw self::damaged($malformed);
+        }
+
+        return $headers;
     }
 
     /** @param-out int $at */

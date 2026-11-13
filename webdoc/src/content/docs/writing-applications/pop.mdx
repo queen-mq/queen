@@ -83,6 +83,10 @@ verifiedBy:
 # b24b53599); queen_client.hpp gains ClientConfig::token_source and tokens().mint() (9f218acf7).
 # Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-11 (clients 2.8.1): queen_client.hpp's version macro says 2.8.1. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. data.rs gains the
+# where query parameter of a filtered group (writing-applications/routing.mdx); a message gains
+# headers. The page names both.
 # sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
 # rewords the 504 a membership change answers; handlers/raft.rs changes a comment on ?timeoutMs.
 # Nothing this page states changes.
@@ -204,3 +208,7 @@ Or read a partition by offset with `fetch`: no group, no lease, no ack. It suits
 - [Acknowledge](/writing-applications/ack/): the four outcomes of an ack.
 - [The consumption engine](/architecture/consumption-engine/): how the leader serves pops and leases from memory.
 - [HTTP API](/reference/http/): the pop and ack endpoints and every parameter.
+
+## Filtered groups and headers
+
+A named group can take only some of a queue's messages: send `where` on its pops (`?consumerGroup=billing&where=data.kind%20%3D%20'paid'`), fixed at its first pop, the same on every pop after. See [Routing](/writing-applications/routing/) for the language and the rules. A popped message carries its [headers](/writing-applications/headers/) as `"headers": {...}`, when it has any; a framed pop (`frames=true`) answers in JSON for a record that holds headers or links.

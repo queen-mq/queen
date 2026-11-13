@@ -45,7 +45,7 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 /// A data directory that removes itself, in the §11.1 shape (`store/`, `seg/`).
 pub struct Node {
     dir: PathBuf,
-    store: Option<HeedStore>,
+    store: Option<std::sync::Arc<HeedStore>>,
     /// Set by [`Node::keep`]: the directory outlives this handle, because
     /// another one is going to reopen it.
     keep: bool,
@@ -67,7 +67,7 @@ impl Node {
         let store = HeedStore::open(&dir.join("store"), &store_opts()).expect("open store");
         Node {
             dir,
-            store: Some(store),
+            store: Some(std::sync::Arc::new(store)),
             keep: false,
         }
     }
@@ -78,6 +78,11 @@ impl Node {
     }
 
     pub fn store(&self) -> &HeedStore {
+        self.store.as_deref().expect("store is open")
+    }
+
+    /// The store as the batcher's planning step takes it.
+    pub fn store_arc(&self) -> &std::sync::Arc<HeedStore> {
         self.store.as_ref().expect("store is open")
     }
 
@@ -93,7 +98,9 @@ impl Node {
     /// can be reopened in this process (heed refuses a second open).
     pub fn close(&mut self) {
         if let Some(s) = self.store.take() {
-            s.close();
+            std::sync::Arc::try_unwrap(s)
+                .unwrap_or_else(|_| panic!("the store is still shared at close"))
+                .close();
         }
     }
 
@@ -296,6 +303,7 @@ pub fn queue_config(created_at_us: i64) -> QueueConfig {
         retention_sink_hold: String::new(),
         retention_sink_hold_max_seconds: 0,
         created_at_us,
+        route: None,
     }
 }
 
@@ -591,6 +599,7 @@ impl Workload {
             error: "boom".to_string(),
             retry_count: 3,
             failed_at_us: now_us,
+            headers: Vec::new(),
         }])
     }
 
@@ -1932,6 +1941,7 @@ fn retention_takes_the_dead_letters_it_passes_and_moves_the_oldest_stamp() {
             error: "boom".into(),
             retry_count: 3,
             failed_at_us: BASE_US + 50,
+            headers: Vec::new(),
         })
         .collect();
     a.apply(&Build::new(BASE_US + 60, 2, 100).cmd(inserts).at(8, 1))
@@ -3495,6 +3505,7 @@ fn the_gauges_settle_when_groups_partitions_and_queues_are_deleted() {
                 error: "boom".into(),
                 retry_count: 1,
                 failed_at_us: BASE_US + 300,
+                headers: Vec::new(),
             }],
         );
     }
@@ -3684,6 +3695,7 @@ fn a_recreated_queue_name_does_not_inherit_the_dead_queue_s_gauges() {
                     error: "boom".into(),
                     retry_count: 1,
                     failed_at_us: BASE_US + 20,
+                    headers: Vec::new(),
                 }])
                 .at(3 + n, 1),
         )
@@ -3775,6 +3787,7 @@ fn a_recreated_queue_name_does_not_inherit_the_dead_queue_s_gauges() {
                     error: "boom".into(),
                     retry_count: 1,
                     failed_at_us: BASE_US + 210,
+                    headers: Vec::new(),
                 },
             ])
             .at(7, 1),
@@ -5047,6 +5060,7 @@ fn two_dead_letters_at_one_position_both_go_with_their_partition() {
                     error: "again".into(),
                     retry_count: 1,
                     failed_at_us: BASE_US + 10,
+                    headers: Vec::new(),
                 }])
                 .at(2 + n as u64, 1),
         )

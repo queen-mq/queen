@@ -36,6 +36,12 @@
 //! transactional sinks. Its `config_hash` is byte-compatible with the other
 //! SDKs, so the same query can be redeployed across languages.
 //!
+//! # Headers, filtered groups, reading queues and link
+//!
+//! Broker catalogue version 8: headers on messages, a `where` on a consumer
+//! group or a queue that reads others, and `link` to hand a message on without
+//! its payload. See [`routing`].
+//!
 //! # Differences from the other SDKs
 //!
 //! Deliberate, and each one is a place where matching the others would have
@@ -73,6 +79,7 @@ pub mod pop_frames;
 pub mod push_binary;
 pub mod queue;
 pub mod reads;
+pub mod routing;
 pub mod streams;
 pub mod supervision;
 pub mod timers;
@@ -97,6 +104,7 @@ pub use queue::{PopOutcome, QueueBuilder};
 pub use reads::{
     ChangedPartitions, FetchOptions, FetchedPartition, Since, DEFAULT_FETCH_MAX_BYTES,
 };
+pub use routing::{Headers, LinkFrom, LinkSource, Where};
 pub use supervision::SupervisionConfig;
 pub use timers::Timers;
 pub use tokens::{TokenError, TokenSource, Tokens};
@@ -427,11 +435,13 @@ mod tests {
             trace_id: None,
             data: serde_json::json!(null),
             producer_sub: None,
+            headers: None,
             created_at: "2026-08-04T10:00:00Z".into(),
             partition_id: "p".into(),
             partition: "Default".into(),
             lease_id: String::new(),
             consumer_group: "g".into(),
+            offset: None,
         };
         let err = q.renew(&msg, None).await.unwrap_err();
         assert!(err.to_string().contains("holds no lease"));

@@ -48,6 +48,25 @@ class ConflationUnsupportedError(QueenError):
     """
 
 
+class FilterUnsupportedError(QueenError):
+    """A pop sent a ``where`` (a filtered group) and the broker did not apply it.
+
+    The degrade-loudly rule of conflation, for the same reason (PLAN_ROUTING.md
+    §4): a broker older than filtered groups ignores the parameter and hands
+    the group the whole queue. The broker echoes ``"filtered": true`` on every
+    answer of a pop that sent a where, empty ones included (a 200 with a body,
+    never a bodiless 204), so this fires on the first round trip, before any
+    message is handled.
+    """
+
+
+class ReadingQueueUnsupportedError(QueenError):
+    """A configure named sources (``from``) and the broker did not answer with
+    the queue's ``route``: it does not read other queues, and the queue it
+    configured is an ordinary one that nothing will fill (PLAN_ROUTING.md §5).
+    """
+
+
 class TransactionError(QueenError):
     """A transaction the broker refused for a reason other than a lost KV
     precondition (which ``commit()`` returns instead of raising).

@@ -105,6 +105,10 @@ sourceOfTruth:
 # token row in Authentication, and x-queen-scope under the tenancy header.
 # sourceOfTruth re-read 2026-11-11 (a4a4ad2f1): rustfmt on server/src/proxy_embed.rs, line wrapping
 # only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. The feed takes a
+# `where` string and `headers.<name>`, and its entries carry `headers` and `link`. This page: the
+# feed's where row and a paragraph under its example.
 # sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
 # rewords the 504 a membership change answers; handlers/raft.rs changes a comment on ?timeoutMs.
 # Nothing this page states changes.
@@ -364,13 +368,18 @@ curl -s localhost:6632/api/v1/feed -H 'content-type: application/json' -d '{
  "next": 13, "resolvedTs": "2026-11-06T09:14:03.600000Z"}
 ```
 
+An entry carries `headers` when the message has some. A message a queue holds by a link (a
+[reading queue](/writing-applications/routing/)'s, or a `link`'s target) shows read through it, with
+the source's id, transaction id and payload, and `"link": {"queue", "partition", "offset"}`, where it
+is at its source: a reader of every queue can tell a message it already has.
+
 | Field | Rule |
 |---|---|
 | `from` | A position (included), `"now"` (the default: only what comes next) or `"earliest"`. Send an answer's `next` back to read on. |
 | `since` | Only messages created at or after this time (ISO-8601). Files holding only older messages are not read. |
 | `queues` | Names or patterns (`*` any run of characters, `?` one); every queue of the tenant when absent. At most 256. |
 | `partitions` | Partition names, in whichever queue is read. At most 1000. |
-| `where` | Conditions that must all hold, each `{field, op, value}`. Fields: `queue`, `partition`, `transactionId`, `offset`, `position`, `data` and `data.<path>` (a number in the path indexes an array). Ops: `=`, `!=`, `<`, `<=`, `>`, `>=`, `in` (the value is an array), `exists`, `prefix`, `!prefix` (a string that does not start with it). A field the message does not have holds for no op, `!=` and `!prefix` included. At most 16. |
+| `where` | Conditions that must all hold: a list of `{field, op, value}`, or one string in the [where language](/writing-applications/routing/) (`data.country = 'IT' and headers.type = 'order.paid'`). Fields: `queue`, `partition`, `transactionId`, `offset`, `position`, `data` and `data.<path>` (a number in the path indexes an array), `headers.<name>`. Ops: `=`, `!=`, `<`, `<=`, `>`, `>=`, `in` (the value is an array), `exists`, `prefix`, `!prefix` (a string that does not start with it). A field the message does not have holds for no op, `!=` and `!prefix` included. At most 16. |
 | `kinds` | `["push"]`, the one kind served so far. |
 | `maxRecords` | Messages in one answer: default 1,000, at most 10,000. |
 | `maxBytes` | Payload bytes in one answer: default 1 MiB, at most 16 MiB. |

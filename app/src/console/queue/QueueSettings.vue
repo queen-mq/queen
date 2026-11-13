@@ -1,6 +1,8 @@
 <script setup>
 // The queue's options. Save shows what changes and the call before anything
-// runs; /configure gets only the options you changed (merge).
+// runs; /configure gets only the options you changed (merge). A reading queue
+// keeps what its sources keep: those options show its sources' values, and
+// are neither edited here nor sent (the broker refuses them, reading_queue).
 import { computed, ref, shallowRef, watch } from 'vue'
 import { queues as queuesApi } from '@/api'
 import { describeApiError } from '@/api/errors'
@@ -12,6 +14,7 @@ import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import QcDialog from '../QcDialog.vue'
 import { toast } from '../toasts'
+import { READER_KEEPS, routeOf } from '../queues/routeView'
 
 const props = defineProps({
   queue: { type: String, required: true },
@@ -26,11 +29,13 @@ const current = shallowRef(null) // the queue's options as the broker answers th
 const form = ref({})
 const error = ref(null)
 const more = ref(false)
+const reading = ref(false) // it reads other queues: what it keeps is theirs
 
 async function load() {
   try {
     const r = await queuesApi.get(props.queue, { quiet: true })
     current.value = { ...(r.data?.options || {}), namespace: r.data?.namespace ?? '', task: r.data?.task ?? '' }
+    reading.value = routeOf(r.data)?.reading === true
     form.value = toFormValues(current.value)
     error.value = null
   } catch (e) { error.value = describeApiError(e) }
@@ -38,7 +43,8 @@ async function load() {
 load()
 watch(() => props.queue, load)
 
-const edited = computed(() => readFormValues(Object.fromEntries([...COMMON, ...ADVANCED].map((m) => [m.key, form.value[m.key]]))))
+const locked = (key) => reading.value && READER_KEEPS.includes(key)
+const edited = computed(() => readFormValues(Object.fromEntries([...COMMON, ...ADVANCED].filter((m) => !locked(m.key)).map((m) => [m.key, form.value[m.key]]))))
 const diff = computed(() => (current.value ? configDiff(current.value, edited.value) : {}))
 const changed = computed(() => Object.keys(diff.value))
 const errors = computed(() => validate(diff.value))
@@ -79,20 +85,20 @@ function discard() { if (current.value) form.value = toFormValues(current.value)
           {{ more ? 'Fewer options' : `More options (${ADVANCED.length}): retention, encryption, waiting` }}
         </button>
         <template v-if="gi === 0 || more">
-          <component :is="m.type === 'bool' ? 'div' : 'label'" v-for="m in group" :key="m.key" class="qset-row" :class="{ changed: m.key in diff }">
+          <component :is="m.type === 'bool' ? 'div' : 'label'" v-for="m in group" :key="m.key" class="qset-row" :class="{ changed: m.key in diff, locked: locked(m.key) }">
             <span class="qset-name">
               <span style="font-weight: 500">{{ m.label }}</span>
               <span class="qn-mono qn-t3" style="font-size: 11.5px; margin-left: 8px">{{ m.key }}</span>
-              <span class="qn-t3 qset-help">{{ short(m.help) }}</span>
+              <span class="qn-t3 qset-help">{{ locked(m.key) ? 'Its sources’: a reading queue keeps what they keep. Set it on them.' : short(m.help) }}</span>
             </span>
             <span class="qset-input">
               <template v-if="m.type === 'bool'">
                 <span class="qn-seg">
-                  <button type="button" :aria-pressed="form[m.key] === true" :disabled="!canEdit" @click="form[m.key] = true">On</button>
-                  <button type="button" :aria-pressed="form[m.key] === false" :disabled="!canEdit" @click="form[m.key] = false">Off</button>
+                  <button type="button" :aria-pressed="form[m.key] === true" :disabled="!canEdit || locked(m.key)" @click="form[m.key] = true">On</button>
+                  <button type="button" :aria-pressed="form[m.key] === false" :disabled="!canEdit || locked(m.key)" @click="form[m.key] = false">Off</button>
                 </span>
               </template>
-              <span v-else class="qn-field" style="width: 112px"><input v-model="form[m.key]" :disabled="!canEdit" :inputmode="m.type === 'int' ? 'numeric' : 'text'" class="qn-num" type="text" :placeholder="String(m.default ?? '')" /></span>
+              <span v-else class="qn-field" style="width: 112px"><input v-model="form[m.key]" :disabled="!canEdit || locked(m.key)" :inputmode="m.type === 'int' ? 'numeric' : 'text'" class="qn-num" type="text" :placeholder="String(m.default ?? '')" /></span>
               <span class="qn-t2" style="width: 26px">{{ m.unit || '' }}</span>
               <span class="qn-t3 qn-num" style="width: 92px; font-size: 12px">{{ m.key in diff ? `was ${was(m.key)}` : '' }}</span>
             </span>
@@ -132,5 +138,7 @@ function discard() { if (current.value) form.value = toFormValues(current.value)
 .qset-help { display: block; font-size: 12px; margin-top: 2px; }
 .qset-input { display: inline-flex; align-items: center; gap: 8px; }
 .qset-err { grid-column: 1 / -1; font-size: 12px; }
+/* its sources' setting: shown, as a disabled control is */
+.qset-row.locked .qn-field { opacity: .4; }
 .qset-diff { border: 1px solid var(--line); border-radius: var(--r-card); overflow: hidden; }
 </style>

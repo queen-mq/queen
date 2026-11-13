@@ -459,6 +459,7 @@ fn the_dlq_head_files_and_advances_past_it() {
             message_id: None,
             txn: "poison".into(),
             payload: b"{}".to_vec(),
+            headers: Vec::new(),
         },
     };
     match h.outcome(crate::rsm::batcher::Command::DlqHead(c.clone())) {

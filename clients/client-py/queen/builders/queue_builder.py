@@ -2,11 +2,13 @@
 Queue builder for fluent API
 """
 
+import json
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Union
 from urllib.parse import urlencode
 
-from ..errors import ConflationUnsupportedError
+from ..errors import ConflationUnsupportedError, FilterUnsupportedError
+from ..feed.feed import normalize_where, where_condition, where_value
 from ..reads.offset_reads import (
     DEFAULT_MAX_BYTES,
     ChangedPartitions,
@@ -14,18 +16,72 @@ from ..reads.offset_reads import (
     fetch_partitions,
     partitions_changed_since,
 )
+from ..streams.util.js import UNDEFINED
 from ..types import Message
 from ..utils import logger
 from ..utils.autopilot import AutopilotDecision, parse_autopilot_decision, pop_sizing
 from ..utils.conflation import check_pop_response as check_conflation
 from ..utils.conflation import scope_of as conflation_scope
 from ..utils.defaults import QUEUE_DEFAULTS, CONSUME_DEFAULTS, POP_DEFAULTS
+from ..utils.routing import check_filtered_response as check_filtered
+from ..utils.routing import check_route_response
 from ..utils.uuid_gen import generate_uuid
-from ..utils.validation import is_valid_uuid
+from ..utils.validation import is_valid_uuid, push_item_headers
 from .consume_builder import ConsumeBuilder
 from .dlq_builder import DLQBuilder
 from .operation_builder import OperationBuilder
 from .push_builder import PushBuilder
+
+# The options a reading queue takes from its sources (PLAN_ROUTING.md §5.2):
+# the broker refuses each of them on one (400 reading_queue).
+READER_KEEPS = (
+    "retentionEnabled",
+    "retentionSeconds",
+    "completedRetentionSeconds",
+    "maxWaitTimeSeconds",
+    "dedupWindowSeconds",
+    "encryptionEnabled",
+    "maxSize",
+    "retentionSinkHold",
+    "retentionSinkHoldMaxSeconds",
+)
+
+
+def _camel(key: str) -> str:
+    """A config key as the broker names it (``partition_by`` -> ``partitionBy``)."""
+    parts = key.split("_")
+    return parts[0] + "".join(word.capitalize() for word in parts[1:])
+
+
+def _reads_queues(options: Mapping[str, Any]) -> bool:
+    """Whether a configuration is a reading queue's: it names its sources
+    (``from``, not None, which stops a reader), or sets one of the options
+    only a reading queue takes."""
+    for key, value in options.items():
+        name = _camel(key)
+        if name == "from" and value is not None:
+            return True
+        if name in ("where", "partitionBy", "start"):
+            return True
+    return False
+
+
+def _route_options(options: Mapping[str, Any]) -> Dict[str, Any]:
+    """options with every ``where`` (the queue's, and each ``from`` source's)
+    as the broker reads it."""
+    out = dict(options)
+    for key, value in options.items():
+        name = _camel(key)
+        if name == "where":
+            out[key] = where_value(value)
+        elif name == "from" and isinstance(value, (list, tuple)):
+            out[key] = [
+                {**s, "where": where_value(s["where"])}
+                if isinstance(s, Mapping) and s.get("where") is not None
+                else s
+                for s in value
+            ]
+    return out
 
 
 class PopResult(NamedTuple):
@@ -95,6 +151,11 @@ class QueueBuilder:
         # default (on unless QUEEN_SDK_POP_AUTOPILOT turned it off).
         self._max_partitions: Optional[int] = None
         self._autopilot: Optional[bool] = None
+        # A filtered group's where (PLAN_ROUTING.md §4): the conditions of
+        # where(field, op, value), ANDed, or the strings of where(text). Sent
+        # on every pop of the group; the broker fixes it at the first one.
+        self._where_conditions: List[Dict[str, Any]] = []
+        self._where_texts: List[str] = []
 
         # Buffer options
         self._buffer_options: Optional[Dict[str, Any]] = None
@@ -114,8 +175,32 @@ class QueueBuilder:
         return self
 
     def config(self, options: Dict[str, Any]) -> "QueueBuilder":
-        """Set queue configuration"""
-        self._config = {**QUEUE_DEFAULTS, **options}
+        """
+        Set queue configuration. Every option left out is sent with its
+        default (QUEUE_DEFAULTS).
+
+        A reading queue (PLAN_ROUTING.md §5) reads what its sources keep::
+
+            await queen.queue("orders-it").config({
+                "from": "orders",                  # or ["orders", {"queue": "refunds", "where": ...}]
+                "where": "data.country = 'IT'",    # or conditions, as where() takes them
+                "partition_by": "same",            # or "data.<path>", "headers.<name>"
+                "start": "all",                    # or "now" (the default)
+                "lease_time": 30,
+                "retry_limit": 5,
+            }).create()
+
+        It keeps what its sources keep, so the defaults of the options the
+        broker refuses on a reading queue (retention, dedup window, encryption,
+        max size: READER_KEEPS) are not sent; set one and the broker answers
+        400 ``reading_queue``. ``from: None`` makes it an ordinary queue again.
+        The answer carries the queue's ``route``; without one the broker does
+        not read other queues, and create() raises ReadingQueueUnsupportedError.
+        """
+        defaults = QUEUE_DEFAULTS
+        if _reads_queues(options):
+            defaults = {k: v for k, v in QUEUE_DEFAULTS.items() if _camel(k) not in READER_KEEPS}
+        self._config = {**defaults, **_route_options(options)}
         return self
 
     def create(self) -> OperationBuilder:
@@ -137,28 +222,40 @@ class QueueBuilder:
             "QueueBuilder.create",
             {"queue": self._queue_name, "namespace": self._namespace, "task": self._task},
         )
-        return OperationBuilder(self._http_client, "POST", "/api/v1/configure", payload)
+        # A reading queue's answer carries its route: without one, the broker
+        # does not read other queues and made an ordinary queue (raised).
+        reads = server_config.get("from") is not None
+        return OperationBuilder(
+            self._http_client,
+            "POST",
+            "/api/v1/configure",
+            payload,
+            check=(lambda answer: check_route_response(answer, requested=True)) if reads else None,
+        )
     
     def _convert_config_to_camel_case(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """Convert snake_case config keys to camelCase for server"""
         result = {}
         for key, value in config.items():
-            # Convert snake_case to camelCase
-            parts = key.split("_")
-            camel_key = parts[0] + "".join(word.capitalize() for word in parts[1:])
-            result[camel_key] = value
+            # Convert snake_case to camelCase (from_ -> from)
+            result[_camel(key)] = value
         return result
 
-    def delete(self) -> OperationBuilder:
-        """Delete queue"""
+    def delete(self, force: bool = False) -> OperationBuilder:
+        """
+        Delete queue.
+
+        A queue that reading queues read is refused (409 ``has_readers``,
+        which names them) unless ``force=True``: their links to it then expire.
+        """
         if not self._queue_name:
             raise ValueError("Queue name is required for delete operation")
 
-        logger.log("QueueBuilder.delete", {"queue": self._queue_name})
+        logger.log("QueueBuilder.delete", {"queue": self._queue_name, "force": force})
         return OperationBuilder(
             self._http_client,
             "DELETE",
-            f"/api/v1/resources/queues/{self._queue_name}",
+            f"/api/v1/resources/queues/{self._queue_name}" + ("?force=true" if force else ""),
             None,
         )
 
@@ -215,6 +312,12 @@ class QueueBuilder:
             trace_id = item.get("traceId")
             if trace_id and is_valid_uuid(trace_id):
                 result["traceId"] = trace_id
+
+            # Headers ride beside data/payload and only when there are some, so
+            # a push without them is the request it always was.
+            headers = push_item_headers(item)
+            if headers:
+                result["headers"] = headers
 
             formatted_items.append(result)
 
@@ -391,6 +494,76 @@ class QueueBuilder:
         self._each = True
         return self
 
+    def where(self, field: Any, op: Any = UNDEFINED, value: Any = UNDEFINED) -> "QueueBuilder":
+        """
+        A filtered group: the group gets only the messages where the condition
+        holds (PLAN_ROUTING.md §4). Several calls are ANDed::
+
+            await (queen.queue("order-events").group("billing")
+                .subscription_mode("all")
+                .where("data.kind", "in", ["order.paid", "order.refunded"])
+                .where("headers.source", "=", "web")
+                .consume(handler))
+
+            queen.queue("order-events").group("billing").where("data.kind in ('order.paid', 'order.refunded')")
+
+        The same conditions as Stream.where() and the feed: fields queue,
+        partition, transactionId, data, data.<path>, headers.<name>; ops = !=
+        < <= > >= in exists prefix !prefix. Give conditions or one string, not
+        both; a condition may also be ``{field, op, value}`` or a list of them.
+
+        A setting of the CONSUMER GROUP, like subscription_mode: sent on every
+        pop, fixed at the group's first one. A different where for that group
+        is refused (400 ``where_mismatch``): change it with
+        ``admin.update_consumer_group_where(group, queue, where)``. A group that
+        already reads the queue without one cannot start filtering: name a new
+        group. Needs a consumer group and a queue (not a namespace/task pop), on
+        a broker at catalogue version 8; pop() raises the broker's 400 here
+        rather than answering []. Every answer to a pop with a where says
+        ``"filtered": true``; one without it (a broker that does not filter,
+        which would hand the group the whole queue) raises
+        FilterUnsupportedError from pop() and consume() alike.
+        """
+        if op is UNDEFINED and value is UNDEFINED and isinstance(field, str):
+            text = field.strip()
+            if not text:
+                raise ValueError("where: the condition is empty")
+            if self._where_conditions:
+                raise ValueError("where: give conditions or one string, not both")
+            self._where_texts.append(text)
+            return self
+        if self._where_texts:
+            raise ValueError("where: give conditions or one string, not both")
+        if op is UNDEFINED and value is UNDEFINED:
+            conditions = normalize_where(field)
+        else:
+            conditions = [where_condition(field, op, value)]
+        # Serialized once here so a value JSON does not carry fails at the call
+        # site, not inside a pop that answers [].
+        json.dumps(conditions)
+        self._where_conditions.extend(conditions)
+        return self
+
+    def _where_param(self) -> Optional[str]:
+        """The pop's ``where`` parameter: the strings ANDed, or the conditions
+        as one JSON list; None without a where."""
+        if self._where_texts:
+            return " and ".join(self._where_texts)
+        if self._where_conditions:
+            return json.dumps(self._where_conditions, separators=(",", ":"), ensure_ascii=False)
+        return None
+
+    def _check_where(self) -> Optional[str]:
+        """The where to send, refused here when the broker would ignore or refuse it."""
+        where = self._where_param()
+        if where is None:
+            return None
+        if not self._queue_name:
+            raise ValueError("where() filters a group on one queue: a namespace/task pop does not take it")
+        if not self._group:
+            raise ValueError("where() filters a consumer group: name one with group()")
+        return where
+
     # ===========================
     # Consume Method
     # ===========================
@@ -418,6 +591,7 @@ class QueueBuilder:
             raise ValueError(
                 "commit_on_delivery() is a pop() option; consume() always leases its messages"
             )
+        where = self._check_where()
 
         consume_options = {
             "queue": self._queue_name,
@@ -438,6 +612,7 @@ class QueueBuilder:
             "subscription_mode": self._subscription_mode,
             "subscription_from": self._subscription_from,
             "conflation": self._conflation,
+            "where": where,
             "each": self._each,
             "max_partitions": self._max_partitions,
             # Resolved here so ConsumerManager sees a decision and not a None.
@@ -491,6 +666,9 @@ class QueueBuilder:
                 "group": self._group,
             },
         )
+        # Raised, never answered as []: a where the broker would refuse or
+        # ignore reads as "no messages" on every call otherwise.
+        where = self._check_where()
 
         try:
             path = self._build_pop_path()
@@ -539,6 +717,9 @@ class QueueBuilder:
             # to a pre-1.1.0 one (PLAN_CONFLATION §3.1).
             if self._conflation:
                 params["conflation"] = "true"
+            # Last, and only with a where: every other pop is the request it was.
+            if where is not None:
+                params["where"] = where
 
             # Generate affinity key for consistent routing to same backend
             affinity_key = self._get_affinity_key()
@@ -562,6 +743,9 @@ class QueueBuilder:
                 queue=conflation_scope(self._queue_name, self._namespace, self._task),
                 group=self._group,
             )
+            # The same rule for a where: a broker that did not filter would
+            # hand this group the whole queue (utils/routing.py).
+            check_filtered(result, requested=where is not None)
 
             # The broker's own account of how it sized this pop, when the
             # request engaged autopilot and the answer had a body to carry it (a
@@ -575,7 +759,7 @@ class QueueBuilder:
             messages = [msg for msg in result["messages"] if msg is not None]
             logger.log("QueueBuilder.pop", {"status": "success", "count": len(messages)})
             return PopResult(messages=messages, autopilot=autopilot)
-        except ConflationUnsupportedError:
+        except (ConflationUnsupportedError, FilterUnsupportedError):
             # NOT swallowed into [], unlike every other failure below. An empty
             # list here would hide the one thing this error exists to say, and
             # the caller would go on polling a broker that silently ignores the
@@ -586,11 +770,19 @@ class QueueBuilder:
             # The broker's 400 refusals of a conflating pop (no consumer group,
             # or commit_on_delivery() as well) are permanent config faults: []
             # would read as "no messages right now" on every call, the silent
-            # version §4 rules out. Raised, as in the JS client.
-            if self._conflation and status_code == 400:
+            # version §4 rules out. Raised, as in the JS client. So are those
+            # of a filtered group's pop (where_mismatch, bad_where,
+            # cluster_version, a source queue that does not exist).
+            if (self._conflation or where is not None) and status_code == 400:
                 logger.error(
                     "QueueBuilder.pop",
-                    {"error": str(error), "status_code": status_code, "conflation": True},
+                    {
+                        "error": str(error),
+                        "status_code": status_code,
+                        "code": getattr(error, "code", None),
+                        "conflation": self._conflation,
+                        "where": where is not None,
+                    },
                 )
                 raise
             # Return empty array on error instead of throwing. This also

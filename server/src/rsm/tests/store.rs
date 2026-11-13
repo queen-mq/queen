@@ -125,6 +125,7 @@ fn every_message_path_keyspace_round_trips_through_a_commit() {
         error: "boom".into(),
         retry_count: 1,
         failed_at_us: 42,
+        headers: Vec::new(),
     };
     let seg = SegLocRow {
         bucket: 3,
@@ -363,6 +364,7 @@ fn a_reverse_scan_finds_a_prefix_that_is_not_at_the_end_of_the_keyspace() {
         error: "boom".into(),
         retry_count: 0,
         failed_at_us: 42,
+        headers: Vec::new(),
     };
     let id = |n: u8| [n; 16];
     {

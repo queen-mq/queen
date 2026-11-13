@@ -49,7 +49,8 @@ use serde_json::json;
 
 use crate::rsm::apply::{Applier, Committed as ApplyCommitted, NoNotify};
 use crate::rsm::batcher::{
-    plan_cycle_blocking, Command, KeepCfg, KeepStats, PlanOutput, PlannerState,
+    plan_cycle_blocking, Command, Forced, KeepCfg, KeepStats, PlanOutput, PlannedCounts,
+    PlannerState,
 };
 use crate::rsm::dedup::DedupFront;
 use crate::rsm::effect::{CursorRow, Effect, GarbageScope, GroupMeta, Pid, QueueConfig};
@@ -134,6 +135,25 @@ fn rid_of(n: u64) -> RequestId {
     id
 }
 
+/// One message's frame as the receiver packs it. A real frame, not any bytes:
+/// the scheduler reads its flags, and a frame that looked like a link would
+/// plan its push alone.
+fn frame_of(txn: &str) -> bytes::Bytes {
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&crate::util::txn_hash128(txn));
+    crate::frames::pack_frames(&[crate::frames::FrameIn {
+        message_id: id,
+        txn,
+        trace_id: None,
+        producer_sub: None,
+        payload: format!("{{\"t\":\"{txn}\"}}").as_bytes(),
+        encrypted: false,
+        headers: None,
+        link: None,
+    }])
+    .into()
+}
+
 /// The adaptive command stream: it learns partitions and their tails from the
 /// entries the planner proposes, so its checkpoints target real state. Everything it decides comes from its seeded [`Rng`] and
 /// from those entries, so two runs that propose the same entries generate the
@@ -155,6 +175,9 @@ struct Workload {
     next_dlq: u64,
     /// The highest watermark emitted per pid (they never move back).
     watermark: HashMap<Pid, u64>,
+    /// Batches of many commands over many partitions and keys, the admin
+    /// kinds rare: what the footprint scheduler splits into many groups.
+    wide: bool,
 }
 
 impl Workload {
@@ -170,6 +193,23 @@ impl Workload {
             gone: Vec::new(),
             next_dlq: 1,
             watermark: HashMap::new(),
+            wide: false,
+        }
+    }
+
+    fn wide(seed: u64) -> Workload {
+        Workload {
+            wide: true,
+            ..Workload::new(seed)
+        }
+    }
+
+    /// How many partitions (and KV keys) a draw picks from.
+    fn spread(&self, narrow: u64) -> u64 {
+        if self.wide {
+            narrow * 12
+        } else {
+            narrow
         }
     }
 
@@ -199,7 +239,7 @@ impl Workload {
                 let t = self.txn();
                 PushItem {
                     hash: crate::util::txn_hash128(&t),
-                    frame: format!("{{\"t\":\"{t}\"}}").into_bytes().into(),
+                    frame: frame_of(&t),
                 }
             })
             .collect();
@@ -210,12 +250,13 @@ impl Workload {
             partition: partition.to_string(),
             items,
             create_cfg: queue_cfg(queue),
+            links: Default::default(),
         }
     }
 
     fn push(&mut self) -> Command {
         let queue = self.rng.pick(&QUEUES).to_string();
-        let partition = format!("p{}", self.rng.below(5));
+        let partition = format!("p{}", self.rng.below(self.spread(5)));
         let n = 1 + self.rng.below(4) as usize;
         Command::Push(self.push_cmd(&queue, &partition, n))
     }
@@ -291,6 +332,7 @@ impl Workload {
                     error: "boom".into(),
                     retry_count: 3,
                     failed_at_us: BASE_US,
+                    headers: Vec::new(),
                 });
             }
             effects.push(Effect::CursorSet { pid, group, row });
@@ -392,12 +434,12 @@ impl Workload {
     fn transaction(&mut self) -> Command {
         let mut pushes = vec![{
             let q = if self.rng.chance(60) { "qd" } else { "q0" };
-            let p = format!("p{}", self.rng.below(3));
+            let p = format!("p{}", self.rng.below(self.spread(3)));
             let n = 1 + self.rng.below(2) as usize;
             self.push_cmd(q, &p, n)
         }];
         if self.rng.chance(50) {
-            let p = format!("p{}", self.rng.below(3));
+            let p = format!("p{}", self.rng.below(self.spread(3)));
             pushes.push(self.push_cmd("qd", &p, 1));
         }
         // The consumption half, as the engine hands it over: cursor rows of
@@ -408,15 +450,52 @@ impl Workload {
             Vec::new()
         };
         let kv = if self.rng.chance(30) {
+            // One key; now and then a few, of several entities, whose homes
+            // differ: a counter under a partition's name, and a gate that
+            // holds once (`required`: lost, it rolls the whole transaction
+            // back).
             let k = format!("tk{}", self.rng.below(3));
+            let mut ops =
+                vec![json!({"op":"put","ns":"txn","key":k,"value":{"n":1},"forever":true})];
+            if self.rng.chance(50) {
+                let k = format!("p{}", self.rng.below(self.spread(3)));
+                ops.push(json!({"op":"incr","ns":"txn","key":k,"delta":1,"forever":true}));
+            }
+            if self.rng.chance(30) {
+                let k = format!("g{}", self.rng.below(self.spread(6)));
+                ops.push(json!({
+                    "op":"putIfAbsent","ns":"gate","key":k,"value":{"n":1},
+                    "forever":true,"required":true,
+                }));
+            }
             parse_ops(
-                &[json!({"op":"put","ns":"txn","key":k,"value":{"n":1},"forever":true})],
+                &ops,
                 TENANT,
                 true,
                 511,
                 crate::rsm::planner::kv::MAX_VALUE_BYTES_DEFAULT,
             )
             .expect("kv op")
+        } else {
+            Vec::new()
+        };
+        // The step's timer now and then: scheduled or cancelled with it.
+        let timers = if self.rng.chance(20) {
+            let queue = self.rng.pick(&TIMER_QUEUES).to_string();
+            let key = format!("t{}", self.rng.below(4));
+            let op = if self.rng.chance(25) {
+                json!({"op":"cancel","queue":queue,"timerKey":key})
+            } else {
+                let t = self.txn();
+                // The message id as the HTTP edge mints it (see `timers`).
+                let mid = format!("01910000-0000-7000-8000-{:012x}", self.next_id);
+                json!({
+                    "op":"schedule","queue":queue,"timerKey":key,
+                    "delayMs": self.rng.below(400) as i64,
+                    "txn": t, "payload": "e30=", "_messageId": mid,
+                })
+            };
+            parse_timer_ops(&[op], Some("svc")).expect("timer op")
         } else {
             Vec::new()
         };
@@ -427,10 +506,10 @@ impl Workload {
             acks: Vec::new(),
             positional_acks: Vec::new(),
             kv,
-            timers: Vec::new(),
+            timers,
             extra_effects,
-            // The DLQ-replay shape: a duplicate answers empty WITHOUT restoring
-            // the overlay (the earlier push groups stay folded).
+            // The DLQ-replay shape: a duplicate answers empty, and the pushes
+            // before it are taken back out of the overlay.
             allow_duplicate: self.rng.chance(25),
             positions: Vec::new(),
             engine_acks: AckOutcome::default(),
@@ -438,7 +517,7 @@ impl Workload {
     }
 
     fn kv(&mut self) -> Command {
-        let k = format!("k{}", self.rng.below(5));
+        let k = format!("k{}", self.rng.below(self.spread(5)));
         let op = match self.rng.below(4) {
             0 => json!({"op":"put","ns":"n","key":k,"value":{"v":1},"ttlSeconds":1}),
             1 => json!({"op":"put","ns":"n","key":k,"value":{"v":2},"forever":true}),
@@ -468,10 +547,14 @@ impl Workload {
             json!({"op":"cancel","queue":queue,"timerKey":key})
         } else {
             let t = self.txn();
+            // The message id as the HTTP edge mints it, from this command's
+            // id: a planner that mints one draws it in planning order, which
+            // the scheduler's groups do not share.
+            let mid = format!("01910000-0000-7000-8000-{:012x}", self.next_id);
             json!({
                 "op":"schedule","queue":queue,"timerKey":key,
                 "delayMs": self.rng.below(400) as i64,
-                "txn": t, "payload": "e30=",
+                "txn": t, "payload": "e30=", "_messageId": mid,
             })
         };
         Command::Timers(TimersCommand {
@@ -646,10 +729,19 @@ impl Workload {
 
     /// One cycle's batch.
     fn batch(&mut self, store: &crate::rsm::store::HeedStore) -> Vec<Command> {
-        let n = 1 + self.rng.below(7);
+        let n = if self.wide {
+            8 + self.rng.below(40)
+        } else {
+            1 + self.rng.below(7)
+        };
         let mut out: Vec<Command> = Vec::new();
         for _ in 0..n {
-            let c = match self.rng.below(100) {
+            // Wide: the admin kinds (83..=91) a tenth as often.
+            let mut roll = self.rng.below(100);
+            if self.wide && (83..=91).contains(&roll) && !self.rng.chance(10) {
+                roll = self.rng.below(83);
+            }
+            let c = match roll {
                 0..=34 => Some(self.push()),
                 35..=52 => self.checkpoint(),
                 53..=55 => Some(self.register()),
@@ -769,7 +861,9 @@ struct Rig {
     node: Node,
     state: PlannerState,
     keep: KeepCfg,
-    front: DedupFront,
+    front: Arc<DedupFront>,
+    /// Planning threads: more than one plans through the footprint scheduler.
+    threads: usize,
     /// The driver's in-flight list: `(index, entry)`, dropped lazily.
     inflight: VecDeque<(u64, Arc<Entry>)>,
     /// Proposed and not yet applied.
@@ -787,15 +881,19 @@ struct Rig {
     /// index, and cycles in which some landed entry was still in the list.
     overlapped: usize,
     lingering: usize,
+    /// Cycles checked against the single planner ([`Rig::check_reference`]):
+    /// every cycle of a rig that plans on more than one thread.
+    checked: usize,
 }
 
 impl Rig {
-    fn new(tag: &str, keep: KeepCfg, front: DedupFront, seed: u64) -> Rig {
+    fn new(tag: &str, keep: KeepCfg, front: DedupFront, seed: u64, threads: usize) -> Rig {
         Rig {
             node: Node::new(tag),
             state: PlannerState::default(),
             keep,
-            front,
+            front: Arc::new(front),
+            threads,
             inflight: VecDeque::new(),
             unapplied: VecDeque::new(),
             next_index: 1,
@@ -807,7 +905,97 @@ impl Rig {
             kinds: BTreeMap::new(),
             overlapped: 0,
             lingering: 0,
+            checked: 0,
         }
+    }
+
+    /// THE ORACLE of the homes: the single planner, from the same state, plans
+    /// the same commands in the order the homes planned them (each run: the
+    /// homes' commands in batch order, then the commands that waited for
+    /// them), and must plan the SAME ENTRY, byte for byte but for the uuids
+    /// the planners mint. So planning on several threads is one valid serial
+    /// order of the batch, and nothing else.
+    ///
+    /// The reference keeps nothing between cycles (it rebuilds its overlay
+    /// from the entries in flight) and has no dedup front: neither may change
+    /// what is planned.
+    fn check_reference(
+        &mut self,
+        folded: Vec<(u64, Arc<Entry>)>,
+        batch: Vec<Command>,
+        order: Vec<usize>,
+        steps: &Steps,
+        got: Option<&Entry>,
+    ) {
+        let ids: Vec<RequestId> = batch.iter().map(Command::request_id).collect();
+        let mut left: Vec<Option<Command>> = batch.into_iter().map(Some).collect();
+        let mut reordered: Vec<Command> = Vec::with_capacity(left.len());
+        for i in order {
+            let c = left[i]
+                .take()
+                .unwrap_or_else(|| panic!("cycle {}: position {i} planned twice", self.cycles));
+            reordered.push(c);
+            // A second copy of the command in this batch (a client's retry)
+            // stays right behind it, as it was in the batch: the scheduler
+            // answers it with the first copy's entry or sends it to the next
+            // cycle (S5), and the single planner plans it there to the same
+            // answer.
+            for j in i + 1..left.len() {
+                if ids[j] == ids[i] {
+                    if let Some(copy) = left[j].take() {
+                        reordered.push(copy);
+                    }
+                }
+            }
+        }
+        // What is left was answered from an earlier entry (its request id was
+        // seen before): where it stands changes nothing.
+        reordered.extend(left.into_iter().flatten());
+        let front = Arc::new(DedupFront::disabled());
+        let mut state = PlannerState::default();
+        let off = KeepCfg {
+            enabled: false,
+            epoch: 0,
+            verify: false,
+            reset_every: 0,
+        };
+        let want = plan_cycle_blocking(
+            self.node.store_arc(),
+            &front,
+            &mut state,
+            off,
+            1,
+            None,
+            None,
+            folded,
+            reordered,
+            Rig::plan_cfg(),
+            self.wall,
+            steps.expire,
+            steps.kv_sweep,
+            steps.fire.clone(),
+            None,
+            None,
+        )
+        .expect("the reference cycle");
+        let show = |e: Option<&Entry>| e.map(|e| mask_uuids(&format!("{e:?}")));
+        let (a, b) = (show(want.entry.as_deref()), show(got));
+        if a != b {
+            let (a, b) = (a.unwrap_or_default(), b.unwrap_or_default());
+            let at = a
+                .bytes()
+                .zip(b.bytes())
+                .position(|(x, y)| x != y)
+                .unwrap_or(a.len().min(b.len()));
+            let from = at.saturating_sub(400);
+            panic!(
+                "cycle {}: the homes did not plan the single planner's entry:\n single: ...{}\n  homes: ...{}",
+                self.cycles,
+                &a[from..(at + 400).min(a.len())],
+                &b[from..(at + 400).min(b.len())],
+            );
+        }
+        self.checked += 1;
     }
 
     fn plan_cfg() -> PlanConfig {
@@ -815,6 +1003,7 @@ impl Rig {
         // defer different commands.
         PlanConfig {
             plan_budget_ms: 3_600_000,
+            index_mode: RIG_INDEX.with(|c| c.get()),
             ..PlanConfig::default()
         }
     }
@@ -831,11 +1020,15 @@ impl Rig {
         if folded.iter().any(|(i, _)| *i <= self.applied) {
             self.lingering += 1;
         }
+        // For the oracle: the cycle's inputs, and the order it plans in.
+        let reference = (self.threads > 1).then(|| (folded.clone(), batch.clone()));
+        let _ = crate::rsm::batcher::take_planned_order();
         let out = plan_cycle_blocking(
-            self.node.store(),
+            self.node.store_arc(),
             &self.front,
             &mut self.state,
             self.keep,
+            self.threads,
             None,
             None,
             folded,
@@ -859,6 +1052,10 @@ impl Rig {
             out.store_applied, self.applied,
             "the planner read the applied index"
         );
+        if let Some((folded, batch)) = reference {
+            let order = crate::rsm::batcher::take_planned_order();
+            self.check_reference(folded, batch, order, steps, out.entry.as_deref());
+        }
         while let Some((index, _)) = self.inflight.front() {
             if *index <= out.store_applied && self.rng.chance(60) {
                 self.inflight.pop_front();
@@ -937,6 +1134,32 @@ fn keep_verified() -> KeepCfg {
     }
 }
 
+thread_local! {
+    /// The dedup index the rigs of this thread plan with: `rows`, the test
+    /// default, unless a test asks for the product's ([`TxnsIndex`]). Apply
+    /// writes the txns rows in both, so either planner finds what committed.
+    static RIG_INDEX: std::cell::Cell<crate::rsm::dedup::IndexMode> =
+        const { std::cell::Cell::new(crate::rsm::dedup::IndexMode::Rows) };
+}
+
+/// While it lives, the rigs of this thread plan with the `txns` dedup index,
+/// the product default: the dedup front then plans every probe (skip, bands,
+/// whole window), which `rows` does not do.
+struct TxnsIndex;
+
+impl TxnsIndex {
+    fn on() -> TxnsIndex {
+        RIG_INDEX.with(|c| c.set(crate::rsm::dedup::IndexMode::Txns));
+        TxnsIndex
+    }
+}
+
+impl Drop for TxnsIndex {
+    fn drop(&mut self) {
+        RIG_INDEX.with(|c| c.set(crate::rsm::dedup::IndexMode::Rows));
+    }
+}
+
 /// What one run of the workload produced.
 struct Report {
     /// Every proposed entry, encoded, in log order.
@@ -946,14 +1169,48 @@ struct Report {
     kinds: BTreeMap<String, usize>,
     overlapped: usize,
     lingering: usize,
+    planned: PlannedCounts,
+    /// The homes the scheduler planned (each a planning thread in its shards).
+    bins: u64,
+    /// Cycles checked against the single planner.
+    checked: usize,
+    cycles: usize,
+    /// The transactions several homes planned by shares and kept, and the
+    /// second rounds taken back because a share did not hold.
+    spread: (u64, u64),
 }
 
-/// Drive `cycles` cycles of the workload through a rig; then land everything
-/// and run a few more cycles.
-fn run(tag: &str, seed: u64, keep: KeepCfg, front: DedupFront, cycles: usize) -> Report {
+/// Drive `cycles` cycles of the workload through a rig planning on `threads`
+/// threads; then land everything and run a few more cycles.
+fn run(
+    tag: &str,
+    seed: u64,
+    keep: KeepCfg,
+    front: DedupFront,
+    cycles: usize,
+    threads: usize,
+) -> Report {
+    run_shaped(tag, seed, keep, front, cycles, threads, false)
+}
+
+fn run_shaped(
+    tag: &str,
+    seed: u64,
+    keep: KeepCfg,
+    front: DedupFront,
+    cycles: usize,
+    threads: usize,
+    wide: bool,
+) -> Report {
     let _uuids = crate::util::deterministic_uuids(seed << 20);
-    let mut rig = Rig::new(tag, keep, front, seed);
-    let mut w = Workload::new(seed);
+    let bins0 = crate::rsm::batcher::bins_planned();
+    let spread0 = crate::rsm::batcher::spread_planned();
+    let mut rig = Rig::new(tag, keep, front, seed, threads);
+    let mut w = if wide {
+        Workload::wide(seed)
+    } else {
+        Workload::new(seed)
+    };
     for c in 0..cycles {
         let batch = w.batch(rig.node.store());
         let out = rig.cycle(batch, &steps(c));
@@ -979,6 +1236,14 @@ fn run(tag: &str, seed: u64, keep: KeepCfg, front: DedupFront, cycles: usize) ->
         kinds: std::mem::take(&mut rig.kinds),
         overlapped: rig.overlapped,
         lingering: rig.lingering,
+        planned: rig.state.planned,
+        bins: crate::rsm::batcher::bins_planned() - bins0,
+        checked: rig.checked,
+        cycles: rig.cycles,
+        spread: {
+            let now = crate::rsm::batcher::spread_planned();
+            (now.0 - spread0.0, now.1 - spread0.1)
+        },
     }
 }
 
@@ -1024,6 +1289,7 @@ fn gate(seed: u64, front_on: bool, cycles: usize) {
         keep_verified(),
         front(),
         cycles,
+        1,
     );
     let stats = &kept.stats;
     // The kept path was really taken: every cycle but the ones after a
@@ -1067,6 +1333,7 @@ fn gate(seed: u64, front_on: bool, cycles: usize) {
         KeepCfg::off(),
         front(),
         cycles,
+        1,
     );
     assert_eq!(plain.stats.kept, 0);
     assert_eq!(
@@ -1116,6 +1383,254 @@ fn the_gate_holds_with_the_dedup_front_on() {
 }
 
 // ---------------------------------------------------------------------------
+// 2b: the footprint scheduler's oracle
+// ---------------------------------------------------------------------------
+
+/// `text` with every run of sixteen comma-separated integers in brackets — a
+/// `[u8; 16]` in `Debug` form — replaced by `U`: the planners mint uuids
+/// (partitions, queues, groups, dead letters, leader-step ids) from a counter
+/// on their own thread, so which uuid a create gets depends on which thread
+/// planned it, and nothing else does.
+fn mask_uuids(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'[' {
+            let mut j = i + 1;
+            let mut ints = 0;
+            let mut ok = true;
+            loop {
+                let start = j;
+                while j < b.len() && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j == start {
+                    ok = false;
+                    break;
+                }
+                ints += 1;
+                if j < b.len() && b[j] == b']' {
+                    break;
+                }
+                if j + 1 < b.len() && b[j] == b',' && b[j + 1] == b' ' {
+                    j += 2;
+                } else {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok && ints == 16 {
+                out.push('U');
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(b[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// The workload planned by the homes on four threads: every cycle's entry is
+/// the single planner's for the same commands in the order the homes planned
+/// them ([`Rig::check_reference`]), and the homes really planned in parallel.
+fn oracle(seed: u64, front_on: bool, cycles: usize, wide: bool) {
+    oracle_kept(seed, front_on, cycles, wide, keep_verified());
+}
+
+/// [`oracle`] with the run keeping its overlay as `keep4` says: unverified, a
+/// landing runs on the planning threads while the cycle routes (verified
+/// cycles land at once, to compare).
+fn oracle_kept(seed: u64, front_on: bool, cycles: usize, wide: bool, keep4: KeepCfg) {
+    oracle_with(seed, front_on, cycles, wide, keep4, Forced::No);
+}
+
+/// Sends every parallel run of this thread back to one thread while it lives.
+struct FallBack;
+
+impl FallBack {
+    fn at(at: Forced) -> FallBack {
+        crate::rsm::batcher::fall_back_at(at);
+        FallBack
+    }
+}
+
+impl Drop for FallBack {
+    fn drop(&mut self) {
+        crate::rsm::batcher::fall_back_at(Forced::No);
+    }
+}
+
+/// The oracle; with `forced`, every parallel run falls back there, so what
+/// its homes folded in their shards is undone and the run planned again on
+/// one thread.
+fn oracle_with(
+    seed: u64,
+    front_on: bool,
+    cycles: usize,
+    wide: bool,
+    keep4: KeepCfg,
+    forced: Forced,
+) {
+    let front = if front_on {
+        DedupFront::new(true, 16 << 20)
+    } else {
+        DedupFront::disabled()
+    };
+    let four = {
+        let _fall_back = (forced != Forced::No).then(|| FallBack::at(forced));
+        run_shaped(
+            &format!("homes-{seed}-{wide}-{}-{forced:?}", keep4.verify),
+            seed,
+            keep4,
+            front,
+            cycles,
+            4,
+            wide,
+        )
+    };
+    assert_eq!(
+        four.checked, four.cycles,
+        "every cycle is checked against the single planner"
+    );
+    assert_eq!(four.stats.fallbacks, 0, "{:?}", four.stats);
+    // The narrow workload is mostly cycles with one home at work (its batches
+    // are a few commands on a few keys); the wide one is mostly parallel.
+    assert!(
+        four.bins > 0,
+        "no run planned in a planning thread's own shards"
+    );
+    if forced == Forced::Second {
+        // Every second round was taken back out of its homes and planned by
+        // the single planner's loop; the homes' own commands stayed, so no
+        // run fell back.
+        assert_eq!(four.spread.0, 0, "a second round was kept");
+        assert!(four.spread.1 > 0, "no second round was taken back");
+        assert_eq!(four.planned.fallback, 0, "{:?}", four.planned);
+    } else if forced != Forced::No {
+        // Every parallel run fell back after its homes planned in place: the
+        // entries are still the single planner's, and the kept overlay a
+        // rebuild's (verified every cycle), so the undo took everything out.
+        assert!(
+            four.planned.fallback > 0,
+            "no run fell back: {:?}",
+            four.planned
+        );
+    } else {
+        // The second round went both ways: transactions planned by shares and
+        // kept, and rounds a share's vote took back.
+        if wide {
+            assert!(four.spread.0 > 0, "no transaction was planned by shares");
+            assert!(four.spread.1 > 0, "no second round was taken back");
+        }
+        let want = if wide { cycles / 2 } else { cycles / 20 };
+        assert!(
+            four.planned.parallel as usize >= want,
+            "the homes barely planned in parallel: {:?}",
+            four.planned
+        );
+        assert_eq!(
+            four.planned.fallback, 0,
+            "a unit went to the wrong home, or two homes touched one key: {:?}",
+            four.planned
+        );
+    }
+    eprintln!(
+        "homes oracle seed {seed} front {front_on} wide {wide} forced {forced:?}: {} entries; {:?}; {} homes planned; {} transactions by shares, {} second rounds taken back",
+        four.log.len(),
+        four.planned,
+        four.bins,
+        four.spread.0,
+        four.spread.1
+    );
+}
+
+#[test]
+fn the_scheduler_oracle_holds_when_every_parallel_run_falls_back() {
+    for seed in [3, 11] {
+        oracle_with(seed, true, 200, true, keep_verified(), Forced::Planned);
+    }
+    oracle_with(42, false, 250, false, keep_verified(), Forced::Planned);
+}
+
+/// The entry refuses what the homes planned (it cannot log a result as
+/// planned): their folds are already in their shards, and must leave them
+/// before the run is planned again.
+#[test]
+fn the_scheduler_oracle_holds_when_the_entry_refuses_what_the_homes_planned() {
+    for seed in [3, 11] {
+        oracle_with(seed, true, 200, true, keep_verified(), Forced::Assembled);
+    }
+    oracle_with(42, false, 250, false, keep_verified(), Forced::Assembled);
+}
+
+/// Every second round is taken back, as when a share did not hold: what the
+/// homes folded for it leaves their overlays and their shards, their own
+/// commands stay, and the single planner's loop plans the shared ones.
+#[test]
+fn the_scheduler_oracle_holds_when_every_second_round_is_taken_back() {
+    for seed in [3, 11] {
+        oracle_with(seed, true, 200, true, keep_verified(), Forced::Second);
+    }
+    oracle_with(42, false, 250, false, keep_verified(), Forced::Second);
+}
+
+/// The oracle with the product's dedup index: the homes plan with the dedup
+/// front on and trust its "new" for the messages in flight; the reference
+/// plans with the front off and reads the appends in flight for every hash.
+/// The entries must be the same.
+#[test]
+fn the_scheduler_oracle_holds_with_the_txns_dedup_index() {
+    let _txns = TxnsIndex::on();
+    oracle(5, true, 200, true);
+    oracle(99, true, 300, false);
+    oracle(11, false, 200, true);
+}
+
+#[test]
+fn the_scheduler_plans_the_single_planners_entries() {
+    oracle(1, false, 400, false);
+}
+
+#[test]
+fn the_scheduler_oracle_holds_on_other_streams() {
+    for seed in [7u64, 42, 1234] {
+        oracle(seed, false, 250, false);
+    }
+}
+
+#[test]
+fn the_scheduler_oracle_holds_with_the_dedup_front_on() {
+    oracle(99, true, 300, false);
+}
+
+#[test]
+fn the_scheduler_oracle_holds_on_wide_batches() {
+    for seed in [3u64, 11, 77] {
+        oracle(seed, false, 200, true);
+    }
+}
+
+#[test]
+fn the_scheduler_oracle_holds_on_wide_batches_with_the_dedup_front_on() {
+    oracle(5, true, 200, true);
+}
+
+#[test]
+fn the_scheduler_oracle_holds_with_the_landing_on_the_planning_threads() {
+    let unverified = KeepCfg {
+        verify: false,
+        ..keep_verified()
+    };
+    for seed in [3u64, 77] {
+        oracle_kept(seed, false, 200, true, unverified);
+    }
+    oracle_kept(5, true, 200, true, unverified);
+    oracle_kept(42, false, 250, false, unverified);
+}
+
+// ---------------------------------------------------------------------------
 // 3: the safety valves
 // ---------------------------------------------------------------------------
 
@@ -1129,10 +1644,11 @@ fn push_cmd(id: u64, queue: &str, partition: &str, txns: &[&str]) -> Command {
             .iter()
             .map(|t| PushItem {
                 hash: crate::util::txn_hash128(t),
-                frame: format!("{{\"t\":\"{t}\"}}").into_bytes().into(),
+                frame: frame_of(t),
             })
             .collect(),
         create_cfg: queue_cfg(queue),
+        links: Default::default(),
     })
 }
 
@@ -1160,9 +1676,280 @@ fn pushed_at(e: &Entry, id: u64) -> u64 {
     }
 }
 
+/// A partition a group creates is numbered with the entry, and its number may
+/// be one the dedup front still holds, seeded and empty: a create that was
+/// planned and then dropped (a transaction rolled back, a cycle not proposed)
+/// leaves it so. A retry of the new partition's message, after its entry has
+/// landed, is still a duplicate.
+#[test]
+fn a_partition_a_group_creates_under_a_number_the_front_held_still_dedups() {
+    let mut rig = Rig::new(
+        "front-reuse",
+        keep_verified(),
+        DedupFront::new(true, 64 << 20),
+        5,
+        4,
+    );
+    let s = no_steps();
+    let e1 = rig
+        .cycle(
+            vec![
+                push_cmd(1, "qd", "p0", &["a"]),
+                push_cmd(2, "qd", "p1", &["b"]),
+            ],
+            &s,
+        )
+        .entry
+        .unwrap();
+    rig.apply(1);
+    let top = e1
+        .effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::PartitionCreate { pid, .. } => Some(*pid),
+            _ => None,
+        })
+        .max()
+        .expect("two partitions created");
+    // What a dropped create leaves behind, for the next numbers.
+    for pid in top + 1..top + 16 {
+        rig.front.note_created(pid);
+    }
+    // A new partition whose name lives in another home than p0's: the two
+    // pushes are then planned by two threads, and the new partition is created
+    // under a placeholder.
+    let home = |name: &str| {
+        crate::rsm::planner::homes::home_of_shard(
+            crate::rsm::planner::homes::Homes::shard_of_name(TENANT, name),
+            4,
+        )
+    };
+    let new = (0..)
+        .map(|i| format!("new{i}"))
+        .find(|n| home(n) != home("p0"))
+        .expect("a name in another home");
+    let parallel0 = rig.state.planned.parallel;
+    rig.cycle(
+        vec![
+            push_cmd(3, "qd", "p0", &["c"]),
+            push_cmd(4, "qd", &new, &["n1"]),
+        ],
+        &s,
+    );
+    assert!(
+        rig.state.planned.parallel > parallel0,
+        "planned in two groups"
+    );
+    rig.apply(1);
+    // The retry, with one new message so that the push is logged.
+    let e3 = rig
+        .cycle(vec![push_cmd(5, "qd", &new, &["n1", "n2"])], &s)
+        .entry
+        .expect("the new message is logged");
+    let c = e3
+        .commands
+        .iter()
+        .find(|c| c.request_id == rid_of(5))
+        .expect("the retry was logged");
+    match &c.outcome {
+        Outcome::Push(p) => assert!(
+            matches!(p.items[0], crate::rsm::entry::PushVerdict::Duplicate { .. }),
+            "the retried message is a duplicate: {:?}",
+            p.items[0]
+        ),
+        o => panic!("not a push: {o:?}"),
+    }
+}
+
+/// The verdicts a push was answered with.
+fn verdicts_of(e: &Entry, id: u64) -> Vec<crate::rsm::entry::PushVerdict> {
+    let c = e
+        .commands
+        .iter()
+        .find(|c| c.request_id == rid_of(id))
+        .expect("the push was logged");
+    match &c.outcome {
+        Outcome::Push(p) => p.items.clone(),
+        o => panic!("not a push: {o:?}"),
+    }
+}
+
+/// A message whose entry is still in flight is pushed again: a duplicate, at
+/// the offset the first push gave it. The overlay keeps no row per message, so
+/// this is the dedup front saying "maybe" (the first push put the hash there
+/// when it was planned) and the probe then reading the appends in flight to
+/// the partition. With the front off, every probe reads them.
+fn a_retry_of_a_message_in_flight(front: DedupFront, threads: usize, tag: &str) {
+    let mut rig = Rig::new(tag, keep_verified(), front, 5, threads);
+    let s = no_steps();
+    // The partition exists, committed, and the front knows it.
+    rig.cycle(vec![push_cmd(1, "qd", "p0", &["a"])], &s);
+    rig.apply(1);
+    // `b` is planned and proposed, not applied: in flight.
+    let e2 = rig
+        .cycle(vec![push_cmd(2, "qd", "p0", &["b"])], &s)
+        .entry
+        .expect("b is logged");
+    let b_at = pushed_at(&e2, 2);
+    let e3 = rig
+        .cycle(vec![push_cmd(3, "qd", "p0", &["b", "c"])], &s)
+        .entry
+        .expect("c is logged");
+    let v = verdicts_of(&e3, 3);
+    assert!(
+        matches!(v[0], crate::rsm::entry::PushVerdict::Duplicate { offset, .. } if offset == b_at),
+        "the message in flight is a duplicate at {b_at}: {:?}",
+        v[0]
+    );
+    assert!(
+        matches!(v[1], crate::rsm::entry::PushVerdict::Created { .. }),
+        "the new message is appended: {:?}",
+        v[1]
+    );
+}
+
+#[test]
+fn a_message_still_in_flight_is_a_duplicate_when_it_is_pushed_again() {
+    a_retry_of_a_message_in_flight(DedupFront::new(true, 64 << 20), 1, "inflight-dup-front-1");
+    a_retry_of_a_message_in_flight(DedupFront::new(true, 64 << 20), 4, "inflight-dup-front-4");
+    a_retry_of_a_message_in_flight(DedupFront::disabled(), 1, "inflight-dup-nofront-1");
+    a_retry_of_a_message_in_flight(DedupFront::disabled(), 4, "inflight-dup-nofront-4");
+}
+
+/// The same with the product's dedup index: the front answers "scan these
+/// bands" for the hash the first push put there, the committed rows of the
+/// band do not hold it, and the appends in flight do.
+#[test]
+fn a_message_still_in_flight_is_a_duplicate_with_the_txns_index() {
+    let _txns = TxnsIndex::on();
+    a_retry_of_a_message_in_flight(DedupFront::new(true, 64 << 20), 1, "inflight-dup-txns-1");
+    a_retry_of_a_message_in_flight(DedupFront::new(true, 64 << 20), 4, "inflight-dup-txns-4");
+    a_retry_of_a_message_in_flight(DedupFront::disabled(), 1, "inflight-dup-txns-nofront-1");
+    a_retry_of_a_message_in_flight(DedupFront::disabled(), 4, "inflight-dup-txns-nofront-4");
+}
+
+/// The front is emptied while a message is in flight (what a node does when
+/// it becomes leader): the partition is seeded again at its next push, from
+/// the committed rows AND the appends in flight, so a retry of the message in
+/// flight is still a duplicate. A seed of committed rows alone would call it
+/// new, and nothing else would look.
+#[test]
+fn a_partition_seeded_again_knows_its_messages_in_flight() {
+    reseeded_with_a_message_in_flight("rows");
+    let _txns = TxnsIndex::on();
+    reseeded_with_a_message_in_flight("txns");
+}
+
+fn reseeded_with_a_message_in_flight(index: &str) {
+    for threads in [1, 4] {
+        let mut rig = Rig::new(
+            &format!("reseed-inflight-{index}-{threads}"),
+            keep_verified(),
+            DedupFront::new(true, 64 << 20),
+            5,
+            threads,
+        );
+        let s = no_steps();
+        rig.cycle(vec![push_cmd(1, "qd", "p0", &["a"])], &s);
+        rig.apply(1);
+        let e2 = rig
+            .cycle(vec![push_cmd(2, "qd", "p0", &["b"])], &s)
+            .entry
+            .expect("b is logged");
+        let b_at = pushed_at(&e2, 2);
+        rig.front.reset();
+        let e3 = rig
+            .cycle(vec![push_cmd(3, "qd", "p0", &["a", "b", "c"])], &s)
+            .entry
+            .expect("c is logged");
+        let v = verdicts_of(&e3, 3);
+        assert!(
+            matches!(v[0], crate::rsm::entry::PushVerdict::Duplicate { .. }),
+            "the committed message is a duplicate: {:?}",
+            v[0]
+        );
+        assert!(
+            matches!(v[1], crate::rsm::entry::PushVerdict::Duplicate { offset, .. } if offset == b_at),
+            "the message in flight is a duplicate at {b_at}: {:?}",
+            v[1]
+        );
+        assert!(
+            matches!(v[2], crate::rsm::entry::PushVerdict::Created { .. }),
+            "the new message is appended: {:?}",
+            v[2]
+        );
+    }
+}
+
+/// A partition a home creates is not in the front while its id is a
+/// placeholder, and is seeded at its next push. That push comes while the
+/// creating entry is still in flight: the seed reads its appends, and a retry
+/// of the first message is a duplicate.
+#[test]
+fn a_partition_a_home_created_dedups_while_its_create_is_in_flight() {
+    home_created_with_a_message_in_flight("rows");
+    let _txns = TxnsIndex::on();
+    home_created_with_a_message_in_flight("txns");
+}
+
+fn home_created_with_a_message_in_flight(index: &str) {
+    let mut rig = Rig::new(
+        &format!("home-created-inflight-{index}"),
+        keep_verified(),
+        DedupFront::new(true, 64 << 20),
+        5,
+        4,
+    );
+    let s = no_steps();
+    rig.cycle(vec![push_cmd(1, "qd", "p0", &["a"])], &s);
+    rig.apply(1);
+    let home = |name: &str| {
+        crate::rsm::planner::homes::home_of_shard(
+            crate::rsm::planner::homes::Homes::shard_of_name(TENANT, name),
+            4,
+        )
+    };
+    let new = (0..)
+        .map(|i| format!("new{i}"))
+        .find(|n| home(n) != home("p0"))
+        .expect("a name in another home");
+    let parallel0 = rig.state.planned.parallel;
+    let e2 = rig
+        .cycle(
+            vec![
+                push_cmd(2, "qd", "p0", &["b"]),
+                push_cmd(3, "qd", &new, &["n1"]),
+            ],
+            &s,
+        )
+        .entry
+        .expect("both are logged");
+    assert!(
+        rig.state.planned.parallel > parallel0,
+        "two homes planned: the new partition was created under a placeholder"
+    );
+    let n1_at = pushed_at(&e2, 3);
+    // Not applied: the create and `n1` are in flight.
+    let e3 = rig
+        .cycle(vec![push_cmd(4, "qd", &new, &["n1", "n2"])], &s)
+        .entry
+        .expect("n2 is logged");
+    let v = verdicts_of(&e3, 4);
+    assert!(
+        matches!(v[0], crate::rsm::entry::PushVerdict::Duplicate { offset, .. } if offset == n1_at),
+        "the message in flight is a duplicate at {n1_at}: {:?}",
+        v[0]
+    );
+    assert!(
+        matches!(v[1], crate::rsm::entry::PushVerdict::Created { .. }),
+        "the new message is appended: {:?}",
+        v[1]
+    );
+}
+
 #[test]
 fn a_new_epoch_drops_what_was_kept_and_the_next_cycle_plans_from_a_rebuild() {
-    let mut rig = Rig::new("keep-epoch", keep_verified(), DedupFront::disabled(), 3);
+    let mut rig = Rig::new("keep-epoch", keep_verified(), DedupFront::disabled(), 3, 1);
     let s = no_steps();
     let e1 = rig
         .cycle(vec![push_cmd(1, "q0", "p0", &["a", "b"])], &s)
@@ -1223,7 +2010,7 @@ fn an_entry_planned_and_never_proposed_is_never_carried() {
     // list: the unproposed entry is never folded into the next cycle.
     let mut keep = keep_verified();
     keep.verify = false; // the rebuilt reference is the thing under test here
-    let mut rig = Rig::new("keep-unproposed", keep, DedupFront::disabled(), 4);
+    let mut rig = Rig::new("keep-unproposed", keep, DedupFront::disabled(), 4, 1);
     let s = no_steps();
     rig.cycle(vec![push_cmd(1, "q0", "p0", &["a"])], &s);
     rig.cycle(vec![push_cmd(2, "q0", "p0", &["b"])], &s);
@@ -1255,57 +2042,59 @@ fn an_entry_planned_and_never_proposed_is_never_carried() {
 }
 
 #[test]
-fn a_cycle_that_folds_what_its_entry_does_not_carry_is_not_kept() {
-    // A DLQ-replay transaction whose second push is a duplicate answers EMPTY
-    // without restoring the overlay: its first push group stays folded, in no
-    // entry. The old path dropped that with the cycle; the kept overlay must
-    // not carry it on.
-    let mut rig = Rig::new("keep-poison", keep_verified(), DedupFront::disabled(), 5);
+fn a_replay_whose_second_push_is_a_duplicate_folds_nothing() {
+    // A DLQ-replay transaction whose second push is a duplicate answers EMPTY:
+    // it logs nothing, so its first push (a new partition and its append)
+    // must not stay folded either. A cycle that held it would hand a later
+    // push to that partition an append no entry created.
+    let mut rig = Rig::new("keep-replay", keep_verified(), DedupFront::disabled(), 5, 1);
     let s = no_steps();
     rig.cycle(vec![push_cmd(1, "qd", "p0", &["dup"])], &s);
     rig.apply(1);
-    let replay = Command::Transaction(TxnCommand {
-        request_id: rid_of(2),
-        tenant: TENANT.to_string(),
-        pushes: vec![
-            match push_cmd(20, "qd", "p1", &["fresh"]) {
-                Command::Push(p) => p,
-                _ => unreachable!(),
-            },
-            match push_cmd(21, "qd", "p0", &["dup"]) {
-                Command::Push(p) => p,
-                _ => unreachable!(),
-            },
-        ],
-        acks: Vec::new(),
-        positional_acks: Vec::new(),
-        kv: Vec::new(),
-        timers: Vec::new(),
-        extra_effects: Vec::new(),
-        allow_duplicate: true,
-        positions: Vec::new(),
-        engine_acks: AckOutcome::default(),
-    });
+    let replay = |id: u64| {
+        Command::Transaction(TxnCommand {
+            request_id: rid_of(id),
+            tenant: TENANT.to_string(),
+            pushes: vec![
+                match push_cmd(id * 10, "qd", "p1", &["fresh"]) {
+                    Command::Push(p) => p,
+                    _ => unreachable!(),
+                },
+                match push_cmd(id * 10 + 1, "qd", "p0", &["dup"]) {
+                    Command::Push(p) => p,
+                    _ => unreachable!(),
+                },
+            ],
+            acks: Vec::new(),
+            positional_acks: Vec::new(),
+            kv: Vec::new(),
+            timers: Vec::new(),
+            extra_effects: Vec::new(),
+            allow_duplicate: true,
+            positions: Vec::new(),
+            engine_acks: AckOutcome::default(),
+        })
+    };
     let rebuilt0 = rig.state.stats.rebuilt;
-    let out = rig.cycle(vec![replay], &s);
+    let out = rig.cycle(vec![replay(2)], &s);
     assert!(out.entry.is_none(), "the replay logged nothing");
-    // The next push to `qd/p1` must create the partition afresh at offset 0:
-    // the stray fold (a partition and an append nobody logged) is gone. (Had
-    // it been kept, this cycle's verify would already have failed on it.)
+    assert_eq!(rig.state.stats.poisoned, 0, "and folded nothing");
+    // The same replay, then a push to `qd/p1` in the same cycle: the push
+    // creates the partition, at offset 0.
     let e = rig
-        .cycle(vec![push_cmd(3, "qd", "p1", &["x"])], &s)
+        .cycle(vec![replay(3), push_cmd(4, "qd", "p1", &["x"])], &s)
         .entry
         .unwrap();
+    assert_eq!(rig.state.stats.poisoned, 0, "the replay folded nothing");
     assert_eq!(
-        rig.state.stats.poisoned, 1,
-        "the cycle's stray fold was caught"
+        rig.state.stats.rebuilt, rebuilt0,
+        "nothing was rebuilt: the kept overlay stayed exact"
     );
-    assert_eq!(
-        rig.state.stats.rebuilt,
-        rebuilt0 + 1,
-        "the next cycle rebuilt"
+    assert!(
+        e.commands.iter().all(|c| c.request_id != rid_of(3)),
+        "the replay logged nothing"
     );
-    assert_eq!(pushed_at(&e, 3), 0);
+    assert_eq!(pushed_at(&e, 4), 0);
     assert!(
         e.effects
             .iter()
@@ -1316,7 +2105,7 @@ fn a_cycle_that_folds_what_its_entry_does_not_carry_is_not_kept() {
 
 #[test]
 fn the_knob_off_keeps_nothing() {
-    let mut rig = Rig::new("keep-off", KeepCfg::off(), DedupFront::disabled(), 6);
+    let mut rig = Rig::new("keep-off", KeepCfg::off(), DedupFront::disabled(), 6, 1);
     let s = no_steps();
     for i in 0..5 {
         rig.cycle(vec![push_cmd(i + 1, "q0", "p0", &[&format!("t{i}")])], &s);
@@ -1332,7 +2121,7 @@ fn the_knob_off_keeps_nothing() {
 fn a_periodic_reset_rebuilds_and_still_matches() {
     let mut keep = keep_verified();
     keep.reset_every = 3;
-    let mut rig = Rig::new("keep-reset", keep, DedupFront::disabled(), 8);
+    let mut rig = Rig::new("keep-reset", keep, DedupFront::disabled(), 8, 1);
     let s = no_steps();
     for i in 0..9u64 {
         rig.cycle(vec![push_cmd(i + 1, "q0", "p0", &[&format!("t{i}")])], &s);

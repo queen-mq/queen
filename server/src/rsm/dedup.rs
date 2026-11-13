@@ -1002,6 +1002,17 @@ pub fn delete_partition_chunk<W: Writes + ?Sized>(
 //       Inserting at plan time can only ADD hashes that never commit (a dropped
 //       entry) — a false positive, an extra probe, never a false "absent".
 //
+// The same two facts cover the messages still IN FLIGHT, and since 2026-11-13
+// the planner relies on that: its overlay keeps no row per message, so for a
+// hash the front calls absent it reads nothing, committed or in flight, and
+// for any other answer it reads the committed rows AND the appends in flight
+// to the partition (`Planner::dedup_probe_many`). An append in flight was
+// either planned by this leader after the partition was seeded (fact 2: its
+// hashes went in at plan time) or was in the overlay when the partition was
+// seeded (fact 1: the seed reads the overlay's appends). A partition created
+// under a placeholder id is not in the front until it is numbered and seeded:
+// until then every push to it reads its appends.
+//
 // The one thing (2) rests on is that THIS planner sees every committed append —
 // true while one leader is the continuous author (phase 1 is a single node with
 // the local replicator, which never rolls a proposed entry back). A leadership

@@ -86,6 +86,7 @@ pub(super) fn qcfg() -> QueueConfig {
         retention_sink_hold: String::new(),
         retention_sink_hold_max_seconds: 0,
         created_at_us: 0,
+        route: None,
     }
 }
 
@@ -343,6 +344,7 @@ impl H {
                 error,
                 retry_count,
                 failed_at_us,
+                headers,
             } => w
                 .put_dlq(
                     tenant,
@@ -358,6 +360,7 @@ impl H {
                         error: error.clone(),
                         retry_count: *retry_count,
                         failed_at_us: *failed_at_us,
+                        headers: headers.clone(),
                     },
                 )
                 .expect("dlq"),
@@ -572,6 +575,7 @@ impl H {
                             message_id: None,
                             txn: t.to_string(),
                             payload: format!("{{\"t\":\"{t}\"}}").into_bytes(),
+                            headers: Vec::new(),
                         }
                     }),
                 })

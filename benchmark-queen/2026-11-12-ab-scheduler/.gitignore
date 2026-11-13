@@ -1,0 +1,7 @@
+# The broker binaries (42 MB each) and the rig's addresses stay out of git.
+bin/
+scripts/hosts.env
+scripts/hosts-big.env
+scripts/__pycache__/
+# Raw perf samples: the reports made from them are kept.
+*.gz

@@ -1,0 +1,189 @@
+---
+title: "Routing: filtered groups, reading queues, link"
+description: "Give a consumer group only the messages a where takes, give a reader a queue of its own over other queues, and forward a message into another queue, all without copying a payload: a link is about 20 bytes, written in the same commit as the message."
+type: how-to
+tier: use
+sidebar:
+  label: "Routing"
+  order: 8.5
+sourceOfTruth:
+  - server/src/rsm/route/mod.rs
+  - server/src/rsm/route/cond.rs
+  - server/src/rsm/route/link.rs
+  - server/src/rsm/planner/route.rs
+  - server/src/rsm/facade/real/route.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2/feed.rs
+  - server/src/rsm/facade/real/phase2/streams.rs
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/maintenance.rs
+---
+
+A queue can read other queues. A consumer group can read only some of a queue. A transaction can forward the message it holds into another queue. In each case the message is written once, at its source; the queue that reads it holds a **link**, about 20 bytes, written in the same commit as the message itself.
+
+Three rules are all there is to learn:
+
+1. A group or a queue can read only what matches a `where`.
+2. The source keeps the messages; the queues that read it consume them.
+3. It is the same message, with the same `id` and `transactionId`, everywhere it shows.
+
+<Why>without this, a reader that wants a few kinds of message reads and acks all of them, and routing means a router process that copies every message and adds a commit per batch. A link costs the source's commit nothing but a few bytes, and it cannot be lost or doubled: it is in the same entry as the message.</Why>
+
+## The `where` language
+
+One language, in every place that filters: filtered groups, reading queues and the [tenant feed](/writing-applications/streams/).
+
+```text
+data.kind in ('order.paid', 'order.refunded') and data.total > 100 and headers.type prefix 'order.'
+```
+
+| Part | What it takes |
+| --- | --- |
+| Fields | `queue`, `partition`, `transactionId`, `data` or `data.a.b` (a path into the JSON payload, up to 16 deep), `headers.<name>` |
+| Operators | `=` `!=` `<` `<=` `>` `>=` `in` `exists` `prefix` `!prefix` |
+| Combining | `and` only; `in (...)` for alternatives |
+| Values | `'text'`, numbers, `true`, `false`, `null`; `in` takes up to 64 values |
+| Size | up to 16 conditions |
+
+The same conditions can be sent as a list, `[{"field":"data.kind","op":"=","value":"order.paid"}]`, which is what the SDKs' `.where(field, op, value)` builds. A field the message does not have holds for no operator, `!=` included, as in SQL.
+
+## Filtered consumer groups
+
+```js
+await queen.queue('order-events')
+  .group('billing')
+  .where('data.kind', 'in', ['order.paid', 'order.refunded'])
+  .consume(handler)
+```
+
+A group's `where` is set on its first pop, like its start (`subscriptionMode`), and fixed from then on. The group then gets only the messages it takes; its lag counts only those, and a waiting pop wakes only for one of them. Leases, acks and dead letters work as for any group; retries, the dead-letter queue and priority are the queue's.
+
+| Case | Answer |
+| --- | --- |
+| Another worker of the group sends a different `where` | refused, `where_mismatch`, with the group's current `where` |
+| A `where` with no group | refused: name a group |
+| A `where` on a group that already reads the queue without one | refused, `where_mismatch`: a filter starts as a new group |
+| `subscriptionMode('all')` or `subscriptionFrom` | the group starts with every match the queue still keeps |
+| Change the `where` | `POST /api/v1/consumer-groups/:group/subscription` with `{"queue":"order-events","where":"..."}`; it applies from the next push |
+| Delete the group | as any group: `DELETE /api/v1/consumer-groups/:group/queues/:queue` |
+| Every pop's answer | carries `"filtered": true`, an empty one too (a 200 with that body, not a 204). An older broker ignores `where` and would hand the group the whole queue, so the SDKs stop a consumer whose answer lacks it. |
+| The group listings | `GET /api/v1/consumer-groups` and the lag listings show the group under its queue, with `"filtered": true` and its `where` |
+
+<Why>"only some of these" is the most common need, and here it is one line in the consumer, with no queue to create and nothing to ack that the consumer does not want.</Why>
+
+## Reading queues
+
+A reading queue is a queue whose messages come from other queues: give it `from` and, if you want, `where` and `partitionBy`.
+
+```js
+await queen.queue('orders-it').config({
+  from: 'orders',
+  where: "data.country = 'IT'",
+  partitionBy: 'same',
+  leaseTime: 30,
+  retryLimit: 5,
+  retryDelay: 1000,
+  deadLetterQueue: true,
+  dlqAfterMaxRetries: true,
+  priority: 0,
+  delayedProcessing: 0,
+  windowBuffer: 0,
+}).create()
+```
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `from` | (none) | The source: a queue name, or a list of names and `{"queue": "...", "where": "..."}` objects. `null` stops the reading; what the queue holds stays readable. |
+| `where` | every message | The condition a message of a source named by name only must meet. |
+| `partitionBy` | `same` | `same`: the source's partition names, in the source's order. `data.<path>` or `headers.<name>`: the field's value names the partition (a message without it is not routed). |
+| `start` | `now` | `now`: the messages pushed from now on. `all`: every match the sources still keep, then the new ones, in order. |
+
+A reading queue has its own leases, retries, dead-letter queue, priority, delays and consumer groups, and its own token can read it without reading its sources. It does not have keep settings: `retentionEnabled`, `retentionSeconds`, `completedRetentionSeconds`, `maxWaitTimeSeconds`, `dedupWindowSeconds`, `encryptionEnabled`, `maxSize` and the sink hold are refused on it (`reading_queue`), because the source decides how long a message is kept.
+
+<Why>a filtered group shares its queue's settings. A reading queue is for a reader that needs settings of its own, partitions of its own (`partitionBy`), several sources, or a token of its own.</Why>
+
+| Case | Answer |
+| --- | --- |
+| A push into a reading queue | refused, `reading_queue`: push to its source |
+| An existing ordinary queue given `from` | refused: a reading queue is a new queue |
+| A reading queue that reads itself, at any depth | refused, `route_loop` |
+| A source that does not exist, or is a filtered group's | refused, `source_not_found` or `bad_source` |
+| More than 16 sources, or a 65th reader of one source | refused, `too_many_sources` or `too_many_readers` (`QUEEN_MAX_SOURCES_PER_QUEUE`, `QUEEN_MAX_READERS_PER_QUEUE`) |
+| A `where` change | applies from the next push; to rebuild, delete and create |
+| Deleting a source that reading queues read | refused, `has_readers` (409), unless `?force=true`: their links then read as gone |
+
+A message that two sources' partitions both route into one partition of a reading queue, under the same `transactionId`, is kept once: a reading queue deduplicates by `transactionId` within its partitions, as every queue does.
+
+A queue's page, `GET /api/v1/resources/queues/:queue`, shows its part in routing under `route`: what it reads (`from`, each with its `where`), who reads it (`readers`, each with its `where` and the age of its oldest unconsumed message, `oldestUnconsumedAt`), the queues that hold links to it (`holders`, with `holdsRetention`), and while it catches up, how far (`catchUp`: messages read of the total). The queue list shows the same `route` without the ages.
+
+## What a reading queue keeps
+
+The source keeps the message. For the source's retention, every reading queue and filtered group counts as one more consumer group of it:
+
+| Source setting | What a reader gets |
+| --- | --- |
+| `retentionSeconds`, `maxWaitTimeSeconds` | the same limit: past it, a link reads as gone, as a message is gone for a group that is behind |
+| `completedRetentionSeconds` | the source waits for the readers too: it keeps a message until they have consumed their link |
+| retention off | everything is kept |
+
+How far back a source's readers hold its completed retention is the gauge `queen_holder_floor_age_seconds{queue}`: the age of the oldest message they still keep unconsumed. A link whose message is gone is skipped when it is read (the `queen_link_expired_at_source_total` counter). A dead letter is a copy: filed from a reading queue, it holds the message itself and its headers, because a dead letter outlives its source.
+
+## `link`: forward a message without its payload
+
+A transaction can put the message it holds into another queue, with the ack, the KV writes and the timers, all or nothing:
+
+```js
+await queen.transaction()
+  .ack(message)
+  .queue('manual-review').partition(message.partition)
+  .link([message], { headers: { 'review-reason': 'amount' } })
+  .commit()
+```
+
+On the wire it is one more operation of `POST /api/v1/transaction`:
+
+```json
+{"type": "link", "queue": "manual-review", "partition": "order-9137",
+ "from": {"partitionId": "123", "offset": 42, "transactionId": "order-9137-paid", "consumerGroup": "billing"},
+ "headers": {"review-reason": "amount"}}
+```
+
+`from` names the message as a pop returned it, with the group it was popped with (`consumerGroup`, queue mode when absent: a scoped credential must be allowed to consume the source with it); a feed entry names it by `queue`, `partition`, `offset` and `transactionId` instead. The target gets the same message, the same id and transaction id, with the source's headers and then the link's own. A second link of the same message (the same `transactionId`) into the same partition is a no-op: the transaction commits and the link's result says `"duplicate": true`, so a forward is safe to retry and a message forwarded twice is held once. A link to a message that is gone rolls the transaction back (`source_gone`), and so does one whose transaction id is not the one at that offset (`source_mismatch`). A reading queue takes no link but its sources' (`reading_queue`).
+
+A queue that holds links this way is a holder of the source, which keeps its completed retention for as long as the holder keeps anything: set retention on a queue you forward into.
+
+<Why>relays and pipelines that hand a message to the next step re-send its whole payload at every hop. With `link`, a hop costs about 20 bytes, whatever the payload weighs.</Why>
+
+## In streams and the feed
+
+A [stream](/writing-applications/streams/)'s `.to(queue)` writes a link when its result is its input message unchanged: nothing but `where`, `filter`, `keyBy` or routing before it, on a queue source and on the feed. The target gets the same message, with the same id and transaction id. `.to(queue, { link: false })` writes copies, and a result a step changed is always a copy. A second link of one message into the same partition is a no-op, so a retried commit is safe.
+
+On the wire, a stream cycle's push item names its input message instead of a payload: `{"queue": "...", "partition": "...", "link": {"offset": 42, "transactionId": "..."}}` (the cycle's own partition unless it names `partitionId`). The SDKs send the payload beside it, which a broker that reads links ignores and an older one stores.
+
+The [tenant feed](/writing-applications/streams/) shows every queue's messages, a reading queue's and a link target's read through their links: the same id, transaction id and payload as at the source, with the link's headers over the source's, and `"link": {"queue", "partition", "offset"}` saying where the message is at its source, so a reader of every queue can tell a message it already has. A filtered group has no queue of its own there.
+
+## What it costs
+
+| | Copy (a router) | Link |
+| --- | --- | --- |
+| Bytes through the log, per message and reader | the whole message | about 20 bytes, in the push's own commit |
+| When the reader has it | after the router reads and commits | in the push's commit |
+| Planning | the router's commits | in the push's own plan, with the readers' partitions it writes (pushes to other partitions plan at the same time) |
+| Reading | the copy | the source's record, read and decoded once per record |
+
+A `where` on the payload is evaluated once, by the leader, when the push is planned (an encrypted payload is decrypted for it); the entry holds the answer, so followers and replays never evaluate it.
+
+## Limits
+
+| Limit | Default | Setting |
+| --- | --- | --- |
+| Conditions in one `where` | 16 | `QUEEN_WHERE_MAX_CONDITIONS` |
+| Values in one `in` | 64 | `QUEEN_WHERE_MAX_IN` |
+| Readers of one source (reading queues and filtered groups) | 64 | `QUEEN_MAX_READERS_PER_QUEUE` |
+| Sources of one reading queue | 16 | `QUEEN_MAX_SOURCES_PER_QUEUE` |
+| Readers of readers (a chain) | 8 deep | |
+
+Every reader costs an evaluation of its `where` on each push to its source, which is why the readers of one source are limited by default; raise it knowing that.
+
+All of this needs every node of the cluster on a broker that reads catalogue version 8; before that, a `where`, `from`, headers or `link` is refused with `cluster_version`.

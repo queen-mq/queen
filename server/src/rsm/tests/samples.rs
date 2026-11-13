@@ -51,6 +51,7 @@ pub fn queue_config() -> QueueConfig {
         retention_sink_hold: String::new(),
         retention_sink_hold_max_seconds: 604_800,
         created_at_us: 1_768_000_000_000_000,
+        route: None,
     }
 }
 
@@ -182,6 +183,7 @@ pub fn effect_sample(kind: Kind) -> Effect {
             error: "Retries exhausted".into(),
             retry_count: 3,
             failed_at_us: 1_768_000_120_000_000,
+            headers: Vec::new(),
         },
         Kind::DlqDelete => Effect::DlqDelete {
             dlq_id: uuid(0x70),

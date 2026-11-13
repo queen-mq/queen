@@ -1,0 +1,7 @@
+[16:07:26] run ab-push-sched: build sched, push, 1000 partitions, steps of 40s at: 200000 400000 600000 800000 1000000 1200000 | TXN_SIZE=10 KV=0 CONS=33 PROCS=4 BATCH=100 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[16:08:39]   200,000: offered 199,995 | pushed 200,002 | consumed 199,995 | shed 0 errors 0 | push p50 2.2 p99 3.4 | e2e p50 3.4 p99 5.2 | cores 3.3 / 1.6 / 1.6 | loader 1.9c  OK 
+[16:09:52]   400,000: offered 399,993 | pushed 399,997 | consumed 400,020 | shed 0 errors 0 | push p50 2.5 p99 4.3 | e2e p50 4.4 p99 7.4 | cores 4.7 / 2.2 / 2.2 | loader 3.6c  OK 
+[16:11:06]   600,000: offered 599,980 | pushed 600,036 | consumed 600,026 | shed 0 errors 0 | push p50 3.0 p99 5.7 | e2e p50 5.8 p99 10.9 | cores 5.5 / 2.5 / 2.6 | loader 4.9c  OK 
+[16:12:19]   800,000: offered 799,993 | pushed 800,010 | consumed 800,043 | shed 0 errors 0 | push p50 4.1 p99 8.4 | e2e p50 8.6 p99 16.3 | cores 6.0 / 2.5 / 2.6 | loader 6.0c  OK 
+[16:13:30] 1,000,000: offered 1,000,007 | pushed 1,000,037 | consumed 1,000,147 | shed 0 errors 0 | push p50 5.6 p99 31.7 | e2e p50 12.2 p99 75.8 | cores 6.5 / 2.6 / 2.7 | loader 7.0c  OK 
+[16:14:42] 1,200,000: offered 1,199,972 | pushed 1,199,845 | consumed 1,199,537 | shed 0 errors 0 | push p50 16.0 p99 176.1 | e2e p50 34.3 p99 307.2 | cores 6.9 / 2.6 / 2.7 | loader 7.9c  OK 

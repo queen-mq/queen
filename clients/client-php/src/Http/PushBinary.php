@@ -11,18 +11,20 @@ namespace Queen\Http;
  *
  * All integers little-endian. flags: 1 = the body is one zstd frame of raw_len
  * bytes, 2 = answer with the counts only, 4 = every item carries its
- * transaction id (empty = the broker mints it). No trace id. Each payload is
- * one JSON document.
+ * transaction id (empty = the broker mints it). No trace id and no headers.
+ * Each payload is one JSON document.
  *
  * With flag 8 (encodeFrames) a group is the messages as the broker stores
  * them, compressed here once:
  *
  *     body:  u32 groups | per group: u16 len, queue | u16 len, partition | u32 n | u32 z_len | z
- *     z:     one zstd frame of n frames: u32 body_len | u8 0 | u8[16] message id
- *            | u16 len, transactionId | payload
+ *     z:     one zstd frame of n frames: u32 body_len | u8 flags | u8[16] message id
+ *            | u16 len, transactionId | [u16 len, headers, flag 8] | payload
  *
  * The message id is a version-7 UUID minted by the client; a message without
- * its own transaction id uses the id's text. The broker checks every frame and
+ * its own transaction id uses the id's text. A frame's flags are 0, or 8 when
+ * the message has headers: `u16 count | (u8 len, name | u16 len, value) x
+ * count`, sorted by name (headersBlock). The broker checks every frame and
  * keeps the compressed bytes as they are, so it does not compress them again.
  *
  * A broker that does not know this body answers 400; a client sends it only
@@ -34,8 +36,8 @@ namespace Queen\Http;
  *
  *     "QTB1" | u8 flags | u32 len, head | u32 groups | the groups, as with flag 8 above
  *
- * head is the JSON transaction body without its push operations: the acks in
- * `operations`, `requiredLeases`, `kv`, `timers`. flags: 2 = the answer leaves
+ * head is the JSON transaction body without its push operations: the acks and
+ * the links in `operations`, `requiredLeases`, `kv`, `timers`. flags: 2 = the answer leaves
  * out the pushes' and the acks' results and counts them (`pushed`,
  * `duplicate`, `acked`); the riders' results stay. In the answer the head's
  * operations come first and the groups' messages after them, in the order
@@ -51,6 +53,8 @@ final class PushBinary
     private const FLAG_COUNTS = 2;
     private const FLAG_TXN = 4;
     private const FLAG_FRAMES = 8;
+    /** A stored frame's flag: its headers block follows the transaction id. */
+    private const FRAME_HEADERS = 8;
 
     /**
      * Encode batches as a binary push body.
@@ -64,12 +68,16 @@ final class PushBinary
      *                       instead of one object per message
      *
      * @throws \LengthException when a name or a transaction id is over 65535 bytes
+     * @throws \InvalidArgumentException for a batch with headers, which only frames carry
      */
     public static function encode(array $batches, bool $compress = false, bool $counts = false): string
     {
         $withTxn = false;
         foreach ($batches as $batch) {
             $withTxn = $withTxn || isset($batch['transactionIds']);
+            if (array_filter($batch['headerBlocks'] ?? [], static fn (?string $block): bool => $block !== null) !== []) {
+                throw new \InvalidArgumentException('the plain binary push body has no place for headers: frame them (encodeFrames)');
+            }
         }
         $flags = ($counts ? self::FLAG_COUNTS : 0) | ($withTxn ? self::FLAG_TXN : 0);
         $parts = [pack('V', count($batches))];
@@ -97,9 +105,10 @@ final class PushBinary
     /**
      * Encode batches as a binary push body whose groups are the messages
      * framed as the broker stores them and compressed once, here. Same batches
-     * as encode(); $counts asks for the short answer.
+     * as encode(), and headerBlocks, when given, holds one headersBlock() (or
+     * null, for none) per payload; $counts asks for the short answer.
      *
-     * @param list<array{queue: string, partition: string, payloads: list<string>, transactionIds?: list<string>|null}> $batches
+     * @param list<array{queue: string, partition: string, payloads: list<string>, transactionIds?: list<string>|null, headerBlocks?: list<?string>|null}> $batches
      *
      * @throws \LengthException when a name or a transaction id is over 65535 bytes
      */
@@ -115,7 +124,7 @@ final class PushBinary
      * here. $counts: the broker counts the pushes and the acks in its answer
      * instead of rendering one result for each.
      *
-     * @param list<array{queue: string, partition: string, payloads: list<string>, transactionIds?: list<string>|null}> $batches
+     * @param list<array{queue: string, partition: string, payloads: list<string>, transactionIds?: list<string>|null, headerBlocks?: list<?string>|null}> $batches
      *
      * @throws \LengthException when a name or a transaction id is over 65535 bytes
      */
@@ -152,8 +161,7 @@ final class PushBinary
                 if ($txn === '') {
                     $txn = self::uuidText($id);
                 }
-                $txn = self::text16($txn, 'transaction id');
-                $frames[] = pack('V', 17 + strlen($txn) + strlen($payload)) . "\0" . $id . $txn . $payload;
+                $frames[] = self::frame($id, $txn, $payload, $batch['headerBlocks'][$i] ?? null);
             }
             $compressed = Zstd::compress(implode('', $frames));
             $parts[] = self::text16($batch['queue'], 'queue name')
@@ -167,13 +175,57 @@ final class PushBinary
     }
 
     /**
-     * The items of a JSON push ({queue, partition, payload, transactionId}) as
-     * a binary push body, or null when one of them cannot travel in it: a
-     * trace id, a transaction id that is not a string, a payload JSON does not
-     * carry, a name over 65535 bytes. The caller then sends the JSON body, and
-     * the broker answers that as it always did. Consecutive items of one
-     * partition share a group, so the order of the items is the order on the
-     * wire.
+     * One message framed as the broker stores it: `u32 body_len | u8 flags |
+     * u8[16] id | u16 len, transactionId | [u16 len, headers] | payload`,
+     * flags 8 when $headerBlock (a headersBlock()) is given and 0 otherwise.
+     *
+     * @throws \LengthException when the transaction id is over 65535 bytes
+     */
+    public static function frame(string $id, string $transactionId, string $payload, ?string $headerBlock = null): string
+    {
+        $txn = self::text16($transactionId, 'transaction id');
+        $headers = $headerBlock === null ? '' : self::text16($headerBlock, 'headers block');
+        $flags = $headerBlock === null ? 0 : self::FRAME_HEADERS;
+
+        return pack('V', 17 + strlen($txn) + strlen($headers) + strlen($payload)) . chr($flags) . $id . $txn . $headers . $payload;
+    }
+
+    /**
+     * Headers ([name => text], at least one: a frame without headers carries
+     * no block) as the block a stored frame carries: `u16 count | (u8 len,
+     * name | u16 len, value) x count`, sorted by name, as the broker writes
+     * and checks it. Null when they
+     * cannot travel in it: a value that is not UTF-8 text, a name over 255
+     * bytes, a value or a block over 65535. The caller then sends the JSON
+     * body, and the broker answers in its own words (it refuses far smaller
+     * headers than these: 64 bytes a name and 8 KiB a message by default).
+     */
+    public static function headersBlock(array $headers): ?string
+    {
+        ksort($headers, SORT_STRING);
+        $parts = [pack('v', count($headers))];
+        foreach ($headers as $name => $value) {
+            $name = (string) $name;
+            if (!is_string($value) || strlen($name) > 0xff || strlen($value) > 0xffff
+                || preg_match('//u', $name . $value) !== 1) {
+                return null;
+            }
+            $parts[] = chr(strlen($name)) . $name . pack('v', strlen($value)) . $value;
+        }
+        $block = implode('', $parts);
+
+        return strlen($block) <= 0xffff ? $block : null;
+    }
+
+    /**
+     * The items of a JSON push ({queue, partition, payload, transactionId,
+     * headers}) as a binary push body, or null when one of them cannot travel
+     * in it: a trace id, headers in a body that is not framed ($compress
+     * false) or that the block cannot carry, a transaction id that is not a
+     * string, a payload JSON does not carry, a name over 65535 bytes. The
+     * caller then sends the JSON body, and the broker answers that as it
+     * always did. Consecutive items of one partition share a group, so the
+     * order of the items is the order on the wire.
      *
      * $compress: the messages framed and compressed here, kept by the broker
      * as they are.
@@ -185,7 +237,7 @@ final class PushBinary
         }
         $batches = [];
         foreach ($items as $item) {
-            if (!self::addItem($batches, $item)) {
+            if (!self::addItem($batches, $item, $compress)) {
                 return null;
             }
         }
@@ -199,9 +251,10 @@ final class PushBinary
 
     /**
      * Adds one pushed item to $batches, in the last one when it is the same
-     * partition's. False when the item cannot travel in a binary body.
+     * partition's. False when the item cannot travel in a binary body; with
+     * headers, only a framed one ($frames) has a place for them.
      */
-    private static function addItem(array &$batches, mixed $item): bool
+    private static function addItem(array &$batches, mixed $item, bool $frames): bool
     {
         if (!is_array($item) || !is_string($item['queue'] ?? null) || !array_key_exists('payload', $item)) {
             return false;
@@ -214,6 +267,17 @@ final class PushBinary
         if (!is_string($txn) || !is_string($partition)) {
             return false;
         }
+        $block = null;
+        $headers = $item['headers'] ?? null;
+        if ($headers instanceof \stdClass) {
+            $headers = (array) $headers;
+        }
+        if ($headers !== null && $headers !== []) {
+            $block = $frames && is_array($headers) ? self::headersBlock($headers) : null;
+            if ($block === null) {
+                return false;
+            }
+        }
         try {
             $payload = json_encode($item['payload'], JSON_THROW_ON_ERROR);
         } catch (\JsonException) {
@@ -221,10 +285,17 @@ final class PushBinary
         }
         $last = count($batches) - 1;
         if ($last < 0 || $batches[$last]['queue'] !== $item['queue'] || $batches[$last]['partition'] !== $partition) {
-            $batches[++$last] = ['queue' => $item['queue'], 'partition' => $partition, 'payloads' => [], 'transactionIds' => []];
+            $batches[++$last] = [
+                'queue' => $item['queue'],
+                'partition' => $partition,
+                'payloads' => [],
+                'transactionIds' => [],
+                'headerBlocks' => [],
+            ];
         }
         $batches[$last]['payloads'][] = $payload;
         $batches[$last]['transactionIds'][] = $txn;
+        $batches[$last]['headerBlocks'][] = $block;
 
         return true;
     }
@@ -232,10 +303,10 @@ final class PushBinary
     /**
      * A JSON transaction body ({operations, requiredLeases, kv, timers}) as
      * the binary one, when its pushes can travel in it: there is at least one,
-     * and none carries a trace id. Everything but the pushes stays in the JSON
-     * head; consecutive pushed items of one partition share a group, so the
-     * pushes keep their order. Null otherwise: the caller then sends the JSON
-     * body.
+     * and none carries a trace id or headers the block cannot carry.
+     * Everything but the pushes (the acks, the links) stays in the JSON head;
+     * consecutive pushed items of one partition share a group, so the pushes
+     * keep their order. Null otherwise: the caller then sends the JSON body.
      *
      * The second value is null when the broker's answer lists the operations
      * as the caller added them (every other operation before every push).
@@ -265,7 +336,7 @@ final class PushBinary
             // A push names its items, or is one item itself.
             $items = $operation['items'] ?? null;
             foreach (is_array($items) && array_is_list($items) ? $items : [$operation] as $item) {
-                if (!self::addItem($batches, $item)) {
+                if (!self::addItem($batches, $item, true)) {
                     return null;
                 }
                 $pushAt[] = $flat++;
@@ -330,6 +401,11 @@ final class PushBinary
         if (isset($batch['transactionIds']) && count($batch['transactionIds']) !== count($batch['payloads'])) {
             throw new \InvalidArgumentException(
                 count($batch['transactionIds']) . ' transaction ids for ' . count($batch['payloads']) . ' payloads'
+            );
+        }
+        if (isset($batch['headerBlocks']) && count($batch['headerBlocks']) !== count($batch['payloads'])) {
+            throw new \InvalidArgumentException(
+                count($batch['headerBlocks']) . ' header blocks for ' . count($batch['payloads']) . ' payloads'
             );
         }
     }

@@ -12,6 +12,7 @@ type PushBuilder struct {
 	payloads      []interface{}
 	transactionID string
 	traceID       string
+	headers       map[string]string
 }
 
 // NewPushBuilder creates a new PushBuilder.
@@ -27,6 +28,16 @@ func NewPushBuilder(qb *QueueBuilder, payload interface{}) *PushBuilder {
 	case []map[string]interface{}:
 		for _, m := range p {
 			pb.payloads = append(pb.payloads, m)
+		}
+	case []PushItem:
+		// One message per item, each with its own transaction id and headers
+		// (see buildItems), not one message whose payload is the list.
+		for _, it := range p {
+			pb.payloads = append(pb.payloads, it)
+		}
+	case []*PushItem:
+		for _, it := range p {
+			pb.payloads = append(pb.payloads, it)
 		}
 	default:
 		pb.payloads = []interface{}{payload}
@@ -44,6 +55,26 @@ func (pb *PushBuilder) TransactionID(id string) *PushBuilder {
 // TraceID sets a trace ID for the message.
 func (pb *PushBuilder) TraceID(id string) *PushBuilder {
 	pb.traceID = id
+	return pb
+}
+
+// Headers sets headers on every message of this push (a cluster at catalogue
+// version 8): a map of strings, names of 1-64 bytes of a-z 0-9 . _ - (names
+// starting with "queen-" are the broker's). They are never encrypted and never
+// part of deduplication; every read returns them (Message.Headers), and every
+// where can test them (headers.<name>) without reading the payload:
+//
+//	client.Queue("orders").Partition("order-9137").
+//		Push(map[string]interface{}{"orderId": 9137, "total": 120}).
+//		Headers(map[string]string{"type": "order.paid"}).
+//		Execute(ctx)
+//
+// A message given as a PushItem writes its own Headers over these. The broker
+// takes 64 headers and 8 KiB of them per message by default, and refuses the
+// push (400 bad_body) beyond. They are stored in clear, even on an encrypted
+// queue: keep secrets and personal data out of them.
+func (pb *PushBuilder) Headers(h map[string]string) *PushBuilder {
+	pb.headers = h
 	return pb
 }
 
@@ -79,6 +110,7 @@ func (pb *PushBuilder) buildItems() []PushItem {
 			Queue:     pb.qb.queueName,
 			Partition: partition,
 			Payload:   payload,
+			Headers:   pb.headers,
 		}
 
 		// Set transaction ID
@@ -95,10 +127,41 @@ func (pb *PushBuilder) buildItems() []PushItem {
 			item.TraceID = pb.traceID
 		}
 
+		// A message given as a PushItem brings its own transaction id (what
+		// makes a retried push a duplicate instead of a second message), trace
+		// id, partition and headers.
+		if own, ok := pushItemOf(payload); ok {
+			item.Payload = own.Payload
+			if own.TransactionID != "" {
+				item.TransactionID = own.TransactionID
+			}
+			if own.TraceID != "" {
+				item.TraceID = own.TraceID
+			}
+			if own.Partition != "" {
+				item.Partition = own.Partition
+			}
+			item.Headers = withHeaders(pb.headers, own.Headers)
+		}
+
 		items[i] = item
 	}
 
 	return items
+}
+
+// pushItemOf reads a payload given as a PushItem (or a non-nil *PushItem); ok
+// is false for a bare payload.
+func pushItemOf(payload interface{}) (PushItem, bool) {
+	switch v := payload.(type) {
+	case PushItem:
+		return v, true
+	case *PushItem:
+		if v != nil {
+			return *v, true
+		}
+	}
+	return PushItem{}, false
 }
 
 // executeBuffered adds items to the buffer.
@@ -169,6 +232,7 @@ func (pb *PushBuilder) executeDirect(ctx context.Context, items []PushItem) ([]P
 			Payload:       item.Payload,
 			TransactionID: item.TransactionID,
 			TraceID:       item.TraceID,
+			Headers:       item.Headers,
 		}
 	}
 

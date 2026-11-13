@@ -1,0 +1,7 @@
+[20:42:40] run s6-push-sched6: build sched6, push, 1000 partitions, steps of 40s at: 3000000 3500000 | TXN_SIZE=10 KV=0 CONS=17 PROCS=8 BATCH=100 SPREAD=1 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: b1 x 1000 partitions
+[20:43:54] 3,000,000: offered 2,999,963 | pushed 2,999,710 | consumed 2,999,793 | shed 0 errors 0 | push p50 8.3 p99 108.5 | e2e p50 19.5 p99 151.6 | cores 15.9 / 7.8 / 5.8 | loader 19.2c  OK 
+[create] done: b2 x 1000 partitions
+[20:45:08] 3,500,000: offered 3,499,991 | pushed 3,252,131 | consumed 3,251,677 | shed 4,459,500 errors 0 | push p50 630.8 p99 1310.7 | e2e p50 671.7 p99 1359.9 | cores 18.0 / 10.0 / 6.2 | loader 21.0c  NOT CARRIED 
+[20:45:08] stopping at 3500000
+RUN_DONE

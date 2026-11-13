@@ -598,6 +598,9 @@ pub struct PopOptions {
     pub auto_parts: bool,
     /// `autopilot=true` and no `batch`: the broker picks the batch.
     pub auto_batch: bool,
+    /// A filtered group's `where` (PLAN_ROUTING.md §4): sent on the group's
+    /// first pop, fixed from then on. `None`: the group is what it is.
+    pub where_filter: Option<String>,
 }
 
 /// An ack / nack (single or batch): the receiver's raw body plus the resolved
@@ -660,6 +663,10 @@ pub struct RecordPush {
     pub partition: String,
     pub payload: Vec<u8>,
     pub txn: Option<String>,
+    /// Headers (name, value), stored when every member reads catalogue
+    /// version 8 and dropped before it (the Kafka facade keeps the rest of a
+    /// record's headers in its envelope).
+    pub headers: Vec<(String, String)>,
 }
 
 /// What [`Rsm::push_records`] did with one [`RecordPush`]: the per-item
@@ -692,6 +699,9 @@ pub struct RecordRead {
     /// `transactionId`: `Some` in a [`Rsm::fetch_log`] answer, `None` in a
     /// [`Rsm::fetch_records`] one (its caller does not keep it).
     pub txn: Option<String>,
+    /// The record's headers block (`crate::frames::decode_headers`), when it
+    /// carries one.
+    pub headers: Option<bytes::Bytes>,
 }
 
 /// One entry of a [`Rsm::fetch_records`] answer: the twin of one entry of the
@@ -773,6 +783,11 @@ pub struct PopOut {
     /// §3.3: the request named a policy the group's stored one overrode. The body
     /// carries `"conflationConflict":true`.
     pub conflation_conflict: bool,
+    /// The pop read a filtered group (PLAN_ROUTING.md §4): the body carries
+    /// `"filtered":true`, and an empty answer is a 200 with that body, not a
+    /// bodiless 204. An SDK that sent a `where` reads a missing key as a
+    /// broker that does not filter, which would deliver everything.
+    pub filtered: bool,
     /// The answer as stored records ([`ReqCtx::pop_frames`]): `body` is empty
     /// then. See `RaftFacade`'s `render_pop_frames` for the layout.
     pub frames: Option<Vec<u8>>,

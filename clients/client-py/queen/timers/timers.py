@@ -110,17 +110,20 @@ class Timers:
         partition: Optional[str] = None,
         txn: Optional[str] = None,
         payload_zstd: bool = False,
+        headers: Optional[Dict[str, str]] = None,
     ) -> TimerResult:
         """Schedule a message for later. Upsert on ``(queue, timer_key)``.
 
         Returns ``{ok, status, queue, timerKey, txn, messageId, deliverAt}``.
         The ``messageId`` is promised at schedule time so the delivered frame
-        can be correlated without a second API call.
+        can be correlated without a second API call. ``headers`` are the fired
+        message's (a push's rules).
         """
         return await self._one(
             _ops.schedule(
                 queue, timer_key, payload,
                 delay_ms=delay_ms, delay=delay, partition=partition, txn=txn, payload_zstd=payload_zstd,
+                headers=headers,
             )
         )
 
@@ -135,6 +138,7 @@ class Timers:
         partition: Optional[str] = None,
         txn: Optional[str] = None,
         payload_zstd: bool = False,
+        headers: Optional[Dict[str, str]] = None,
     ) -> TimerResult:
         """The same upsert under the name of the intent. ``attempts`` returns to
         zero: a rescheduled timer is a new timer under an old name."""
@@ -142,7 +146,7 @@ class Timers:
             _ops.schedule(
                 queue, timer_key, payload,
                 delay_ms=delay_ms, delay=delay, partition=partition, txn=txn,
-                payload_zstd=payload_zstd, reschedule=True,
+                payload_zstd=payload_zstd, reschedule=True, headers=headers,
             )
         )
 
@@ -278,6 +282,7 @@ class TimerBuilder:
         self._partition: Optional[str] = None
         self._txn: Optional[str] = None
         self._payload_zstd = False
+        self._headers: Optional[Dict[str, str]] = None
 
     def key(self, timer_key: str) -> "TimerBuilder":
         self._key = timer_key
@@ -307,6 +312,11 @@ class TimerBuilder:
         self._txn = txn
         return self
 
+    def headers(self, headers: Dict[str, str]) -> "TimerBuilder":
+        """The fired message's headers (a push's rules)."""
+        self._headers = headers
+        return self
+
     def _require_key(self) -> str:
         if not self._key:
             raise ValueError("timer needs .key(<timerKey>)")
@@ -321,14 +331,14 @@ class TimerBuilder:
         return await self._timers.schedule(
             self._queue, self._require_key(), self._require_payload(),
             delay_ms=self._delay_ms, delay=self._delay, partition=self._partition,
-            txn=self._txn, payload_zstd=self._payload_zstd,
+            txn=self._txn, payload_zstd=self._payload_zstd, headers=self._headers,
         )
 
     async def reschedule(self) -> TimerResult:
         return await self._timers.reschedule(
             self._queue, self._require_key(), self._require_payload(),
             delay_ms=self._delay_ms, delay=self._delay, partition=self._partition,
-            txn=self._txn, payload_zstd=self._payload_zstd,
+            txn=self._txn, payload_zstd=self._payload_zstd, headers=self._headers,
         )
 
     async def cancel(self) -> TimerResult:

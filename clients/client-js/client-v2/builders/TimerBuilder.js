@@ -47,6 +47,7 @@
 import * as logger from '../utils/logger.js'
 import { generateUUID } from './QueueBuilder.js'
 import { parseDurationMs } from '../kv/expiry.js'
+import { checkHeaders } from '../utils/validation.js'
 
 /** JSON payloads are encoded for the caller; raw bytes are passed through. */
 function encodePayload(payload) {
@@ -68,6 +69,7 @@ export class TimerBuilder {
   #partition = null
   #delayMs = null
   #payloadB64 = undefined
+  #headers = null
   #txn = null
 
   /**
@@ -121,6 +123,17 @@ export class TimerBuilder {
   }
 
   /**
+   * The delivered message's headers (PLAN_ROUTING.md §6), as on a push: an
+   * object of strings, names 1 to 64 bytes of a-z, 0-9, '.', '_' or '-', none
+   * starting with `queen-`. The fired message keeps them, and peek() shows
+   * them. Needs every node on catalogue version 8.
+   */
+  headers(headers) {
+    this.#headers = checkHeaders(headers, 'timer')
+    return this
+  }
+
+  /**
    * The transaction id the delivered message will carry. Minted when absent.
    *
    * §20.2: every reschedule overwrites it, because a rescheduled timer is a
@@ -151,6 +164,8 @@ export class TimerBuilder {
     op.delayMs = this.#delayMs
     op.txn = this.#txn || generateUUID()
     op.payload = this.#payloadB64
+    // Only when there are some: a schedule without them is the op it always was.
+    if (this.#headers) op.headers = this.#headers
     return op
   }
 

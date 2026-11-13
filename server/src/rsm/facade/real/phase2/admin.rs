@@ -79,6 +79,21 @@ impl RaftFacade {
         // retry (which reads what is left) finishes it.
         effects.sort_by_key(|e| matches!(e, Effect::GroupDelete { .. }));
         self.submit_effects_chunked(&ctx, effects).await?;
+        // A filtered group's hidden queue goes with the group (PLAN_ROUTING.md §4).
+        if delete_meta {
+            for q in queues.iter().filter(|q| !crate::rsm::route::is_hidden(q)) {
+                let hidden = crate::rsm::route::hidden_queue(q, group);
+                if self.queue_config_of(&ctx.tenant, &hidden).await?.is_some() {
+                    self.api_delete_queue_routed(ctx.clone(), &hidden, true)
+                        .await?;
+                }
+            }
+        }
+        let queues: Vec<&str> = queues
+            .iter()
+            .filter(|q| !crate::rsm::route::is_hidden(q))
+            .map(String::as_str)
+            .collect();
         Ok(ApiOut::json(200,json!({"success":true,"consumerGroup":group,"queueName":queue,"deletedPartitions":count,"metadataDeleted":delete_meta,"queues":queues}).to_string()))
     }
 
@@ -89,6 +104,25 @@ impl RaftFacade {
         body: &[u8],
     ) -> Result<ApiOut, RsmError> {
         let v: Value = serde_json::from_slice(body).map_err(|e| super::rejected("bad_body", e))?;
+        // A filtered group's `where` (PLAN_ROUTING.md §4): `{queue, where}`.
+        if let Some(w) = v.get("where") {
+            let queue = v.get("queue").and_then(Value::as_str).ok_or_else(|| {
+                super::reject("bad_request", "where needs the queue the group filters")
+            })?;
+            let changed = self.set_group_where(&ctx, queue, group, w).await?;
+            if !changed {
+                return Ok(ApiOut::json(
+                    404,
+                    json!({"success": false, "error": format!("group {group} does not filter {queue}: its first pop with a where makes it filter")}).to_string(),
+                ));
+            }
+            if v.get("subscriptionTimestamp").is_none() {
+                return Ok(ApiOut::json(
+                    200,
+                    json!({"success": true, "consumerGroup": group, "queueName": queue, "where": "set"}).to_string(),
+                ));
+            }
+        }
         let timestamp = v
             .get("subscriptionTimestamp")
             .and_then(Value::as_str)
@@ -196,6 +230,7 @@ impl RaftFacade {
                     walk_records(
                         &reader,
                         qlog.as_ref(),
+                        None,
                         &tenant,
                         &part,
                         part.row.log_start,
@@ -393,6 +428,7 @@ impl RaftFacade {
             .unwrap_or(row.payload);
         let (payload, encrypted) =
             self.encode_payload(encrypted_queues.contains(&queue), &plain, &queue);
+        // The replayed message keeps the headers it was filed with.
         let frame = pack_frames(&[FrameIn {
             message_id,
             txn: &transaction_id,
@@ -400,6 +436,8 @@ impl RaftFacade {
             producer_sub: None,
             payload: &payload,
             encrypted,
+            headers: (!row.headers.is_empty()).then_some(row.headers.as_slice()),
+            link: None,
         }]);
         let push = PushCommand {
             request_id: ctx.request_id,
@@ -411,6 +449,7 @@ impl RaftFacade {
                 frame: frame.into(),
             }],
             create_cfg: super::super::default_queue_config(&queue),
+            links: Default::default(),
         };
         let cmd = Command::Transaction(TxnCommand {
             request_id: ctx.request_id,

@@ -1,0 +1,9 @@
+[16:09:32] run big-t10w-281: build 281, txn, 900 partitions, steps of 40s at: 120000 160000 200000 240000 280000 320000 | TXN_SIZE=10 KV=0 CONS=55 PROCS=8 BATCH=100 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames -txn-wire bin | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: b1-in, b1-out x 900 partitions
+[16:10:40]   120,000: offered 120,001 | workers 12,000 txn/s = 120,001 msg/s | read 120,002 | shed 0 errors 0 aborts 0 | commit p50 1.5 p99 2.8 | e2e p50 22 p99 39 | feed push p50 2.4 p99 3.9 | cores 8.5 / 4.6 / 3.6 | loaders 6.3c  OK 
+[create] done: b2-in, b2-out x 900 partitions
+[16:11:49]   160,000: offered 159,997 | workers 16,000 txn/s = 160,001 msg/s | read 159,999 | shed 0 errors 0 aborts 0 | commit p50 2.2 p99 4.2 | e2e p50 30 p99 59 | feed push p50 2.8 p99 5.1 | cores 8.9 / 4.8 / 3.7 | loaders 7.7c  OK 
+[create] done: b3-in, b3-out x 900 partitions
+[16:13:15]   200,000: offered 199,998 | workers 10,467 txn/s = 104,674 msg/s | read 104,681 | shed 0 errors 0 aborts 0 | commit p50 18.4 p99 35.3 | e2e p50 14942 p99 19399 | feed push p50 12.7 p99 16.4 | cores 5.3 / 2.5 / 1.8 | loaders 5.3c  NOT CARRIED 
+[16:13:15] stopping at 200000
+RUN_DONE

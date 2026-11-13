@@ -991,6 +991,96 @@ async fn a_join_on_the_feeds_clock_times_out_the_one_left_alone() {
 
 // --------------------------------------------------- commits that go wrong
 
+/// Transactions the fake broker refused: it serves no `link`, so an attempt
+/// at one is a refusal (and the runner then pushes).
+async fn refused_txns(b: &Fake) -> u64 {
+    let s = b.stats().await;
+    let n = |k: &str| s[k].as_u64().unwrap_or(0);
+    n("txns") - n("pushTxns") - n("kvOnlyTxns")
+}
+
+/// An unchanged output into a queue the stream does not read goes as a link
+/// (the fake refuses it, so the runner pushes the copy instead), and another
+/// stream reading that queue gets the outputs: their ids are the first
+/// stream's, not its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_output_linked_into_a_queue_the_stream_does_not_read_reaches_a_reader_of_that_queue() {
+    let b = Fake::start();
+    let p = b.proc();
+    for i in 1..=3 {
+        b.push("orders", &format!("c{i}"), json!({ "n": i })).await;
+    }
+    let first = p
+        .run(
+            earliest_of(&p.queen, &["orders"]).to("copy"),
+            fast("links-a"),
+        )
+        .await
+        .unwrap();
+    until(3000, "three copies", || async {
+        b.messages("copy").await.len() >= 3
+    })
+    .await;
+    assert!(
+        refused_txns(&b).await >= 1,
+        "the first commit linked: {}",
+        b.stats().await
+    );
+    let second = p
+        .run(earliest_of(&p.queen, &["copy"]).to("seen"), fast("links-b"))
+        .await
+        .unwrap();
+    until(3000, "the copies read by the second stream", || async {
+        b.messages("seen").await.len() >= 3
+    })
+    .await;
+    first.stop().await;
+    second.stop().await;
+    let mut ns: Vec<Value> = b
+        .payloads("seen")
+        .await
+        .iter()
+        .map(|p| p["n"].clone())
+        .collect();
+    ns.sort_by_key(|n| n.as_u64());
+    assert_eq!(ns, [json!(1), json!(2), json!(3)]);
+}
+
+/// A stream that reads its own target (no queue filter here) never links
+/// there: a link keeps the source's transaction id, which the guard against
+/// reading this query's outputs back does not know, so the stream would read
+/// it again. It pushes, and its outputs never come back to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_that_reads_its_own_target_pushes_and_never_reads_its_outputs_back() {
+    let b = Fake::start();
+    let p = b.proc();
+    for i in 1..=3 {
+        b.push("orders", &format!("c{i}"), json!({ "n": i })).await;
+    }
+    let every_queue = Stream::from_feed(&p.queen, FeedSource::new().from(FeedFrom::Earliest))
+        .where_("queue", "=", json!("orders"))
+        .to("copy");
+    let unfiltered =
+        Stream::from_feed(&p.queen, FeedSource::new().from(FeedFrom::Earliest)).to("all-copy");
+    let r = p.run(every_queue, fast("self-a")).await.unwrap();
+    let s = p.run(unfiltered, fast("self-b")).await.unwrap();
+    until(3000, "the copies", || async {
+        b.messages("copy").await.len() >= 3 && b.messages("all-copy").await.len() >= 6
+    })
+    .await;
+    // Long enough for a loop to show: every read is 20 ms apart.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    r.stop().await;
+    s.stop().await;
+    assert_eq!(b.messages("copy").await.len(), 3, "nothing read back");
+    assert_eq!(
+        b.messages("all-copy").await.len(),
+        6,
+        "the source's three and the other stream's three, never its own"
+    );
+    assert_eq!(refused_txns(&b).await, 0, "no link was tried");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_commit_whose_answer_was_lost_is_not_written_twice() {
     let b = Fake::start();
@@ -1002,7 +1092,9 @@ async fn a_commit_whose_answer_was_lost_is_not_written_twice() {
     b.inject("/api/v1/transaction", "after", 503, 1).await;
     let r = p
         .run(
-            earliest_of(&p.queen, &["orders"]).to("copy"),
+            // Pushed outputs: the fake broker serves no link, and the commit
+            // it refused would spend the injected failure.
+            earliest_of(&p.queen, &["orders"]).to(FeedSink::queue("copy").link(false)),
             fast("lost-answer").on_error(|_| {}),
         )
         .await

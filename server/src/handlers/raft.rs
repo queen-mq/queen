@@ -174,7 +174,7 @@ fn pop_answer(
             );
         }
     }
-    if out.empty && !out.conflation && !out.conflation_conflict {
+    if out.empty && !out.conflation && !out.conflation_conflict && !out.filtered {
         StatusCode::NO_CONTENT.into_response()
     } else if let Some(frames) = out.frames {
         // The stored records as they are (`frames=true`): not JSON. In front

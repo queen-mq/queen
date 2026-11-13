@@ -12,20 +12,76 @@ The target is one of:
 
 Several queues and functions run on a feed source (``Stream.from_feed``),
 whose commit can push to any queue; a queue source sinks to one queue.
+
+``link`` (default True): a record that is the source message unchanged (only
+where/filter, key_by or a gate before ``.to()``) goes as a link to it instead of
+a copy (PLAN_ROUTING.md §6): the same message, id and transactionId, without
+its payload stored again. A feed source sends ``link`` operations in its
+transaction (feed_runner.py), a queue source ``link`` push items in its cycle
+(runner.py). It is not part of the chain's config: it changes how a record
+travels, not what it is.
 """
 
 from __future__ import annotations
 
 from typing import Any, Callable, List, Optional, Union
 
-from ..util.js import call_user, is_number, js_number_str, js_str, nullish
+from ..util.js import call_user, is_number, js_is_integer, js_number_str, js_str, nullish
+
+# What a commit that carried links is refused for when links may be the cause:
+# a broker that has no link (400 bad_request), a cluster before catalogue
+# version 8, a source the broker no longer keeps or holds another message at
+# that offset, a credential that may not read the source. The runners then
+# send the same commit again with the records pushed.
+LINK_REFUSALS = ("bad_request", "cluster_version", "scope_denied", "source_gone", "source_mismatch")
+# Of those, the ones about one message, not about links: that commit goes
+# with its records pushed, and the next ones link again.
+LINK_MISSES = ("source_gone", "source_mismatch")
+
+
+def link_refusal(err: BaseException) -> Optional[str]:
+    """Why the broker refused a commit that carried links, when it is a reason
+    links can cause (LINK_REFUSALS, or any 400); None otherwise."""
+    reason = getattr(err, "reason", None)
+    body = getattr(err, "body", None)
+    if not isinstance(reason, str) and isinstance(body, dict):
+        reason = body.get("reason") or body.get("code")
+    if isinstance(reason, str) and reason in LINK_REFUSALS:
+        return reason
+    if getattr(err, "status", None) == 400:
+        return reason if isinstance(reason, str) and reason else "HTTP 400"
+    return None
+
+
+def passes_messages_on(ops: List[Any]) -> bool:
+    """Whether a record these operators hand on is the source message itself,
+    unchanged: only filters (where included), key_by and gates, which choose
+    or key messages and never change one."""
+    return all(getattr(op, "kind", None) in ("filter", "keyBy", "gate") for op in ops)
+
+
+def cycle_link(msg: Any) -> Optional[dict]:
+    """A popped message as a cycle push item's ``link``: ``{offset,
+    transactionId}``, which the cycle's own partition holds. None without them."""
+    if not isinstance(msg, dict):
+        return None
+    offset, txn = msg.get("offset"), msg.get("transactionId")
+    if isinstance(offset, bool) or not js_is_integer(offset) or offset < 0 or not isinstance(txn, str) or not txn:
+        return None
+    return {"offset": int(offset), "transactionId": txn}
 
 
 class SinkOperator:
     kind = "sink"
 
-    def __init__(self, target: Any, partition: Optional[Union[str, Callable[[Any], Any]]] = None):
+    def __init__(
+        self,
+        target: Any,
+        partition: Optional[Union[str, Callable[[Any], Any]]] = None,
+        link: bool = True,
+    ):
         self.partition_resolver = partition
+        self.link = link is not False
         if callable(target) and not _is_queue_like(target):
             self.route: Optional[Callable[..., Any]] = target
             self.queue_builder = None
@@ -57,16 +113,25 @@ class SinkOperator:
         """True when records may go to more than one queue (a function or a list)."""
         return self.route is not None or len(self.queues or []) > 1
 
-    def build_push_items(self, entries: list, source_partition_name: Optional[str]) -> list:
+    def build_push_items(self, entries: list, source_partition_name: Optional[str], link: bool = False) -> list:
+        """A cycle's push items. With ``link`` (each record is its source
+        message unchanged) an item names that message (``link``, see
+        cycle_link) and the broker stores a link to it. The payload rides
+        beside it all the same: a broker before links stores it as the push it
+        always was, and one with links ignores it."""
         items = []
         for entry in entries:
             value = entry.get("value")
             payload = value if isinstance(value, dict) else {"value": value}
-            items.append({
+            item = {
                 "queue": self.queue_name,
                 "partition": self._resolve_partition(value, source_partition_name),
                 "payload": payload,
-            })
+            }
+            source = cycle_link(entry.get("sourceMsg")) if link else None
+            if source is not None:
+                item["link"] = source
+            items.append(item)
         return items
 
     async def targets_for(self, value: Any, msg: Any, fallback: Any) -> List[dict]:

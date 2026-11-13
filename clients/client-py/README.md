@@ -437,6 +437,9 @@ on.
 **What stays JSON**, with no action from you:
 
 - A push with a `traceId` on one of its items.
+- A push with `headers` on one of its items, when `push_compression` is off:
+  the plain binary body has no place for them (with it, they travel in the
+  frames).
 - A transaction with no push, or with a `traceId` on one of its pushes.
 - A pop the broker cannot answer in frames: a pop of a conflating group, and
   every pop on a broker that runs with an encryption key
@@ -655,6 +658,150 @@ if not result:
 
 Everything else still raises. `get_prefix` is not available inside a
 transaction: its cost is not bounded by the caller.
+
+---
+
+## Headers, Filtered Groups, Reading Queues and Links
+
+A group or a queue can read only what matches a `where`; the source keeps the
+messages and its readers consume them; it is the same message, with the same
+id, everywhere it shows. These need every node of the cluster on a broker at
+catalogue version 8: an older cluster answers `cluster_version`.
+
+### Headers
+
+**Why:** trace context, a type or a source stamp travel beside the payload,
+readable without parsing it and usable in a `where`.
+
+```python
+await queen.queue('orders').partition('order-9137').push([{
+    'transactionId': 'order-9137-paid',
+    'data': {'orderId': 9137, 'total': 120},
+    'headers': {'type': 'order.paid', 'traceparent': '00-4bf92f35a9-00f067aa0b-01'},
+}])
+
+messages = await queen.queue('orders').group('billing').pop()
+messages[0].get('headers')   # {'type': 'order.paid', ...}, or None when it has none
+```
+
+- A dict of strings beside `data` or `payload` (an item with neither is its
+  own payload, a `headers` key included). Names are 1 to 64 characters of
+  `a-z 0-9 . _ -`; names starting with `queen-` are the broker's. At most 64
+  headers and 8 KiB per message by default (`QUEEN_MAX_HEADERS`,
+  `QUEEN_MAX_HEADER_BYTES`).
+- Every push takes them: `push()`, a buffered push, `transaction().queue(q).push()`,
+  and a timer's fired message (`timers.schedule(..., headers=...)`, `.headers()`
+  on the timer builders).
+- Popped messages, `fetch()` records and feed entries carry `headers` when the
+  message has some.
+- Never encrypted and not part of dedup (`transactionId` stays the key): keep
+  secrets and personal data out of them.
+
+### Filtered groups
+
+**Why:** a group that wants a few kinds of messages stops reading and acking
+all the others.
+
+```python
+await (queen.queue('order-events')
+    .group('billing')
+    .subscription_mode('all')
+    .where('data.kind', 'in', ['order.paid', 'order.refunded'])
+    .where('headers.source', '=', 'web')
+    .consume(handler))
+
+# The same as one string:
+queen.queue('order-events').group('billing').where("data.kind in ('order.paid', 'order.refunded') and headers.source = 'web'")
+```
+
+The conditions are ANDed. Fields: `queue`, `partition`, `transactionId`,
+`data`, `data.<path>`, `headers.<name>`. Ops: `=` `!=` `<` `<=` `>` `>=` `in`
+`exists` `prefix` `!prefix`; a field the message lacks matches none of them.
+
+The `where` is a setting of the group, like `subscription_mode`: sent on every
+pop and fixed at the group's first one. Another `where` for the group is
+refused (400 `where_mismatch`), and `pop()` raises it rather than answering
+`[]`. Change it on purpose, from the next push on:
+
+```python
+await queen.admin.update_consumer_group_where('billing', 'order-events', "data.kind = 'order.paid'")
+```
+
+It needs a consumer group and a queue (not a namespace or task pop). A group
+that already reads the queue without a `where` cannot start filtering: name a
+new group. A broker older than filtered groups would hand the group the whole
+queue; every answer to a pop with a `where` says `"filtered": true`, so one
+without it raises `FilterUnsupportedError` (and stops `consume()`) before any
+message is handled.
+
+### Reading queues
+
+**Why:** a reader with its own retries, DLQ, priority or partitions, or with
+several sources, without a router process that copies every message.
+
+```python
+await queen.queue('orders-it').config({
+    'from': 'orders',                 # or ['orders', {'queue': 'refunds', 'where': ...}]
+    'where': "data.country = 'IT'",   # or conditions, as where() takes them
+    'partition_by': 'same',           # or 'data.<path>', 'headers.<name>'
+    'start': 'all',                   # every match the sources still keep; 'now' is the default
+    'lease_time': 30,
+    'retry_limit': 5,
+    'retry_delay': 1000,
+    'dead_letter_queue': True,
+    'dlq_after_max_retries': True,
+    'priority': 0,
+    'delayed_processing': 0,
+    'window_buffer': 0,
+}).create()
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `from` | | The source: a queue name, or a list of names and `{'queue', 'where'}` |
+| `where` | none | Only the messages that match, from every source named by name alone |
+| `partition_by` | `'same'` | The source's partition, or one by `'data.<path>'` or `'headers.<name>'` |
+| `start` | `'now'` | `'all'` starts with every match the sources still keep |
+
+A reading queue has its own consume settings (lease, retries, DLQ, priority)
+and keeps what its sources keep, so `config()` leaves out the defaults of the
+retention, dedup window, encryption and size options; set one and the broker
+refuses it (400 `reading_queue`). Its messages have the `id` and
+`transactionId` they have at the source, and nobody pushes into it.
+`'from': None` makes it an ordinary queue again. A queue that reading queues
+read is deleted with `delete(force=True)` (409 `has_readers` without). The
+broker answers a reading queue's configure with its `route`; a broker that
+does not read other queues answers without one, and `create()` raises
+`ReadingQueueUnsupportedError`.
+
+### Links
+
+**Why:** a hop that hands a message on costs a few bytes, not its payload.
+
+```python
+await (queen.transaction()
+    .ack(message, context={'consumer_group': 'billing'})
+    .queue('manual-review').partition(message['partition'])
+    .link([message], headers={'review-reason': 'amount'})
+    .commit())
+```
+
+`link()` forwards messages a pop or the feed returned without sending their
+payloads again: the target holds the same message, id and `transactionId`,
+with the link's headers over its own. A target partition that holds it already
+takes nothing, so a retried link is safe. A source the broker no longer keeps
+rolls the transaction back (`TransactionError`, reason `source_gone`).
+
+Streams link by themselves: a `.to(queue)` whose record is the source message
+unchanged (only `where`/`filter`, `key_by` or a gate before it) writes links, on
+a queue source and on a feed source; a mapped record is pushed. In the feed a
+linked message reads as a message of its target queue (the source's id,
+`transactionId` and payload), so another feed stream that reads the target sees
+it. A feed stream links only into queues it does not read itself, and pushes a
+copy into one it reads (with no `queues` filter it reads them all): its reads
+leave its own copies out, where a link would come back to it.
+`.to(queue, link=False)` pushes copies. A broker that refuses links gets the
+records pushed, and the stream says so once.
 
 ---
 

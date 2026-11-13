@@ -131,6 +131,9 @@ sourceOfTruth:
 # facade/real/phase2.rs carry each request's client scope (None without a client token) and refuse a
 # name outside it 403 scope_denied before any command is built (server/src/scope.rs, b24b53599).
 # This page: the client token rows under Proxy and connectors.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. frames.rs and route/
+# add the header and where limits. The page lists them.
 # sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
 # rewords the 504 a membership change answers; handlers/raft.rs changes a comment on ?timeoutMs.
 # Nothing this page states changes.
@@ -156,6 +159,9 @@ applies it. The values are the defaults of server 2.8.1; the full list of settin
 | Items per push | 10,000; more is refused 400 `too_many_items` | `QUEEN_PUSH_MAX_ITEMS` | `server/src/rsm/facade/real.rs` |
 | An admin command that touches many rows: a DLQ purge, a seek, a group, queue or tenant delete, a streams reset | sent as commands of at most 4,096 rows each; one still over `QUEEN_RAFT_ENTRY_MAX_BYTES` is refused `too_large` | | `server/src/rsm/facade/real/phase2/admin.rs` |
 | `transactionId` | 65,535 bytes | | `server/src/rsm/facade/real.rs` |
+| Headers of one message | 64 headers and 8 KiB (names and values together); a name is 1 to 64 bytes of `a-z 0-9 . _ -`, and `queen-` names are the broker's | `QUEEN_MAX_HEADERS`, `QUEEN_MAX_HEADER_BYTES` (at most 64 KiB) | `server/src/frames.rs` |
+| A `where` (filtered groups, reading queues) | 16 conditions, 64 values in one `in`, paths 16 deep | `QUEEN_WHERE_MAX_CONDITIONS`, `QUEEN_WHERE_MAX_IN` | `server/src/rsm/route/cond.rs` |
+| Readers of one queue (reading queues and filtered groups), and sources of one reading queue | 64 readers, 16 sources, chains 8 deep | `QUEEN_MAX_READERS_PER_QUEUE`, `QUEEN_MAX_SOURCES_PER_QUEUE` | `server/src/rsm/route/mod.rs` |
 | Deadline of a push | 30 s, at most 60 s | `POP_DEFAULT_TIMEOUT_MS` | `server/src/handlers/raft.rs` |
 | Deadline of an ack, a lease extension or a transaction | 30 s, at most 60 s | `QUEEN_STMT_TIMEOUT_MS` | `server/src/handlers/raft.rs` |
 

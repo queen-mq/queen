@@ -56,8 +56,8 @@ use std::task::{Context, Poll};
 pub const CORE_THREAD_PREFIXES: &[&str] = &[
     // rsm/batcher.rs — the planner thread behind the batcher driver.
     "queen-planner",
-    // rsm/batcher_lanes.rs — per-lane planners.
-    "queen-lane-",
+    // rsm/batcher_scheduler.rs — the footprint scheduler's planning threads.
+    "queen-plan-",
     // rsm/apply.rs — apply, its checkpoint writer and the segment preflusher.
     "queen-rsm-apply",
     "queen-rsm-ckpt",
@@ -417,7 +417,7 @@ mod tests {
     fn panic_policy_core_names() {
         for n in [
             "queen-planner",
-            "queen-lane-3",
+            "queen-plan-3",
             "queen-rsm-apply",
             "queen-rsm-ckpt",
             "queen-rsm-preflush",

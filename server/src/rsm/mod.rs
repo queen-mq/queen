@@ -188,6 +188,9 @@ pub mod dbgctr;
 /// The cluster link: a standby cluster replays a source cluster's committed
 /// entries until it is promoted.
 pub mod link;
+/// Routing without copies (PLAN_ROUTING.md): the `where` language, reading
+/// queues and filtered groups, and the link frames they are made of.
+pub mod route;
 
 #[cfg(test)]
 mod tests;

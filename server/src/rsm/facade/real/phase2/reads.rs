@@ -45,6 +45,8 @@ pub(super) struct Record {
     pub(super) producer_sub: Option<String>,
     pub(super) payload: Vec<u8>,
     pub(super) encrypted: bool,
+    /// The message's headers block, when it carries one.
+    pub(super) headers: Option<Vec<u8>>,
 }
 
 /// The newest message stamp a partition can hold: no message in it is newer.
@@ -197,7 +199,13 @@ impl RaftFacade {
                 Some(self.api_get_queue(ctx.clone(), queue).await?)
             }
             ["api", "v1", "resources", "queues", queue] if req.method == "DELETE" => {
-                Some(self.api_delete_queue(ctx.clone(), queue).await?)
+                let force = query_map(req.query.as_deref())
+                    .get("force")
+                    .is_some_and(|v| v == "true" || v == "1");
+                Some(
+                    self.api_delete_queue_routed(ctx.clone(), queue, force)
+                        .await?,
+                )
             }
             ["api", "v1", "resources", "queues", queue, "depth"] if req.method == "GET" => Some(
                 self.api_queue_depth(ctx.clone(), queue, req.query.as_deref())
@@ -542,6 +550,7 @@ impl RaftFacade {
             // The sealed segment files are the segment reader's index; the
             // queue log finds a record by itself, so a qlog node lists none.
             let list_sealed = qlog.is_none();
+            let mut retained = crate::rsm::route::link::retained_from(&*store);
             let parts = store
                 .read(|r| {
                     let mut out = Vec::with_capacity(asks.len());
@@ -612,6 +621,7 @@ impl RaftFacade {
                 walk_payloads(
                     &reader,
                     qlog.as_ref(),
+                    Some(&mut retained),
                     &tenant,
                     &queue,
                     &part,
@@ -619,7 +629,7 @@ impl RaftFacade {
                     high,
                     FETCH_RECORDS_PER_ENTRY,
                     want_txn,
-                    |offset, created_at_us, txn, payload, encrypted| {
+                    |offset, created_at_us, txn, payload, encrypted, headers| {
                         let payload = if encrypted {
                             match encryption.decrypt_payload_bytes(&payload) {
                                 Some(p) => bytes::Bytes::from(p),
@@ -638,6 +648,7 @@ impl RaftFacade {
                             created_at_us,
                             payload,
                             txn,
+                            headers,
                         });
                         true
                     },
@@ -1050,6 +1061,7 @@ impl RaftFacade {
                     walk_records(
                         &reader,
                         qlog.as_ref(),
+                        None,
                         &tenant,
                         &c.part,
                         lo,
@@ -1224,6 +1236,13 @@ impl RaftFacade {
                 Field::Json(json!(rec.trace_id.map(|x| uuid_bytes_to_string(&x)))),
             ),
             ("producerSub", Field::Json(json!(rec.producer_sub))),
+            (
+                "headers",
+                Field::Json(match &rec.headers {
+                    Some(h) => crate::frames::headers_json(h),
+                    None => Value::Null,
+                }),
+            ),
             (
                 "createdAt",
                 Field::Json(json!(crate::rsm::planner::timers::iso_us(
@@ -1839,13 +1858,16 @@ impl RaftFacade {
         let qlog = self.qlog_reader.clone();
         let reader = self.reader.clone();
         let tenant = tenant.to_string();
+        let rstore = self.store.clone();
         let mut records = tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
+            let mut retained = crate::rsm::route::link::retained_from(&*rstore);
             for p in parts {
                 let high = (p.row.last_offset + 1).max(0) as u64;
                 walk_records(
                     &reader,
                     qlog.as_ref(),
+                    Some(&mut retained),
                     &tenant,
                     &p,
                     p.row.log_start,
@@ -1951,12 +1973,15 @@ impl RaftFacade {
         let tenant = tenant.to_string();
         let txn = txn.to_string();
         let p2 = part.clone();
+        let rstore = self.store.clone();
         let mut rec = tokio::task::spawn_blocking(move || {
             let mut found = None;
+            let mut retained = crate::rsm::route::link::retained_from(&*rstore);
             let high = (p2.row.last_offset + 1).max(0) as u64;
             walk_records(
                 &reader,
                 qlog.as_ref(),
+                Some(&mut retained),
                 &tenant,
                 &p2,
                 p2.row.log_start,
@@ -1986,6 +2011,7 @@ impl RaftFacade {
 pub(super) fn walk_records(
     reader: &crate::rsm::segments::Reader,
     qlog: Option<&QLogReader>,
+    mut retained: Option<&mut dyn FnMut(u64) -> Option<u64>>,
     tenant: &str,
     part: &Part,
     mut off: u64,
@@ -2016,10 +2042,22 @@ pub(super) fn walk_records(
             off += 1;
             continue;
         };
+        // With `retained`, a reading queue's links are read through to their
+        // messages and the gone ones left out; without it (a walk for offsets
+        // and stamps) they stay as they are.
+        let resolving = retained.is_some();
+        let blob = match (qlog, retained.as_deref_mut()) {
+            (Some(q), Some(ret)) => crate::rsm::route::link::resolve(q, blob, ret),
+            _ => blob,
+        };
         if let Some(frames) = unpack_frames_ref(&blob) {
             for (i, f) in frames.into_iter().enumerate() {
                 let pos = base + i as u64;
                 if pos < off || pos >= high {
+                    continue;
+                }
+                // A link whose message is gone at its source.
+                if resolving && f.is_link() {
                     continue;
                 }
                 let rec = Record {
@@ -2036,6 +2074,7 @@ pub(super) fn walk_records(
                     producer_sub: f.producer_sub.map(str::to_string),
                     payload: f.payload.to_vec(),
                     encrypted: f.encrypted,
+                    headers: f.headers.map(<[u8]>::to_vec),
                 };
                 n += 1;
                 if !cb(rec) {
@@ -2070,6 +2109,7 @@ const FETCH_RECORDS_PER_ENTRY: usize = 10_000;
 pub(super) fn walk_payloads(
     reader: &crate::rsm::segments::Reader,
     qlog: Option<&QLogReader>,
+    mut retained: Option<&mut dyn FnMut(u64) -> Option<u64>>,
     tenant: &str,
     queue: &str,
     part: &Part,
@@ -2077,7 +2117,7 @@ pub(super) fn walk_payloads(
     high: u64,
     limit: usize,
     want_txn: bool,
-    mut cb: impl FnMut(u64, i64, Option<String>, bytes::Bytes, bool) -> bool,
+    mut cb: impl FnMut(u64, i64, Option<String>, bytes::Bytes, bool, Option<bytes::Bytes>) -> bool,
 ) -> Result<(), RsmError> {
     let qid = qlog.map(|_| QLogReader::queue_id_of(tenant, queue));
     let mut ahead = crate::rsm::qlog::set::ReadAhead::default();
@@ -2103,6 +2143,11 @@ pub(super) fn walk_payloads(
             off += 1;
             continue;
         };
+        let resolving = retained.is_some();
+        let blob = match (qlog, retained.as_deref_mut()) {
+            (Some(q), Some(ret)) => crate::rsm::route::link::resolve(q, blob, ret),
+            _ => blob,
+        };
         let blob = bytes::Bytes::from(blob);
         if let Some(frames) = unpack_frames_ref(&blob) {
             for (i, f) in frames.into_iter().enumerate() {
@@ -2110,9 +2155,21 @@ pub(super) fn walk_payloads(
                 if pos < off || pos >= high {
                     continue;
                 }
+                // A link whose message is gone at its source.
+                if resolving && f.is_link() {
+                    continue;
+                }
                 n += 1;
                 let txn = want_txn.then(|| f.txn.to_string());
-                if !cb(pos, created, txn, blob.slice_ref(f.payload), f.encrypted) {
+                let headers = f.headers.map(|h| blob.slice_ref(h));
+                if !cb(
+                    pos,
+                    created,
+                    txn,
+                    blob.slice_ref(f.payload),
+                    f.encrypted,
+                    headers,
+                ) {
                     return Ok(());
                 }
                 if n >= limit {
@@ -2222,6 +2279,13 @@ fn message_fields(r: &Record) -> Vec<(&'static str, Field<'_>)> {
         ),
         ("producerSub", Field::Json(json!(r.producer_sub))),
         (
+            "headers",
+            Field::Json(match &r.headers {
+                Some(h) => crate::frames::headers_json(h),
+                None => Value::Null,
+            }),
+        ),
+        (
             "createdAt",
             Field::Json(json!(crate::rsm::planner::timers::iso_us(r.created_at_us))),
         ),
@@ -2289,7 +2353,8 @@ pub(super) fn scan_dlq_rows<R: Reads + ?Sized>(
 fn dlq_head_decode(b: &[u8]) -> Option<DlqRow> {
     use crate::rsm::effect::Reader;
     let mut r = Reader::new(b);
-    if r.u8("v").ok()? != rows::ROW_V1 {
+    let version = r.u8("v").ok()?;
+    if version != rows::ROW_V1 && version != rows::ROW_V2 {
         return None;
     }
     let pid = r.u64("pid").ok()?;
@@ -2311,6 +2376,11 @@ fn dlq_head_decode(b: &[u8]) -> Option<DlqRow> {
         error: r.str("error").ok()?,
         retry_count: r.u32("retry_count").ok()?,
         failed_at_us: r.i64("failed_at_us").ok()?,
+        headers: if version == rows::ROW_V2 {
+            r.blob("headers").ok()?
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -2396,6 +2466,30 @@ pub(super) const DLQ_SCAN_MAX_ROWS: usize = 10_000;
 
 /// One dead letter's fields, its payload borrowed (`dlq_json` before 2.6.1).
 fn dlq_fields<'a>(
+    q: &'a str,
+    id: &[u8; 16],
+    r: &'a DlqRow,
+    partition: Option<&(String, [u8; 16])>,
+) -> Vec<(&'static str, Field<'a>)> {
+    let mut fields = dlq_row_fields(q, id, r, partition);
+    // The message's headers, kept with it (catalogue version 8).
+    if !r.headers.is_empty() {
+        let at = fields
+            .iter()
+            .position(|(k, _)| *k == "transactionId")
+            .map_or(fields.len(), |i| i + 1);
+        fields.insert(
+            at,
+            (
+                "headers",
+                Field::Json(crate::frames::headers_json(&r.headers)),
+            ),
+        );
+    }
+    fields
+}
+
+fn dlq_row_fields<'a>(
     q: &'a str,
     id: &[u8; 16],
     r: &'a DlqRow,
@@ -2767,6 +2861,7 @@ fn group_detail<R: Reads + ?Sized>(
         let conflation = r
             .group(tenant, &queue, group)?
             .is_some_and(|m| m.meta.conflation);
+        let (shown, filter) = shown_queue(r, tenant, &queue)?;
         let partitions: Vec<Value> = rows
             .iter()
             .map(|l| {
@@ -2784,10 +2879,40 @@ fn group_detail<R: Reads + ?Sized>(
         let mut entry = serde_json::Map::new();
         entry.insert("conflation".into(), json!(conflation));
         readers.insert_into(&mut entry, now);
+        insert_filter(&mut entry, filter);
         entry.insert("partitions".into(), Value::Array(partitions));
-        answer.insert(queue, Value::Object(entry));
+        answer.insert(shown, Value::Object(entry));
     }
     Ok(Value::Object(answer))
+}
+
+/// A cursor's queue as the user named it: a filtered group's hidden queue is
+/// shown as its source, with the group's `where` (`None` for any other queue).
+fn shown_queue<R: Reads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    queue: &str,
+) -> crate::rsm::store::Result<(String, Option<String>)> {
+    let Some((source, _)) = crate::rsm::route::split_hidden(queue) else {
+        return Ok((queue.to_string(), None));
+    };
+    let filter = r
+        .queue(tenant, queue)?
+        .and_then(|c| {
+            c.route().and_then(|rt| rt.sources.first()).map(|s| {
+                crate::rsm::route::cond::to_text(&crate::rsm::route::compiled(&s.where_json))
+            })
+        })
+        .unwrap_or_default();
+    Ok((source.to_string(), Some(filter)))
+}
+
+/// `filtered` and `where` on a filtered group's row.
+fn insert_filter(row: &mut serde_json::Map<String, Value>, filter: Option<String>) {
+    if let Some(w) = filter {
+        row.insert("filtered".into(), Value::Bool(true));
+        row.insert("where".into(), Value::String(w));
+    }
 }
 
 /// `GET /api/v1/consumer-groups/lagging`: every cursor, queue mode included,
@@ -2815,27 +2940,35 @@ fn lagging_partitions<R: Reads + ?Sized>(
     let lagging: Vec<CursorLag> = lagging.into_iter().map(|(_, l)| l).collect();
     let kafka =
         kafka_groups::kafka_groups(r, tenant, lagging.iter().map(|l| l.group.as_str()), now)?;
+    let mut shown = HashMap::new();
+    for l in &lagging {
+        if !shown.contains_key(&l.queue) {
+            shown.insert(l.queue.clone(), shown_queue(r, tenant, &l.queue)?);
+        }
+    }
     let mut rows: Vec<(i64, Value)> = lagging
         .into_iter()
         .filter_map(|l| {
             let lag = l.lag_seconds(now)?;
             let oldest = l.oldest_unconsumed_us?;
-            Some((
-                lag,
-                json!({
-                    "consumer_group":l.group,
-                    "queue_name":l.queue,
-                    "partition_name":l.partition,
-                    "partition_id":uuid_bytes_to_string(&l.partition_uuid),
-                    "worker_id":l.worker,
-                    "kind":if kafka.contains_key(&l.group) { "kafka" } else { "queen" },
-                    "offset_lag":l.pending,
-                    "time_lag_seconds":lag,
-                    "lag_hours":(lag as f64 / 36.0).round() / 100.0,
-                    "oldest_unconsumed_at":iso_ms(oldest),
-                    "last_consumed_at":Value::Null
-                }),
-            ))
+            let (queue, filter) = shown.get(&l.queue).cloned().unwrap_or_default();
+            let mut row = json!({
+                "consumer_group":l.group,
+                "queue_name":queue,
+                "partition_name":l.partition,
+                "partition_id":uuid_bytes_to_string(&l.partition_uuid),
+                "worker_id":l.worker,
+                "kind":if kafka.contains_key(&l.group) { "kafka" } else { "queen" },
+                "offset_lag":l.pending,
+                "time_lag_seconds":lag,
+                "lag_hours":(lag as f64 / 36.0).round() / 100.0,
+                "oldest_unconsumed_at":iso_ms(oldest),
+                "last_consumed_at":Value::Null
+            });
+            if let Some(o) = row.as_object_mut() {
+                insert_filter(o, filter);
+            }
+            Some((lag, row))
         })
         .collect();
     rows.sort_by(|a, b| b.0.cmp(&a.0));
@@ -2948,6 +3081,7 @@ fn group_view<R: Reads + ?Sized>(
             r.group(tenant, &queue, &group)?
         };
         let readers = Readers::of(&kafka, &group, &queue, now);
+        let (shown, filter) = shown_queue(r, tenant, &queue)?;
         let state = match readers.live {
             Some(l) if !l.live => "Empty",
             Some(_) if a.max_time_lag > 300 => "Lagging",
@@ -2958,8 +3092,8 @@ fn group_view<R: Reads + ?Sized>(
         };
         let mut row = json!({
             "name":group,
-            "topics":[queue],
-            "queueName":queue,
+            "topics":[shown],
+            "queueName":shown,
             "members":a.members,
             "partitionCursors":a.members,
             "partitionsWithLag":a.with_lag,
@@ -2974,6 +3108,7 @@ fn group_view<R: Reads + ?Sized>(
         });
         if let Some(o) = row.as_object_mut() {
             readers.insert_into(o, now);
+            insert_filter(o, filter);
         }
         out.push(row);
     }

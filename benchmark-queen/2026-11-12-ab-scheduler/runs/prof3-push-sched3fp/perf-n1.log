@@ -1,0 +1,7 @@
+pid 76604 planner tid 76658 busy at 18:26:32
+planner record start 18:26:36
+[ perf record: Captured and wrote 2.700 MB /root/p3/prof/planner.data (18732 samples) ]
+whole record start 18:26:49
+[ perf record: Captured and wrote 12.484 MB /root/p3/prof/all.data (45955 samples) ]
+scripts 18:26:56
+done 18:27:00

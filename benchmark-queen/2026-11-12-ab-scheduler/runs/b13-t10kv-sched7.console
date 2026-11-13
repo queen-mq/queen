@@ -1,0 +1,4 @@
+[12:59:10] run b13-t10kv-sched7: build sched7, txn, 200 partitions, steps of 40s at: 200000 240000 280000 320000 | TXN_SIZE=10 KV=1 CONS=25 PROCS=8 BATCH=100 SPREAD=1 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames -txn-kv | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[13:00:10]   200,000: offered 199,989 | workers 20,001 txn/s = 200,008 msg/s | read 199,982 | shed 0 errors 0 aborts 0 | commit p50 4.7 p99 8.4 | e2e p50 56 p99 120 | feed push p50 3.8 p99 6.8 | cores 12.5 / 6.9 / 5.1 | loaders 9.2c  OK 
+[13:01:17]   240,000: offered 240,021 | workers 19,742 txn/s = 197,415 msg/s | read 197,425 | shed 0 errors 0 aborts 0 | commit p50 5.2 p99 9.1 | e2e p50 3375 p99 7340 | feed push p50 4.1 p99 7.2 | cores 12.8 / 7.0 / 5.2 | loaders 9.3c  NOT CARRIED 
+[13:01:17] stopping at 240000

@@ -1,0 +1,76 @@
+[15:05:30] abplan start: t10 t10kv t10w t100 push | builds 281 sched
+[15:05:30] == t10 on 281
+ab-t10-281 [15:06:57]    20,000: offered 20,000 | workers 2,000 txn/s = 19,999 msg/s | read 20,000 | shed 0 errors 0 aborts 0 | commit p50 1.2 p99 1.6 | e2e p50 17 p99 30 | feed push p50 2.3 p99 3.3 | cores 3.6 / 1.7 / 1.8 | loaders 1.5c  OK 
+ab-t10-281 [15:08:03]    40,000: offered 40,000 | workers 4,000 txn/s = 40,000 msg/s | read 40,001 | shed 0 errors 0 aborts 0 | commit p50 1.5 p99 2.2 | e2e p50 21 p99 38 | feed push p50 2.5 p99 3.7 | cores 4.9 / 2.4 / 2.4 | loaders 2.7c  OK 
+ab-t10-281 [15:09:08]    60,000: offered 59,996 | workers 6,000 txn/s = 60,000 msg/s | read 60,000 | shed 0 errors 0 aborts 0 | commit p50 1.8 p99 2.9 | e2e p50 26 p99 48 | feed push p50 2.8 p99 4.3 | cores 5.7 / 2.8 / 2.8 | loaders 3.7c  OK 
+ab-t10-281 [15:10:13]    80,000: offered 79,999 | workers 8,000 txn/s = 79,997 msg/s | read 79,999 | shed 0 errors 0 aborts 0 | commit p50 2.3 p99 3.8 | e2e p50 33 p99 61 | feed push p50 3.2 p99 5.1 | cores 6.1 / 2.9 / 3.0 | loaders 4.5c  OK 
+ab-t10-281 [15:11:18]   100,000: offered 99,996 | workers 9,999 txn/s = 99,990 msg/s | read 99,984 | shed 0 errors 0 aborts 0 | commit p50 3.1 p99 5.2 | e2e p50 43 p99 82 | feed push p50 3.7 p99 6.3 | cores 6.4 / 3.0 / 3.0 | loaders 5.2c  OK 
+ab-t10-281 [15:12:23]   120,000: offered 119,982 | workers 12,001 txn/s = 120,009 msg/s | read 120,026 | shed 0 errors 0 aborts 0 | commit p50 4.5 p99 8.3 | e2e p50 63 p99 125 | feed push p50 4.9 p99 9.5 | cores 6.6 / 2.8 / 2.8 | loaders 5.7c  OK 
+ab-t10-281 [15:13:32]   140,000: offered 140,008 | workers 12,967 txn/s = 129,672 msg/s | read 129,700 | shed 0 errors 0 aborts 0 | commit p50 6.3 p99 12.8 | e2e p50 1278 p99 2851 | feed push p50 6.6 p99 13.6 | cores 6.4 / 2.6 / 2.6 | loaders 5.9c  NOT CARRIED 
+ab-t10-281 [15:13:32] stopping at 140000
+[15:13:35] == t10 on sched
+ab-t10-sched [15:15:07]    20,000: offered 20,000 | workers 2,000 txn/s = 19,999 msg/s | read 19,999 | shed 0 errors 0 aborts 0 | commit p50 1.2 p99 1.6 | e2e p50 17 p99 30 | feed push p50 2.3 p99 3.2 | cores 3.6 / 1.8 / 1.8 | loaders 1.5c  OK 
+ab-t10-sched [15:16:12]    40,000: offered 40,000 | workers 4,000 txn/s = 40,000 msg/s | read 40,001 | shed 0 errors 0 aborts 0 | commit p50 1.5 p99 2.2 | e2e p50 22 p99 39 | feed push p50 2.5 p99 3.7 | cores 4.9 / 2.4 / 2.4 | loaders 2.7c  OK 
+ab-t10-sched [15:17:17]    60,000: offered 60,000 | workers 6,000 txn/s = 60,002 msg/s | read 59,998 | shed 0 errors 0 aborts 0 | commit p50 1.8 p99 2.9 | e2e p50 27 p99 49 | feed push p50 2.8 p99 4.2 | cores 5.7 / 2.8 / 2.8 | loaders 3.7c  OK 
+ab-t10-sched [15:18:22]    80,000: offered 79,999 | workers 8,000 txn/s = 80,001 msg/s | read 80,009 | shed 0 errors 0 aborts 0 | commit p50 2.4 p99 3.8 | e2e p50 34 p99 62 | feed push p50 3.2 p99 5.1 | cores 6.2 / 3.0 / 3.0 | loaders 4.5c  OK 
+ab-t10-sched [15:19:27]   100,000: offered 100,002 | workers 9,999 txn/s = 99,987 msg/s | read 99,985 | shed 0 errors 0 aborts 0 | commit p50 3.2 p99 5.4 | e2e p50 45 p99 84 | feed push p50 3.7 p99 6.5 | cores 6.5 / 3.1 / 3.1 | loaders 5.2c  OK 
+ab-t10-sched [15:20:32]   120,000: offered 119,999 | workers 12,000 txn/s = 120,003 msg/s | read 120,020 | shed 0 errors 0 aborts 0 | commit p50 4.5 p99 7.7 | e2e p50 61 p99 119 | feed push p50 4.7 p99 8.6 | cores 6.8 / 3.1 / 3.1 | loaders 5.8c  OK 
+ab-t10-sched [15:21:37]   140,000: offered 140,005 | workers 13,356 txn/s = 133,563 msg/s | read 133,544 | shed 0 errors 0 aborts 0 | commit p50 6.5 p99 11.6 | e2e p50 811 p99 1950 | feed push p50 6.1 p99 12.2 | cores 7.0 / 3.1 / 3.1 | loaders 6.3c  NOT CARRIED 
+ab-t10-sched [15:21:37] stopping at 140000
+[15:21:42] == t10kv on 281
+ab-t10kv-281 [15:22:54]    20,000: offered 20,000 | workers 2,000 txn/s = 20,000 msg/s | read 20,000 | shed 0 errors 0 aborts 0 | commit p50 1.5 p99 1.9 | e2e p50 18 p99 31 | feed push p50 2.3 p99 3.4 | cores 3.7 / 1.7 / 1.7 | loaders 1.4c  OK 
+ab-t10kv-281 [15:23:59]    40,000: offered 40,000 | workers 4,000 txn/s = 39,998 msg/s | read 40,000 | shed 0 errors 0 aborts 0 | commit p50 1.8 p99 2.9 | e2e p50 23 p99 52 | feed push p50 2.7 p99 4.2 | cores 5.1 / 2.4 / 2.4 | loaders 2.6c  OK 
+ab-t10kv-281 [15:25:04]    60,000: offered 59,999 | workers 6,000 txn/s = 60,003 msg/s | read 60,000 | shed 0 errors 0 aborts 0 | commit p50 2.4 p99 3.6 | e2e p50 30 p99 54 | feed push p50 3.0 p99 4.6 | cores 5.9 / 2.7 / 2.7 | loaders 3.6c  OK 
+ab-t10kv-281 [15:26:09]    80,000: offered 79,999 | workers 8,000 txn/s = 80,002 msg/s | read 79,998 | shed 0 errors 0 aborts 0 | commit p50 3.2 p99 5.3 | e2e p50 40 p99 76 | feed push p50 3.7 p99 6.0 | cores 6.3 / 2.7 / 2.7 | loaders 4.4c  OK 
+ab-t10kv-281 [15:27:13]   100,000: offered 99,998 | workers 10,000 txn/s = 99,996 msg/s | read 99,997 | shed 0 errors 0 aborts 0 | commit p50 5.2 p99 9.6 | e2e p50 65 p99 128 | feed push p50 5.1 p99 9.2 | cores 6.5 / 2.6 / 2.6 | loaders 5.0c  OK 
+ab-t10kv-281 [15:28:24]   120,000: offered 119,995 | workers 10,181 txn/s = 101,811 msg/s | read 101,812 | shed 0 errors 0 aborts 0 | commit p50 9.0 p99 17.7 | e2e p50 3015 p99 5767 | feed push p50 7.8 p99 15.2 | cores 6.3 / 2.4 / 2.4 | loaders 5.0c  NOT CARRIED 
+ab-t10kv-281 [15:28:24] stopping at 120000
+[15:28:29] == t10kv on sched
+ab-t10kv-sched [15:29:52]    20,000: offered 20,000 | workers 2,000 txn/s = 20,000 msg/s | read 19,999 | shed 0 errors 0 aborts 0 | commit p50 1.5 p99 1.9 | e2e p50 17 p99 30 | feed push p50 2.2 p99 3.3 | cores 3.7 / 1.8 / 1.8 | loaders 1.4c  OK 
+ab-t10kv-sched [15:30:57]    40,000: offered 40,003 | workers 4,000 txn/s = 39,999 msg/s | read 40,000 | shed 0 errors 0 aborts 0 | commit p50 1.9 p99 2.9 | e2e p50 24 p99 51 | feed push p50 2.7 p99 4.1 | cores 5.2 / 2.4 / 2.4 | loaders 2.6c  OK 
+ab-t10kv-sched [15:32:02]    60,000: offered 59,999 | workers 6,000 txn/s = 59,998 msg/s | read 59,998 | shed 0 errors 0 aborts 0 | commit p50 2.5 p99 3.8 | e2e p50 31 p99 57 | feed push p50 3.1 p99 4.7 | cores 6.0 / 2.7 / 2.7 | loaders 3.6c  OK 
+ab-t10kv-sched [15:33:07]    80,000: offered 79,999 | workers 8,001 txn/s = 80,007 msg/s | read 80,005 | shed 0 errors 0 aborts 0 | commit p50 3.4 p99 5.6 | e2e p50 42 p99 80 | feed push p50 3.7 p99 5.9 | cores 6.4 / 2.8 / 2.8 | loaders 4.4c  OK 
+ab-t10kv-sched [15:34:12]   100,000: offered 99,999 | workers 10,000 txn/s = 100,000 msg/s | read 100,018 | shed 0 errors 0 aborts 0 | commit p50 5.5 p99 9.3 | e2e p50 67 p99 130 | feed push p50 5.1 p99 8.6 | cores 6.7 / 2.8 / 2.8 | loaders 5.0c  OK 
+ab-t10kv-sched [15:35:21]   120,000: offered 119,992 | workers 11,295 txn/s = 112,955 msg/s | read 112,930 | shed 0 errors 0 aborts 0 | commit p50 8.6 p99 15.0 | e2e p50 999 p99 2523 | feed push p50 6.8 p99 12.2 | cores 6.9 / 2.9 / 2.9 | loaders 5.5c  NOT CARRIED 
+ab-t10kv-sched [15:35:21] stopping at 120000
+[15:35:26] == t10w on 281
+ab-t10w-281 [15:36:42]    40,000: offered 39,999 | workers 4,000 txn/s = 39,998 msg/s | read 40,001 | shed 0 errors 0 aborts 0 | commit p50 1.5 p99 2.1 | e2e p50 21 p99 37 | feed push p50 2.4 p99 3.6 | cores 4.9 / 2.4 / 2.4 | loaders 2.7c  OK 
+ab-t10w-281 [15:37:47]    80,000: offered 79,999 | workers 8,000 txn/s = 79,997 msg/s | read 80,001 | shed 0 errors 0 aborts 0 | commit p50 2.3 p99 3.8 | e2e p50 33 p99 61 | feed push p50 3.1 p99 5.1 | cores 6.1 / 3.0 / 2.9 | loaders 4.5c  OK 
+ab-t10w-281 [15:38:51]   120,000: offered 119,996 | workers 12,003 txn/s = 120,029 msg/s | read 120,017 | shed 0 errors 0 aborts 0 | commit p50 4.4 p99 7.8 | e2e p50 61 p99 120 | feed push p50 4.8 p99 9.1 | cores 6.6 / 2.9 / 2.8 | loaders 5.8c  OK 
+ab-t10w-281 [15:40:12]   160,000: offered 159,994 | workers 9,790 txn/s = 97,897 msg/s | read 97,903 | shed 0 errors 0 aborts 0 | commit p50 24.8 p99 36.4 | e2e p50 10748 p99 15204 | feed push p50 14.1 p99 20.5 | cores 5.1 / 1.8 / 1.7 | loaders 4.7c  NOT CARRIED 
+ab-t10w-281 [15:40:12] stopping at 160000
+[15:40:15] == t10w on sched
+ab-t10w-sched [15:41:44]    40,000: offered 40,000 | workers 4,000 txn/s = 39,998 msg/s | read 39,999 | shed 0 errors 0 aborts 0 | commit p50 1.5 p99 2.2 | e2e p50 22 p99 38 | feed push p50 2.4 p99 3.6 | cores 4.9 / 2.5 / 2.4 | loaders 2.7c  OK 
+ab-t10w-sched [15:42:52]    80,000: offered 79,999 | workers 8,002 txn/s = 80,018 msg/s | read 80,018 | shed 0 errors 0 aborts 0 | commit p50 2.4 p99 3.9 | e2e p50 35 p99 64 | feed push p50 3.2 p99 5.1 | cores 6.3 / 3.0 / 3.0 | loaders 4.6c  OK 
+ab-t10w-sched [15:43:57]   120,000: offered 119,981 | workers 11,999 txn/s = 119,992 msg/s | read 119,982 | shed 0 errors 0 aborts 0 | commit p50 4.9 p99 8.3 | e2e p50 65 p99 126 | feed push p50 4.9 p99 9.0 | cores 6.8 / 3.2 / 3.1 | loaders 5.8c  OK 
+ab-t10w-sched [15:45:07]   160,000: offered 159,988 | workers 14,758 txn/s = 147,583 msg/s | read 147,579 | shed 0 errors 0 aborts 0 | commit p50 14.0 p99 25.6 | e2e p50 1507 p99 3310 | feed push p50 10.9 p99 23.3 | cores 7.2 / 3.2 / 3.1 | loaders 6.7c  NOT CARRIED 
+ab-t10w-sched [15:45:07] stopping at 160000
+[15:45:07] == t100 on 281
+ab-t100-281 [15:47:00]    50,000: offered 50,000 | workers 500 txn/s = 50,000 msg/s | read 50,003 | shed 0 errors 0 aborts 0 | commit p50 1.5 p99 2.0 | e2e p50 6 p99 7 | feed push p50 2.1 p99 3.1 | cores 2.1 / 1.0 / 1.0 | loaders 0.9c  OK 
+ab-t100-281 [15:48:06]   100,000: offered 99,996 | workers 1,000 txn/s = 99,999 msg/s | read 99,999 | shed 0 errors 0 aborts 0 | commit p50 1.7 p99 2.7 | e2e p50 7 p99 9 | feed push p50 2.2 p99 3.4 | cores 3.4 / 1.6 / 1.6 | loaders 1.7c  OK 
+ab-t100-281 [15:49:11]   150,000: offered 149,992 | workers 1,500 txn/s = 150,006 msg/s | read 150,012 | shed 0 errors 0 aborts 0 | commit p50 1.8 p99 3.1 | e2e p50 7 p99 10 | feed push p50 2.4 p99 3.8 | cores 4.3 / 2.0 / 2.0 | loaders 2.6c  OK 
+ab-t100-281 [15:50:17]   200,000: offered 199,997 | workers 2,000 txn/s = 200,003 msg/s | read 200,000 | shed 0 errors 0 aborts 0 | commit p50 2.1 p99 3.8 | e2e p50 9 p99 13 | feed push p50 2.6 p99 4.3 | cores 4.9 / 2.3 / 2.4 | loaders 3.5c  OK 
+ab-t100-281 [15:51:22]   250,000: offered 249,996 | workers 2,500 txn/s = 250,010 msg/s | read 250,013 | shed 0 errors 0 aborts 0 | commit p50 2.5 p99 4.6 | e2e p50 10 p99 15 | feed push p50 2.9 p99 5.1 | cores 5.4 / 2.4 / 2.5 | loaders 4.2c  OK 
+ab-t100-281 [15:52:27]   300,000: offered 299,986 | workers 3,000 txn/s = 300,006 msg/s | read 300,029 | shed 0 errors 0 aborts 0 | commit p50 3.0 p99 5.6 | e2e p50 12 p99 19 | feed push p50 3.3 p99 5.8 | cores 5.7 / 2.6 / 2.6 | loaders 4.9c  OK 
+[15:52:30] == t100 on sched
+ab-t100-sched [15:54:00]    50,000: offered 49,999 | workers 500 txn/s = 49,999 msg/s | read 49,999 | shed 0 errors 0 aborts 0 | commit p50 1.5 p99 2.2 | e2e p50 6 p99 8 | feed push p50 2.1 p99 3.0 | cores 1.9 / 1.0 / 1.0 | loaders 0.9c  OK 
+ab-t100-sched [15:55:05]   100,000: offered 100,001 | workers 1,000 txn/s = 99,984 msg/s | read 99,984 | shed 0 errors 0 aborts 0 | commit p50 1.7 p99 2.8 | e2e p50 7 p99 10 | feed push p50 2.2 p99 3.6 | cores 3.3 / 1.6 / 1.6 | loaders 1.8c  OK 
+ab-t100-sched [15:56:10]   150,000: offered 149,997 | workers 1,500 txn/s = 149,997 msg/s | read 150,004 | shed 0 errors 0 aborts 0 | commit p50 1.8 p99 3.6 | e2e p50 7 p99 13 | feed push p50 2.3 p99 3.9 | cores 4.3 / 2.1 / 2.1 | loaders 2.6c  OK 
+ab-t100-sched [15:57:15]   200,000: offered 200,018 | workers 2,000 txn/s = 199,991 msg/s | read 199,991 | shed 0 errors 0 aborts 0 | commit p50 2.1 p99 3.8 | e2e p50 9 p99 13 | feed push p50 2.6 p99 4.4 | cores 5.0 / 2.4 / 2.4 | loaders 3.5c  OK 
+ab-t100-sched [15:58:20]   250,000: offered 250,004 | workers 2,500 txn/s = 250,001 msg/s | read 249,991 | shed 0 errors 0 aborts 0 | commit p50 2.5 p99 4.4 | e2e p50 10 p99 15 | feed push p50 2.9 p99 4.9 | cores 5.5 / 2.6 / 2.6 | loaders 4.2c  OK 
+ab-t100-sched [15:59:25]   300,000: offered 300,011 | workers 3,000 txn/s = 300,047 msg/s | read 300,031 | shed 0 errors 0 aborts 0 | commit p50 3.0 p99 5.4 | e2e p50 13 p99 19 | feed push p50 3.3 p99 5.8 | cores 5.8 / 2.7 / 2.7 | loaders 4.9c  OK 
+[15:59:28] == push on 281
+ab-push-281 [16:01:06]   200,000: offered 199,972 | pushed 199,979 | consumed 199,982 | shed 0 errors 0 | push p50 2.2 p99 3.5 | e2e p50 3.4 p99 5.4 | cores 3.2 / 1.5 / 1.5 | loader 1.9c  OK 
+ab-push-281 [16:02:19]   400,000: offered 400,010 | pushed 399,990 | consumed 400,000 | shed 0 errors 0 | push p50 2.5 p99 4.2 | e2e p50 4.2 p99 7.0 | cores 4.7 / 2.2 / 2.2 | loader 3.6c  OK 
+ab-push-281 [16:03:33]   600,000: offered 600,010 | pushed 599,980 | consumed 599,950 | shed 0 errors 0 | push p50 2.9 p99 5.7 | e2e p50 5.5 p99 10.8 | cores 5.5 / 2.5 / 2.4 | loader 4.9c  OK 
+ab-push-281 [16:04:48]   800,000: offered 800,012 | pushed 800,008 | consumed 799,968 | shed 0 errors 0 | push p50 3.9 p99 8.3 | e2e p50 7.9 p99 15.7 | cores 6.0 / 2.5 / 2.5 | loader 6.0c  OK 
+ab-push-281 [16:06:01] 1,000,000: offered 999,933 | pushed 999,996 | consumed 1,000,019 | shed 0 errors 0 | push p50 5.3 p99 23.0 | e2e p50 11.1 p99 52.7 | cores 6.4 / 2.6 / 2.7 | loader 7.0c  OK 
+ab-push-281 [16:07:13] 1,200,000: offered 1,200,011 | pushed 1,200,315 | consumed 1,200,807 | shed 0 errors 0 | push p50 16.0 p99 219.1 | e2e p50 33.3 p99 331.8 | cores 6.8 / 2.6 / 2.7 | loader 7.9c  OK 
+[16:07:19] == push on sched
+ab-push-sched [16:08:39]   200,000: offered 199,995 | pushed 200,002 | consumed 199,995 | shed 0 errors 0 | push p50 2.2 p99 3.4 | e2e p50 3.4 p99 5.2 | cores 3.3 / 1.6 / 1.6 | loader 1.9c  OK 
+ab-push-sched [16:09:52]   400,000: offered 399,993 | pushed 399,997 | consumed 400,020 | shed 0 errors 0 | push p50 2.5 p99 4.3 | e2e p50 4.4 p99 7.4 | cores 4.7 / 2.2 / 2.2 | loader 3.6c  OK 
+ab-push-sched [16:11:06]   600,000: offered 599,980 | pushed 600,036 | consumed 600,026 | shed 0 errors 0 | push p50 3.0 p99 5.7 | e2e p50 5.8 p99 10.9 | cores 5.5 / 2.5 / 2.6 | loader 4.9c  OK 
+ab-push-sched [16:12:19]   800,000: offered 799,993 | pushed 800,010 | consumed 800,043 | shed 0 errors 0 | push p50 4.1 p99 8.4 | e2e p50 8.6 p99 16.3 | cores 6.0 / 2.5 / 2.6 | loader 6.0c  OK 
+ab-push-sched [16:13:30] 1,000,000: offered 1,000,007 | pushed 1,000,037 | consumed 1,000,147 | shed 0 errors 0 | push p50 5.6 p99 31.7 | e2e p50 12.2 p99 75.8 | cores 6.5 / 2.6 / 2.7 | loader 7.0c  OK 
+ab-push-sched [16:14:42] 1,200,000: offered 1,199,972 | pushed 1,199,845 | consumed 1,199,537 | shed 0 errors 0 | push p50 16.0 p99 176.1 | e2e p50 34.3 p99 307.2 | cores 6.9 / 2.6 / 2.7 | loader 7.9c  OK 
+[16:14:45] ABPLAN_DONE

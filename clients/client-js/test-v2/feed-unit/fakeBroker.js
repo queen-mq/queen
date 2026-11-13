@@ -5,7 +5,9 @@
  * FeedReader against it.
  *
  * Every write is one log position, as on the broker: a transaction (its
- * pushes share the position), a lock call. Only pushes are feed entries. The
+ * pushes and links share the position), a lock call. Pushes and links are
+ * feed entries: a link reads as its message (the source's id, transactionId
+ * and payload, the link's headers over the source's), in its own queue. The
  * clock is virtual: `broker.nowMs` is the wall clock, which the test moves; a
  * write is stamped `max(nowMs, the last write's time)`, and a caught-up read
  * resolves to the last write's time, so the clock moves only with writes, as
@@ -71,21 +73,48 @@ export function fakeBroker({ start = Date.parse('2026-11-06T09:00:00.000Z') } = 
       const offset = (b.offsets.get(pk) || 0) + 1
       b.offsets.set(pk, offset)
       b.ids.add(`${pk}\u0000${it.transactionId}`)
-      b.log.push({
+      const e = {
         position, kind: 'push', queue: it.queue, partition, partitionId: b.pids.get(pk), offset,
-        id: `m-${position}-${offset}`, transactionId: it.transactionId, payload: it.payload, ts: iso(t)
-      })
-      results.push({ type: 'push', status: 'queued', transactionId: it.transactionId })
+        id: it.id ?? `m-${position}-${offset}`, transactionId: it.transactionId, payload: it.payload, ts: iso(t)
+      }
+      if (it.headers) e.headers = it.headers
+      // A link, read as its message: what the test can tell apart, the broker's answers cannot.
+      if (it.link) e.link = it.link
+      b.log.push(e)
+      results.push({ type: it.link ? 'link' : 'push', status: 'queued', transactionId: it.transactionId })
     }
     return results
   }
 
-  /** A producer's push: one position for all of `items` ({ queue, partition, data, transactionId? }). */
+  /**
+   * A transaction's `link` as the message it writes, or a rollback answer:
+   * the message `from` names, as the broker resolves it (by partitionId, or
+   * queue and partition, then offset; its transactionId must match). A link
+   * to a link is a link to its message: a link entry holds that message.
+   */
+  function linkItem(op) {
+    const f = op.from || {}
+    const src = b.log.find((e) => e.offset === f.offset &&
+      (f.partitionId !== undefined ? e.partitionId === f.partitionId : e.queue === f.queue && e.partition === f.partition))
+    if (!src) return { error: { success: false, reason: 'source_gone', error: 'source_gone: no such message', results: [] } }
+    if (src.transactionId !== f.transactionId) {
+      return { error: { success: false, reason: 'source_mismatch', error: `source_mismatch: offset ${f.offset} holds ${src.transactionId}`, results: [] } }
+    }
+    const headers = src.headers || op.headers ? { ...(src.headers || {}), ...(op.headers || {}) } : undefined
+    return {
+      item: {
+        queue: op.queue, partition: op.partition ?? 'Default', payload: src.payload, transactionId: src.transactionId,
+        id: src.id, headers, link: { from: f, source: `${src.queue}/${src.partition}/${src.offset}` }
+      }
+    }
+  }
+
+  /** A producer's push: one position for all of `items` ({ queue, partition, data, transactionId?, headers? }). */
   b.push = (items) => {
     const list = Array.isArray(items) ? items : [items]
     const { position, t } = stamp()
     appendPushes(list.map((x, i) => ({
-      queue: x.queue, partition: x.partition, payload: x.data,
+      queue: x.queue, partition: x.partition, payload: x.data, headers: x.headers,
       transactionId: x.transactionId ?? `in-${position}-${i}`
     })), position, t)
     wake()
@@ -135,7 +164,7 @@ export function fakeBroker({ start = Date.parse('2026-11-06T09:00:00.000Z') } = 
       if (parts && !parts.includes(e.partition)) continue
       if (since !== null && Date.parse(e.ts) < since) continue
       if (shard && (!shardQueues || shardQueues.some((re) => re.test(e.queue))) && shardOf(e.partition, shard.count) !== shard.index) continue
-      const msg = { queue: e.queue, partition: e.partition, transactionId: e.transactionId, offset: e.offset, position: e.position, data: e.payload }
+      const msg = { queue: e.queue, partition: e.partition, transactionId: e.transactionId, offset: e.offset, position: e.position, data: e.payload, headers: e.headers }
       if (!where.every((c) => conditionHolds(c, msg))) continue
       out.push(e)
     }
@@ -232,17 +261,31 @@ export function fakeBroker({ start = Date.parse('2026-11-06T09:00:00.000Z') } = 
   b.injectNext = (spec) => b.injected.push(spec)
 
   b.transaction = (body) => {
-    const items = []
-    for (const op of body.operations || []) if (op.type === 'push') items.push(...op.items)
     const kv = body.kv || []
     const injected = b.injected.shift()
     if (injected && injected.before) injected.before(b)
     if (injected && injected.error && injected.when !== 'after') throw injected.error
-    // Duplicates first, as the broker answers them.
+    // The pushes and the links, in the order of the operations: each writes one message.
+    const items = []
+    for (const op of body.operations || []) {
+      if (op.type === 'push') items.push(...op.items)
+      if (op.type === 'link') {
+        const { item, error } = linkItem(op)
+        if (error) return error
+        items.push(item)
+      }
+    }
+    // Duplicates first, as the broker answers them: a pushed one rolls the
+    // transaction back; a link of a message its partition holds already is a
+    // no-op, and the transaction commits.
     const seen = new Set()
     for (const it of items) {
       const k = `${it.queue}\u0000${it.partition ?? 'Default'}\u0000${it.transactionId}`
       if (b.ids.has(k) || seen.has(k)) {
+        if (it.link) {
+          it.duplicate = true
+          continue
+        }
         return { success: false, reason: 'duplicate', error: 'QDUP a pushed message is a duplicate; the transaction rolled back', results: [] }
       }
       seen.add(k)
@@ -277,7 +320,11 @@ export function fakeBroker({ start = Date.parse('2026-11-06T09:00:00.000Z') } = 
       }
     }
     const { position, t } = stamp()
-    const results = appendPushes(items.map((it) => ({ ...it, partition: it.partition ?? 'Default' })), position, t)
+    const stored = appendPushes(items.filter((it) => !it.duplicate).map((it) => ({ ...it, partition: it.partition ?? 'Default' })), position, t)
+    let s = 0
+    const results = items.map((it) => (it.duplicate
+      ? { type: 'link', success: true, duplicate: true, transactionId: it.transactionId }
+      : stored[s++]))
     const written = {}
     for (let i = 0; i < kv.length; i++) {
       const op = kv[i]

@@ -323,11 +323,25 @@ impl RaftFacade {
         } else {
             configured_defaults(now)
         };
-        if let Some(old) = old {
+        if let Some(old) = &old {
             cfg.id = old.id;
             cfg.created_at_us = old.created_at_us;
         }
         apply_config_options(&mut cfg, &opts)?;
+        // Routing (PLAN_ROUTING.md §5): a reading queue's sources.
+        if crate::rsm::route::is_hidden(queue) {
+            return Err(reject(
+                "bad_request",
+                "a queue name may not contain U+0001 (the separator of filtered groups)",
+            ));
+        }
+        let reading = ["from", "where", "partitionBy", "start"]
+            .iter()
+            .any(|k| opts.contains_key(*k));
+        if reading && !self.cluster_allows(crate::rsm::effect::VERSION_8) {
+            return Err(super::headers_need_version_8());
+        }
+        let start_all = apply_route_options(&mut cfg, &opts, old.as_ref(), queue)?;
         self.submit_effects(
             &ctx,
             vec![Effect::QueueUpsert {
@@ -337,7 +351,74 @@ impl RaftFacade {
             }],
         )
         .await?;
-        Ok(ApiOut::json(200, configured_json(queue, &cfg).to_string()))
+        // The committed config: the planner completes a reader's settings
+        // from its sources (planner/route.rs).
+        let cfg = self
+            .queue_config_of(&ctx.tenant, queue)
+            .await?
+            .unwrap_or(cfg);
+        // A reader still catching up (started now, or before and not done)
+        // goes on within this request's budget.
+        let catching = cfg.route().is_some_and(|r| r.catching_up);
+        let caught_up = if start_all || catching {
+            self.catch_up(&ctx, queue, super::route::CATCH_UP_BUDGET)
+                .await?
+        } else {
+            true
+        };
+        let cfg = if start_all || catching {
+            self.queue_config_of(&ctx.tenant, queue)
+                .await?
+                .unwrap_or(cfg)
+        } else {
+            cfg
+        };
+        let mut answer = configured_json(queue, &cfg);
+        if cfg.route().is_some() {
+            answer["catchingUp"] = Value::Bool(!caught_up);
+        }
+        Ok(ApiOut::json(200, answer.to_string()))
+    }
+
+    /// `DELETE /api/v1/resources/queues/:queue` with routing's rules
+    /// (PLAN_ROUTING.md §3.5): a queue that reading queues read is deleted
+    /// only with `force=true` (their links then read as gone); its filtered
+    /// groups' hidden queues go with it. A reader's delete takes it off its
+    /// sources' lists (the planner, `planner/route.rs`).
+    pub(super) async fn api_delete_queue_routed(
+        &self,
+        ctx: ReqCtx,
+        queue: &str,
+        force: bool,
+    ) -> Result<ApiOut, RsmError> {
+        if let Some(cfg) = self.queue_config_of(&ctx.tenant, queue).await? {
+            if let Some(r) = cfg.route() {
+                let visible: Vec<&String> = r
+                    .readers
+                    .iter()
+                    .filter(|q| !crate::rsm::route::is_hidden(q))
+                    .collect();
+                if !visible.is_empty() && !force {
+                    return Ok(ApiOut::json(
+                        409,
+                        json!({
+                            "deleted": false,
+                            "code": "has_readers",
+                            "error": format!(
+                                "{queue} is read by {}: delete them first, or delete with force=true (their links then read as gone)",
+                                visible.iter().map(|q| q.as_str()).collect::<Vec<_>>().join(", ")
+                            ),
+                            "readers": visible,
+                        })
+                        .to_string(),
+                    ));
+                }
+                for hidden in r.readers.iter().filter(|q| crate::rsm::route::is_hidden(q)) {
+                    self.api_delete_queue(ctx.clone(), hidden).await?;
+                }
+            }
+        }
+        self.api_delete_queue(ctx, queue).await
     }
 
     async fn api_delete_queue(&self, ctx: ReqCtx, queue: &str) -> Result<ApiOut, RsmError> {
@@ -619,6 +700,46 @@ impl RaftFacade {
             return self.api_list_queue_lanes(ctx).await;
         }
         let mut rows = self.queue_snapshots(&ctx.tenant).await?;
+        // A filtered group's hidden queue is the group's, shown with it
+        // (`route` on its source), never as a queue of its own.
+        rows.retain(|r| {
+            r.get("name")
+                .and_then(Value::as_str)
+                .is_none_or(|n| !crate::rsm::route::is_hidden(n))
+        });
+        let routes = {
+            let store = self.store.clone();
+            let tenant = ctx.tenant.clone();
+            let names: Vec<String> = rows
+                .iter()
+                .filter_map(|r| r.get("name").and_then(Value::as_str).map(str::to_string))
+                .collect();
+            tokio::task::spawn_blocking(move || {
+                store.read(|r| {
+                    let mut out = std::collections::HashMap::new();
+                    for n in names {
+                        if let Some(c) = r.queue(&tenant, &n)? {
+                            if c.route().is_some() {
+                                let route = route_json_read(r, &tenant, &n, &c, false)?;
+                                out.insert(n, route);
+                            }
+                        }
+                    }
+                    Ok(out)
+                })
+            })
+            .await
+            .map_err(|e| RsmError::Internal(format!("route read: {e}")))?
+            .map_err(read_error)?
+        };
+        for row in &mut rows {
+            let name = row.get("name").and_then(Value::as_str).map(str::to_string);
+            if let (Some(n), Some(o)) = (name, row.as_object_mut()) {
+                if let Some(rj) = routes.get(&n) {
+                    o.insert("route".to_string(), rj.clone());
+                }
+            }
+        }
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
         let now = super::wall_micros();
@@ -816,7 +937,27 @@ impl RaftFacade {
             .queue_resource_detail(&ctx.tenant, queue, sizes_max())
             .await?
         {
-            Some(v) => Ok(ApiOut::json(200, v.to_string())),
+            Some(mut v) => {
+                // Its part in routing: what it reads, who reads it.
+                let store = self.store.clone();
+                let tenant = ctx.tenant.clone();
+                let q = queue.to_string();
+                let route = tokio::task::spawn_blocking(move || {
+                    store.read(|r| match r.queue(&tenant, &q)? {
+                        Some(c) if c.route().is_some() => {
+                            route_json_read(r, &tenant, &q, &c, true).map(Some)
+                        }
+                        _ => Ok(None),
+                    })
+                })
+                .await
+                .map_err(|e| RsmError::Internal(format!("route read: {e}")))?
+                .map_err(read_error)?;
+                if let Some(route) = route {
+                    v["route"] = route;
+                }
+                Ok(ApiOut::json(200, v.to_string()))
+            }
             None => Ok(ApiOut::json(
                 404,
                 json!({"error":"Queue not found"}).to_string(),
@@ -1639,6 +1780,7 @@ fn configured_defaults(now: i64) -> QueueConfig {
         retention_sink_hold: String::new(),
         retention_sink_hold_max_seconds: 604800,
         created_at_us: now,
+        route: None,
     }
 }
 
@@ -1760,11 +1902,350 @@ fn apply_config_options(cfg: &mut QueueConfig, o: &Map<String, Value>) -> Result
     Ok(())
 }
 
+/// The options a reading queue takes from its sources: refused on one.
+const READER_KEEPS: [&str; 9] = [
+    "retentionEnabled",
+    "retentionSeconds",
+    "completedRetentionSeconds",
+    "maxWaitTimeSeconds",
+    "dedupWindowSeconds",
+    "encryptionEnabled",
+    "maxSize",
+    "retentionSinkHold",
+    "retentionSinkHoldMaxSeconds",
+];
+
+/// A reading queue's options (`from`, `where`, `partitionBy`, `start`) into
+/// `cfg`'s route. `Ok(true)` when it starts with history (`start: "all"`):
+/// the catch-up fills it before it takes live links.
+fn apply_route_options(
+    cfg: &mut QueueConfig,
+    o: &Map<String, Value>,
+    old: Option<&QueueConfig>,
+    queue: &str,
+) -> Result<bool, RsmError> {
+    use crate::rsm::route::cond;
+    let from = o.get("from");
+    let was_reader = old.is_some_and(QueueConfig::is_reader);
+    let Some(from) = from else {
+        if o.contains_key("where") || o.contains_key("partitionBy") || o.contains_key("start") {
+            if !was_reader {
+                return Err(reject(
+                    "bad_request",
+                    "where, partitionBy and start belong to a reading queue: name its sources with from",
+                ));
+            }
+        } else {
+            // No route option: a reader stays one (merge), and refuses what
+            // its sources decide.
+            if cfg.is_reader() {
+                if let Some(k) = READER_KEEPS.iter().find(|k| o.contains_key(**k)) {
+                    return Err(reject(
+                        "reading_queue",
+                        format!(
+                            "{queue} keeps what its sources keep: set {k} on {}",
+                            reader_sources(cfg).join(", ")
+                        ),
+                    ));
+                }
+            }
+            return Ok(false);
+        }
+        // A reader's where/partitionBy changed, with its sources as they are.
+        return apply_route_options(
+            cfg,
+            &{
+                let mut m = o.clone();
+                m.insert(
+                    "from".into(),
+                    Value::Array(
+                        cfg.route()
+                            .map(|r| {
+                                r.sources
+                                    .iter()
+                                    .map(|s| Value::String(s.queue.clone()))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    ),
+                );
+                m
+            },
+            old,
+            queue,
+        );
+    };
+    if from.is_null() {
+        // No longer a reader: what it holds stays readable.
+        if let Some(r) = cfg.route.as_deref_mut() {
+            r.sources.clear();
+            r.partition_by.clear();
+            r.catching_up = false;
+        }
+        return Ok(false);
+    }
+    if old.is_some() && !was_reader {
+        return Err(reject(
+            "bad_request",
+            format!("{queue} exists as an ordinary queue; a reading queue is a new one: pick another name"),
+        ));
+    }
+    let rules = cond::Rules::route();
+    let top_where = match o.get("where") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(w) => cond::parse_value(w, &rules).map_err(|e| reject("bad_where", e))?,
+    };
+    let mut sources: Vec<crate::rsm::effect::SourceRule> = Vec::new();
+    let one =
+        |name: &str, conds: &[cond::Cond]| -> Result<crate::rsm::effect::SourceRule, RsmError> {
+            if name.is_empty() {
+                return Err(reject(
+                    "bad_request",
+                    "from: a source name must not be empty",
+                ));
+            }
+            Ok(crate::rsm::effect::SourceRule {
+                queue: name.to_string(),
+                where_json: cond::to_json(conds).to_string(),
+            })
+        };
+    match from {
+        Value::String(name) => sources.push(one(name, &top_where)?),
+        Value::Array(items) => {
+            for it in items {
+                match it {
+                    Value::String(name) => sources.push(one(name, &top_where)?),
+                    Value::Object(m) => {
+                        let name = m.get("queue").and_then(Value::as_str).ok_or_else(|| {
+                            reject("bad_request", "from: each source names its queue")
+                        })?;
+                        let conds = match m.get("where") {
+                            None | Some(Value::Null) => top_where.clone(),
+                            Some(w) => {
+                                cond::parse_value(w, &rules).map_err(|e| reject("bad_where", e))?
+                            }
+                        };
+                        sources.push(one(name, &conds)?);
+                    }
+                    _ => {
+                        return Err(reject(
+                            "bad_request",
+                            "from: a queue name, or {queue, where}, for each source",
+                        ))
+                    }
+                }
+            }
+        }
+        _ => {
+            return Err(reject(
+                "bad_request",
+                "from: a queue name or a list of them",
+            ))
+        }
+    }
+    if sources.is_empty() {
+        return Err(reject("bad_request", "from: name at least one source"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    if let Some(dup) = sources.iter().find(|s| !seen.insert(s.queue.clone())) {
+        return Err(reject(
+            "bad_request",
+            format!("from: {} is named twice", dup.queue),
+        ));
+    }
+    if let Some(k) = READER_KEEPS.iter().find(|k| o.contains_key(**k)) {
+        return Err(reject(
+            "reading_queue",
+            format!(
+                "{queue} keeps what its sources keep: set {k} on {}",
+                sources
+                    .iter()
+                    .map(|s| s.queue.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+    let partition_by = match o.get("partitionBy") {
+        None | Some(Value::Null) => cfg
+            .route()
+            .map(|r| r.partition_by.clone())
+            .unwrap_or_default(),
+        Some(Value::String(s)) if s == "same" || s.is_empty() => String::new(),
+        Some(Value::String(s)) if crate::rsm::route::partition_by_valid(s) => s.clone(),
+        Some(v) => {
+            return Err(reject(
+                "bad_request",
+                format!("partitionBy: \"same\", data.<path> or headers.<name>, got {v}"),
+            ))
+        }
+    };
+    let start_all = match o.get("start") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(s)) if s == "now" => false,
+        Some(Value::String(s)) if s == "all" => true,
+        Some(v) => {
+            return Err(reject(
+                "bad_request",
+                format!("start: \"now\" or \"all\", got {v}"),
+            ))
+        }
+    };
+    let sources_changed = cfg
+        .route()
+        .map(|r| r.sources.iter().map(|s| &s.queue).collect::<Vec<_>>())
+        != Some(sources.iter().map(|s| &s.queue).collect::<Vec<_>>());
+    // History is read for a new reader, or one whose sources change; a
+    // change of `where` applies from the next push.
+    let start_all = start_all && (!was_reader || sources_changed);
+    let r = cfg.route_mut();
+    r.sources = sources;
+    r.partition_by = partition_by;
+    r.hidden_group.clear();
+    if start_all {
+        r.catching_up = true;
+    }
+    Ok(start_all)
+}
+
+fn reader_sources(c: &QueueConfig) -> Vec<String> {
+    c.route()
+        .map(|r| r.sources.iter().map(|s| s.queue.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// A queue's part in routing, as the console and `configure` show it.
+pub(crate) fn route_json(c: &QueueConfig) -> Value {
+    let Some(r) = c.route() else {
+        return Value::Null;
+    };
+    let from: Vec<Value> = r
+        .sources
+        .iter()
+        .map(|s| {
+            let conds = crate::rsm::route::compiled(&s.where_json);
+            json!({
+                "queue": s.queue,
+                "where": crate::rsm::route::cond::to_text(&conds),
+                "conditions": serde_json::from_str::<Value>(&s.where_json).unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    let shown = |v: &Vec<String>| -> Vec<Value> {
+        v.iter()
+            .map(|q| match crate::rsm::route::split_hidden(q) {
+                Some((src, group)) => json!({"queue": src, "group": group}),
+                None => json!({"queue": q}),
+            })
+            .collect()
+    };
+    json!({
+        "from": from,
+        "partitionBy": if r.partition_by.is_empty() { "same".to_string() } else { r.partition_by.clone() },
+        "group": if r.hidden_group.is_empty() { Value::Null } else { Value::String(r.hidden_group.clone()) },
+        "catchingUp": r.catching_up,
+        "readers": shown(&r.readers),
+        "holders": shown(&r.holders),
+    })
+}
+
+/// [`route_json`] of `name`, each reader with the `where` it reads `name` by
+/// (a filtered group's included): what the queue list and page show. With
+/// `detail` (one queue's page) each reader and holder also says how old the
+/// oldest message it still keeps is (`oldestUnconsumedAt`, a holder's
+/// `holdsRetention`), and a catch-up how far it got (`catchUp`): reads of
+/// every partition of each, too many for the list.
+pub(crate) fn route_json_read<R: Reads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    name: &str,
+    c: &QueueConfig,
+    detail: bool,
+) -> crate::rsm::store::Result<Value> {
+    let mut v = route_json(c);
+    let Some(rt) = c.route() else {
+        return Ok(v);
+    };
+    // The oldest message a queue keeps unconsumed, of all its partitions.
+    let oldest = |q: &str| -> crate::rsm::store::Result<Option<i64>> {
+        let mut pids = Vec::new();
+        r.scan_queue_partitions(tenant, q, None, usize::MAX, &mut |pid| {
+            pids.push(pid);
+            true
+        })?;
+        let mut at: Option<i64> = None;
+        for pid in pids {
+            if let Some(t) = r.partition(pid)?.and_then(|p| p.oldest_live_at_us) {
+                at = Some(at.map_or(t, |a| a.min(t)));
+            }
+        }
+        Ok(at)
+    };
+    let age = |at: Option<i64>| at.map_or(Value::Null, |us| json!(reads::iso_ms(us)));
+    if let Some(rows) = v.get_mut("readers").and_then(Value::as_array_mut) {
+        for (row, reader) in rows.iter_mut().zip(&rt.readers) {
+            let Some(rc) = r.queue(tenant, reader)? else {
+                continue;
+            };
+            let rule = rc
+                .route()
+                .and_then(|rr| rr.sources.iter().find(|s| s.queue == name));
+            if let Some(s) = rule {
+                let text =
+                    crate::rsm::route::cond::to_text(&crate::rsm::route::compiled(&s.where_json));
+                if !text.is_empty() {
+                    row["where"] = Value::String(text);
+                }
+            }
+            if detail {
+                row["oldestUnconsumedAt"] = age(oldest(reader)?);
+            }
+        }
+    }
+    if detail {
+        if let Some(rows) = v.get_mut("holders").and_then(Value::as_array_mut) {
+            for (row, holder) in rows.iter_mut().zip(&rt.holders) {
+                let at = oldest(holder)?;
+                row["oldestUnconsumedAt"] = age(at);
+                row["holdsRetention"] = Value::Bool(at.is_some());
+            }
+        }
+        if rt.catching_up {
+            // Messages read of what the sources kept when it started, by the
+            // marks the catch-up keeps (`RouteCfg::marks`).
+            let marks: std::collections::HashMap<u64, u64> = rt.marks.iter().copied().collect();
+            let (mut read, mut total) = (0u64, 0u64);
+            for s in &rt.sources {
+                let mut pids = Vec::new();
+                r.scan_queue_partitions(tenant, &s.queue, None, usize::MAX, &mut |pid| {
+                    pids.push(pid);
+                    true
+                })?;
+                for pid in pids {
+                    if let Some(p) = r.partition(pid)? {
+                        let head = (p.last_offset + 1).max(0) as u64;
+                        let start = p.log_start.min(head);
+                        let mark = marks.get(&pid).copied().unwrap_or(start).clamp(start, head);
+                        read += mark - start;
+                        total += head - start;
+                    }
+                }
+            }
+            v["catchUp"] = json!({"read": read, "total": total});
+        }
+    }
+    Ok(v)
+}
+
 fn config_options(c: &QueueConfig) -> Value {
     json!({"priority":c.priority,"leaseTime":c.lease_time,"retryLimit":c.retry_limit,"retryDelay":c.retry_delay,"maxSize":c.max_queue_size,"maxQueueSize":c.max_queue_size,"ttl":c.ttl,"deadLetterQueue":c.dead_letter_queue,"dlqAfterMaxRetries":c.dlq_after_max_retries,"delayedProcessing":c.delayed_processing,"windowBuffer":c.window_buffer,"retentionSeconds":c.retention_seconds,"completedRetentionSeconds":c.completed_retention_seconds,"retentionEnabled":c.retention_enabled,"encryptionEnabled":c.encryption_enabled,"maxWaitTimeSeconds":c.max_wait_time_seconds,"minPopWaitTime":c.min_pop_wait_time,"dedupWindowSeconds":c.dedup_window_seconds,"retentionSinkHold":c.retention_sink_hold,"retentionSinkHoldMaxSeconds":c.retention_sink_hold_max_seconds})
 }
 fn configured_json(name: &str, c: &QueueConfig) -> Value {
-    json!({"configured":true,"queueId":uuid_bytes_to_string(&c.id),"partitionId":Value::Null,"queue":name,"namespace":c.namespace.clone().unwrap_or_default(),"task":c.task.clone().unwrap_or_default(),"storage":"segments","options":config_options(c)})
+    let mut v = json!({"configured":true,"queueId":uuid_bytes_to_string(&c.id),"partitionId":Value::Null,"queue":name,"namespace":c.namespace.clone().unwrap_or_default(),"task":c.task.clone().unwrap_or_default(),"storage":"segments","options":config_options(c)});
+    if c.route().is_some() {
+        v["route"] = route_json(c);
+    }
+    v
 }
 /// Every tenant's backlog and every backlogged queue's, `(tenant, queue,
 /// pending, processing)`: what waits for a consumer and what is leased, as the

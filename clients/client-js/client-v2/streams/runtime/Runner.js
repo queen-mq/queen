@@ -16,7 +16,9 @@
  *       - if window+reduce: read state (incl. watermark), reduce, build
  *         state ops + emits
  *       - apply post-reducer ops to each emit
- *       - build push_items / run foreach effects
+ *       - build push_items / run foreach effects (a push item links the
+ *         popped message itself when the chain only filters it; see
+ *         SinkOperator)
  *       - commit cycle (state ops + push items + ack) atomically
  *
  *   flush timer, processing-time windows with a reducer (broker 2.7):
@@ -49,6 +51,8 @@ import { stateKeyFor, parseStateKey } from '../operators/ReduceOperator.js'
 import { makeLogger } from '../util/logger.js'
 import { sleep } from '../util/backoff.js'
 import { CONFLATION_UNSUPPORTED } from '../../utils/conflation.js'
+import { FILTERED_GROUPS_UNSUPPORTED } from '../../utils/routing.js'
+import { linkRefusal } from '../operators/SinkOperator.js'
 
 const DEFAULT_BATCH_SIZE = 200
 const DEFAULT_MAX_PARTITIONS = 4
@@ -148,6 +152,12 @@ export class Runner {
     this._nextSweepAt          = 0           // the first flush tick sweeps
     this._sweepUntouchedMs     = 0           // the first sweep takes every partition
     this._flushPromise         = null        // the flush tick in flight, for stop()
+    // The sink gets the popped messages unchanged, and the cycle links them
+    // (PLAN_ROUTING.md §7); settled in start().
+    this._links                = false
+    // Partitions whose next cycle pushes: a link of theirs found its message
+    // gone or changed at the source (see _linksRefused).
+    this._pushOnce             = new Set()
     this._stats = {
       cyclesTotal:      0,
       flushCyclesTotal: 0,
@@ -171,6 +181,11 @@ export class Runner {
     const sinkQueueName = stages.sink && stages.sink.kind === 'sink'
       ? stages.sink.queueName
       : null
+    // Only filters, a keyBy or a gate before the sink, no window or pattern:
+    // what reaches it is the popped message itself.
+    this._links = !!sinkQueueName && stages.sink.link !== false &&
+      !stages.window && !stages.reducer && !stages.pattern &&
+      [...(stages.pre || []), ...(stages.post || [])].every(op => op.kind === 'filter')
 
     const reg = await registerQuery({
       http: this.http,
@@ -257,6 +272,7 @@ export class Runner {
             this._stats.messagesTotal += group.messages.length
             this._stats.lastCycleAt = new Date().toISOString()
           } catch (err) {
+            this._linksRefused(err, group.partitionId)
             this._reportError(err, { phase: 'cycle', partition: group.partitionId, messages: group.messages })
           }
         }
@@ -266,7 +282,8 @@ export class Runner {
         // permanent fault, not a transient one (PLAN_CONFLATION §4): retrying
         // every 500ms would turn "your last-value policy is not in force" into
         // a log line nobody reads while the operators chew the whole backlog.
-        if (err && err.code === CONFLATION_UNSUPPORTED) {
+        // A source builder with a where on a broker that does not filter, the same.
+        if (err && (err.code === CONFLATION_UNSUPPORTED || err.code === FILTERED_GROUPS_UNSUPPORTED)) {
           this._stopped = true
           break
         }
@@ -283,6 +300,41 @@ export class Runner {
       return true
     }
     return false
+  }
+
+  /**
+   * A cycle with links refused because of them (SinkOperator linkRefusal).
+   * Nothing of the cycle was applied: its messages come back with their
+   * lease. A broker or a credential that cannot link: the sink pushes copies
+   * from now on, as before links, and says so once. A message gone or changed
+   * at its source: the partition's next cycle pushes, and the ones after it
+   * link.
+   */
+  _linksRefused(err, partitionId) {
+    if (!this._links || !err || !err.linked) return
+    const refusal = linkRefusal(err)
+    if (refusal === 'once') {
+      this._pushOnce.add(partitionId)
+    } else if (refusal === 'off') {
+      this._links = false
+      this.logger.warn('links refused: .to() pushes copies from now on', { queryId: this.queryId, reason: err.body?.reason ?? err.body?.code ?? err.status, error: err.message })
+    }
+  }
+
+  /** Whether this partition's cycle links: one cycle of pushes after a `once` refusal. */
+  _linkFor(partitionId) {
+    if (this._pushOnce.delete(partitionId)) return false
+    return this._links
+  }
+
+  /** commitCycle, with `linked` on its error when the cycle linked (see _linksRefused). */
+  async _commitLinked(args) {
+    try {
+      return await commitCycle(args)
+    } catch (err) {
+      if (err && args.pushItems.some(p => p.link)) err.linked = true
+      throw err
+    }
   }
 
   _reportError(err, ctx) {
@@ -457,7 +509,8 @@ export class Runner {
     if (stages.sink && stages.sink.kind === 'sink') {
       pushItems = stages.sink.buildPushItems(
         emits.map(e => ({ key: e.key, value: e.value, sourceMsg: e.sourceMsg })),
-        partitionName
+        partitionName,
+        { link: this._linkFor(partitionId) }
       )
     } else if (stages.sink && stages.sink.kind === 'foreach') {
       await stages.sink.runEffects(emits.map(e => ({
@@ -483,7 +536,7 @@ export class Runner {
     // 7. Commit.
     this._stats.stateOpsTotal += stateOps.length
     this._stats.pushItemsTotal += pushItems.length
-    await commitCycle({
+    await this._commitLinked({
       http: this.http,
       queryId: this._serverQueryId,
       partitionId,
@@ -654,7 +707,8 @@ export class Runner {
     if (stages.sink && stages.sink.kind === 'sink') {
       pushItems = stages.sink.buildPushItems(
         emits.map(e => ({ key: e.key, value: e.value, sourceMsg: e.sourceMsg })),
-        partitionName
+        partitionName,
+        { link: this._linkFor(partitionId) }
       )
     } else if (stages.sink && stages.sink.kind === 'foreach') {
       await stages.sink.runEffects(emits.map(e => ({
@@ -686,7 +740,7 @@ export class Runner {
 
     this._stats.stateOpsTotal  += stateOps.length
     this._stats.pushItemsTotal += pushItems.length
-    await commitCycle({
+    await this._commitLinked({
       http: this.http,
       queryId: this._serverQueryId,
       partitionId,

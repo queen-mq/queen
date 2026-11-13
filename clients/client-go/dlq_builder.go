@@ -157,6 +157,8 @@ func parseMessageMap(msgMap map[string]interface{}) Message {
 	if v, ok := msgMap["retryCount"].(float64); ok {
 		msg.RetryCount = int(v)
 	}
+	// A dead letter keeps the headers its message had.
+	msg.Headers = headersOf(msgMap["headers"])
 
 	return msg
 }

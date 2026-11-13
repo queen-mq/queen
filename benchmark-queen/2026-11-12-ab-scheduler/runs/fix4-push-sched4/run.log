@@ -1,0 +1,9 @@
+[18:43:15] run fix4-push-sched4: build sched4, push, 1000 partitions, steps of 40s at: 2500000 3000000 3500000 | TXN_SIZE=10 KV=0 CONS=17 PROCS=8 BATCH=100 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: b1 x 1000 partitions
+[18:44:29] 2,500,000: offered 2,500,004 | pushed 2,499,794 | consumed 2,499,710 | shed 0 errors 0 | push p50 5.1 p99 27.4 | e2e p50 11.8 p99 59.4 | cores 14.0 / 6.7 / 4.9 | loader 16.2c  OK 
+[create] done: b2 x 1000 partitions
+[18:45:43] 3,000,000: offered 3,000,004 | pushed 2,999,867 | consumed 2,999,951 | shed 0 errors 0 | push p50 9.1 p99 99.3 | e2e p50 21.5 p99 145.4 | cores 16.1 / 7.8 / 5.6 | loader 18.7c  OK 
+[create] done: b3 x 1000 partitions
+[18:46:57] 3,500,000: offered 3,499,942 | pushed 3,219,305 | consumed 3,217,937 | shed 5,453,300 errors 0 | push p50 663.6 p99 1327.1 | e2e p50 712.7 p99 1376.3 | cores 17.9 / 10.1 / 6.1 | loader 20.5c  NOT CARRIED 
+[18:46:57] stopping at 3500000
+RUN_DONE

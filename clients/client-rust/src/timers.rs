@@ -93,6 +93,7 @@ impl Timers {
             txn: None,
             payload: None,
             reschedule: false,
+            headers: None,
         }
     }
 
@@ -210,6 +211,7 @@ pub struct ScheduleBuilder {
     txn: Option<String>,
     payload: Option<Vec<u8>>,
     reschedule: bool,
+    headers: Option<crate::Headers>,
 }
 
 impl ScheduleBuilder {
@@ -245,6 +247,19 @@ impl ScheduleBuilder {
         Ok(self)
     }
 
+    /// Headers for the delivered message (a name given twice keeps its last
+    /// value), checked as [`crate::QueueBuilder::headers`] checks them. The
+    /// fired message keeps them. Broker catalogue version 8 and later.
+    pub fn headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        crate::routing::extend_headers(&mut self.headers, headers);
+        self
+    }
+
     /// Name this a `reschedule`.
     ///
     /// The broker treats it identically to a schedule — same upsert, and
@@ -263,6 +278,7 @@ impl ScheduleBuilder {
                 "a timer needs a payload: it becomes a message, and a message has a body".into(),
             )
         })?;
+        crate::routing::check_headers(self.headers.as_ref())?;
         let txn = self.txn.unwrap_or_else(uuid::uuidv7);
         let mut op =
             TimerOperation::schedule(&self.queue, &self.timer_key, self.delay_ms, txn, &payload);
@@ -271,6 +287,9 @@ impl ScheduleBuilder {
         }
         if self.reschedule {
             op = op.reschedule();
+        }
+        if let Some(h) = self.headers.filter(|h| !h.is_empty()) {
+            op = op.headers(h);
         }
         Ok(op)
     }

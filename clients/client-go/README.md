@@ -476,6 +476,123 @@ if result.Success {
 }
 ```
 
+## Headers, Filtered Groups, Reading Queues and Link
+
+Routing without copies. Everything here needs a cluster whose every broker
+reads catalogue version 8: an older cluster refuses it with `cluster_version`.
+
+### Headers
+
+A message can carry headers: a map of strings, names of 1-64 bytes of
+`a-z 0-9 . _ -` (`queen-` is the broker's prefix). They are stored in clear
+(never encrypted, so no secrets or personal data), never part of deduplication,
+and every read returns them: `Message.Headers`, `FetchedRecord.Headers`,
+`FeedEntry.Headers`. The broker takes 64 headers and 8 KiB of them per message
+by default and refuses more (400 `bad_body`).
+
+```go
+// Headers on every message of a push
+client.Queue("orders").Partition("order-9137").
+    Push(map[string]interface{}{"orderId": 9137, "total": 120}).
+    Headers(map[string]string{"type": "order.paid", "traceparent": "00-4bf9..."}).
+    Execute(ctx)
+
+// Or per message: a PushItem brings its own transaction id and headers
+client.Queue("orders").Partition("order-9137").Push([]queen.PushItem{
+    {Payload: paid, TransactionID: "order-9137-paid", Headers: map[string]string{"type": "order.paid"}},
+}).Execute(ctx)
+```
+
+A transaction's `Push` takes the same `PushItem`. With `BinaryPush` and
+`PushCompression` the headers travel in the frames; with `BinaryPush` alone a
+push whose messages carry headers goes as JSON.
+
+### Filtered consumer groups
+
+`Where` makes a group read only the messages that match. Several calls are
+ANDed; `WhereExpr` takes the same as one string:
+
+```go
+client.Queue("order-events").Group("billing").SubscriptionMode("all").
+    Where("data.kind", "in", []string{"order.paid", "order.refunded"}).
+    Where("headers.region", "=", "eu").
+    Consume(ctx, handler).Execute(ctx)
+
+client.Queue("order-events").Group("audit").
+    WhereExpr("data.kind in ('order.paid', 'order.refunded') and data.total > 100").
+    Consume(ctx, handler).Execute(ctx)
+```
+
+Fields: `queue`, `partition`, `transactionId`, `data.<path>`, `headers.<name>`.
+Ops: `=` `!=` `<` `<=` `>` `>=` `in` `exists` `prefix` `!prefix` (AND only, 16
+conditions). A where is a group setting: every pop sends it and the broker fixes
+it at the group's first pop. Another where for the same group, or a where on a
+group that already reads the queue unfiltered, is refused (400
+`where_mismatch`); change one on purpose with
+`client.Admin().SetConsumerGroupWhere(ctx, "billing", "order-events", where)`.
+A where needs `Group` and a queue name: `Pop` and `Consume` return
+`ErrWhereNeedsGroup` or `ErrWhereNeedsQueue` before any request otherwise. A
+broker that filters says so on every answer (`"filtered": true`); against one
+that does not, the first pop returns `ErrWhereUnsupported` instead of handing
+the group every message.
+
+### Reading queues
+
+A reading queue takes no pushes: it reads the matching messages of its sources,
+as links (the same message, same id and transactionId, its payload stored once):
+
+```go
+client.Queue("orders-it").Config(queen.QueueConfig{
+    From:        queen.ReadFrom("orders"),   // or ReadSources{{Queue: "orders", Where: ...}, {Queue: "refunds"}}
+    Where:       "data.country = 'IT'",      // or conditions, as Where takes them
+    PartitionBy: "same",                     // or "data.customerId", "headers.customer"
+    Start:       "all",                      // "now" (the default) or every match the sources keep
+    LeaseTime:   30,
+    RetryLimit:  5,
+}).Create().Execute(ctx)
+```
+
+A reading queue keeps what its sources keep: the broker refuses
+`retentionEnabled`, `retentionSeconds`, `completedRetentionSeconds`,
+`maxWaitTimeSeconds`, `dedupWindowSeconds`, `encryptionEnabled`, `maxSize` and
+the `retentionSinkHold` options beside `from` (400 `reading_queue`). This SDK
+sends only the options you set, so leave them unset. `Option("from", nil)` stops
+reading. The answer names the queue's `route`; a broker older than reading
+queues answers without one, and `Execute` returns `ErrReadingQueuesUnsupported`.
+A source that reading queues read is deleted only with
+`client.Queue("orders").Delete().Force(true).Execute(ctx)` (otherwise 409
+`has_readers`, naming them); their links then read as gone.
+
+### Link
+
+`Link` hands a message to another queue without sending its payload again,
+in the same commit as the rest of the transaction:
+
+```go
+client.Transaction().
+    Ack(msg, queen.AckStatusCompleted, queen.AckOptions{ConsumerGroup: "workers"}).
+    Queue("manual-review").Partition(msg.Partition).
+    Link(msg, queen.LinkOptions{Headers: map[string]string{"review-reason": "amount"}}).
+    Commit(ctx)
+```
+
+It takes popped messages (named by `PartitionID`, `Offset`, `TransactionID` and
+their `ConsumerGroup`), feed entries (by queue, partition and offset) or
+`LinkSource` values. The target keeps the message's transactionId, so linking
+the same message into the same partition again is a no-op the transaction
+survives (its result says `"duplicate": true`). A source no longer kept rolls
+the transaction back (`source_gone`), as does a reading queue as the target
+(`reading_queue`).
+
+**Streams link too.** A `.To()` whose output is its input message unchanged
+(the chain only filters, wheres, keys or gates) writes a link instead of a copy,
+on a queue source and on the feed. `ToWith(q.Queue("out"),
+streams.ToOptions{Link: streams.Bool(false)})` pushes copies as before. A broker
+that cannot link turns linking off for the runner, which then pushes. Readers of
+the target, the feed included, see linked outputs as the target's messages, with
+the source's id and transactionId. On the feed, an output into a queue the
+stream reads itself is pushed, so the stream never reads its own outputs back.
+
 ## Binary Push, Push Compression and Framed Pop
 
 Three opt-in forms of the push, pop and transaction requests. They change how
@@ -506,9 +623,12 @@ batches cross the network compressed. zstd comes with the module
 
 **What stays JSON**, with no action from you:
 
-* A push that carries a trace id.
-* A transaction with no push, or with a trace id on one of its pushes.
-* A pop the broker cannot answer in frames: a pop of a conflating group, and
+* A push that carries a trace id, and one whose messages carry headers when
+  `PushCompression` is off (the frames carry them).
+* A transaction with no push, or with a trace id on one of its pushes, or with
+  a `Link` after a push into the same partition.
+* A pop the broker cannot answer in frames: a pop of a conflating group, a pop
+  whose records hold headers or links (a filtered group, a reading queue), and
   every pop on a broker that runs with an encryption key
   (`QUEEN_ENCRYPTION_KEY`). The client reads the JSON answer as always.
 * Acks, KV, timers, locks and the admin calls. Ephemeral queues have their own

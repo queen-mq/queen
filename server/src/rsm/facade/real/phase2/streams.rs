@@ -39,6 +39,12 @@ struct PushIn<'a> {
     transaction_id: Option<Value>,
     /// `payload`, else `data`, else `{}`.
     payload: Cow<'a, [u8]>,
+    /// The message's headers (catalogue version 8).
+    headers: Option<Value>,
+    /// A link to a message instead of a payload: `{offset, transactionId}`
+    /// of a message of the cycle's partition, or one named as a transaction's
+    /// `link` names it.
+    link: Option<Value>,
 }
 
 /// One object of `state_ops`.
@@ -106,6 +112,10 @@ fn lean_cycle(body: &[u8]) -> Option<CycleIn<'_>> {
         payload: Option<&'a RawValue>,
         #[serde(borrow, default, deserialize_with = "present")]
         data: Option<&'a RawValue>,
+        #[serde(default)]
+        headers: Option<Value>,
+        #[serde(default)]
+        link: Option<Value>,
     }
     #[derive(Deserialize)]
     struct Op<'a> {
@@ -141,6 +151,8 @@ fn lean_cycle(body: &[u8]) -> Option<CycleIn<'_>> {
             message_id: it.message_id,
             transaction_id: it.transaction_id,
             payload: Cow::Borrowed(payload),
+            headers: it.headers,
+            link: it.link,
         });
     }
     let mut ops = Vec::new();
@@ -196,6 +208,8 @@ fn tree_cycle(root: &Value) -> CycleIn<'static> {
                 Some(p) => serde_json::to_vec(p).unwrap_or_default(),
                 None => b"{}".to_vec(),
             }),
+            headers: field(item, "headers"),
+            link: field(item, "link"),
         })
         .collect();
     let ops = root
@@ -327,27 +341,50 @@ impl RaftFacade {
                 None,
                 Some(partition),
             )?;
-            let mid = item
-                .message_id
-                .as_ref()
-                .and_then(Value::as_str)
-                .and_then(uuid_string_to_bytes)
-                .unwrap_or_else(uuidv7_bytes);
+            let block = super::super::txn_headers(item.headers.as_ref(), self)
+                .map_err(|e| super::reject("bad_request", e))?;
+            let (mid, txn, link) = match item.link.as_ref() {
+                Some(l) => match self.cycle_link(&ctx, pid, queue, l).await? {
+                    Ok(src) => (src.message_id, src.txn, Some(src.link)),
+                    Err((reason, error)) => {
+                        return Ok(ApiOut::json(
+                            200,
+                            json!({
+                                "success": false,
+                                "error": format!("push item at index {}: {error}", item.index),
+                                "reason": reason,
+                            })
+                            .to_string(),
+                        ))
+                    }
+                },
+                None => {
+                    let mid = item
+                        .message_id
+                        .as_ref()
+                        .and_then(Value::as_str)
+                        .and_then(uuid_string_to_bytes)
+                        .unwrap_or_else(uuidv7_bytes);
+                    let txn = item
+                        .transaction_id
+                        .as_ref()
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| uuid_bytes_to_string(&mid));
+                    (mid, txn, None)
+                }
+            };
             let mid_s = uuid_bytes_to_string(&mid);
-            let txn = item
-                .transaction_id
-                .as_ref()
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| mid_s.clone());
             let frame = pack_frames(&[FrameIn {
                 message_id: mid,
                 txn: &txn,
                 trace_id: None,
                 producer_sub: None,
-                payload: &item.payload,
+                payload: if link.is_some() { &[] } else { &item.payload },
                 encrypted: false,
+                headers: block.as_deref(),
+                link,
             }]);
             pushes.push(PushCommand {
                 request_id: super::super::derived_request_id(ctx.request_id, item.index as u32),
@@ -359,6 +396,7 @@ impl RaftFacade {
                     frame: frame.into(),
                 }],
                 create_cfg: super::super::default_queue_config(queue),
+                links: Default::default(),
             });
             push_meta.push((queue.to_string(), mid_s, txn));
         }
@@ -519,6 +557,7 @@ impl RaftFacade {
                     .first()
                     .map(|v| match v {
                         PushVerdict::Created { .. } => "created",
+                        // A link the partition already held: a no-op.
                         PushVerdict::Duplicate { .. } => "duplicate",
                         PushVerdict::Refused { .. } => "refused",
                     })
@@ -548,6 +587,67 @@ impl RaftFacade {
         }
         let ack_result=out.acks.results.first().map(|a|json!({"success":a.stale_hashes.is_empty(),"count":a.acked,"lease_released":a.lease_released,"dlq":a.dlq>0}));
         Ok(ApiOut::json(200,json!({"success":true,"query_id":uuid_bytes_to_string(&qid),"partition_id":partition_id,"queueName":source.queue,"state_ops_applied":state_count,"push_results":push_results,"ack_result":ack_result}).to_string()))
+    }
+}
+
+impl RaftFacade {
+    /// A cycle push item's `link`, resolved as a transaction's `link` is: a
+    /// message the cycle's own partition holds when it names only `offset`
+    /// and `transactionId`. `Err((reason, error))` fails the cycle as a
+    /// refusal does; a scoped credential never reaches a stream route.
+    async fn cycle_link(
+        &self,
+        ctx: &ReqCtx,
+        pid: u64,
+        target: &str,
+        link: &Value,
+    ) -> Result<Result<super::super::LinkSource, (&'static str, String)>, RsmError> {
+        if !self.cluster_allows(crate::rsm::effect::VERSION_8) {
+            return Err(super::super::headers_need_version_8());
+        }
+        let Some(ql) = self.qlog_reader.clone() else {
+            return Err(super::reject(
+                "bad_request",
+                "link needs the queue log (QUEEN_RAFT_QLOG)",
+            ));
+        };
+        let mut from: super::super::LinkFromIn =
+            serde_json::from_value(link.clone()).map_err(|e| {
+                super::reject(
+                    "bad_request",
+                    format!("a link names {{offset, transactionId}} of a message: {e}"),
+                )
+            })?;
+        if from.partition_id.is_none() && from.queue.is_none() {
+            from.partition_id = Some(pid.to_string());
+        }
+        if self
+            .queue_config_of(&ctx.tenant, target)
+            .await?
+            .is_some_and(|c| c.is_reader())
+        {
+            return Ok(Err((
+                "reading_queue",
+                format!("{target} reads other queues: link into an ordinary queue"),
+            )));
+        }
+        let store = self.store.clone();
+        let tenant = ctx.tenant.clone();
+        let resolved = tokio::task::spawn_blocking(move || {
+            super::super::resolve_link_source(&store, &ql, &tenant, &from)
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("link source task: {e}")))?;
+        Ok(resolved.map_err(|e| {
+            let reason = if e.starts_with("source_gone") {
+                "source_gone"
+            } else if e.starts_with("source_mismatch") {
+                "source_mismatch"
+            } else {
+                "bad_request"
+            };
+            (reason, e)
+        }))
     }
 }
 

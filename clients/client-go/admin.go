@@ -389,6 +389,34 @@ func (a *Admin) GetLaggingConsumers(ctx context.Context, minLagSeconds int) (map
 	return a.httpClient.Get(ctx, path, 0, "")
 }
 
+// SetConsumerGroupWhere changes the where of a filtered consumer group on
+// queueName (a cluster at catalogue version 8): the conditions QueueBuilder.Where
+// or WhereExpr fixed at the group's first pop. where is the one-string form
+// ("data.kind = 'order.paid'") or conditions (a FeedCondition, a list of them,
+// [field, op, value] lists). It applies from the next push; the messages the
+// group already has stay. The broker answers 404 when the group does not
+// filter that queue (a group that never popped it with a where).
+//
+// Wire shape (POST /api/v1/consumer-groups/:group/subscription):
+//
+//	{ "queue": "orders", "where": "data.kind = 'order.paid'" }
+//
+// A filtered group is deleted as any group, with DeleteConsumerGroupForQueue.
+func (a *Admin) SetConsumerGroupWhere(ctx context.Context, consumerGroup, queueName string, where interface{}) (map[string]interface{}, error) {
+	if consumerGroup == "" || queueName == "" {
+		return nil, fmt.Errorf("a group's where needs the group and the queue it filters")
+	}
+	w, err := whereValue(where)
+	if err != nil {
+		return nil, err
+	}
+	if w == nil {
+		return nil, fmt.Errorf("a group's where needs at least one condition (to read the queue unfiltered, start a new group)")
+	}
+	path := fmt.Sprintf("/api/v1/consumer-groups/%s/subscription", url.PathEscape(consumerGroup))
+	return a.httpClient.Post(ctx, path, map[string]interface{}{"queue": queueName, "where": w})
+}
+
 // DeleteConsumerGroupForQueue deletes a consumer group for a specific queue.
 func (a *Admin) DeleteConsumerGroupForQueue(ctx context.Context, consumerGroup, queueName string, deleteMetadata bool) (map[string]interface{}, error) {
 	path := fmt.Sprintf("/api/v1/consumer-groups/%s/queues/%s?deleteMetadata=%t",

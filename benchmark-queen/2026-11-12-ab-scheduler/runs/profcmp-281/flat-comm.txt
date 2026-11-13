@@ -1,0 +1,37 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 120K of event 'task-clock:ppp'
+# Event count (approx.): 241290579232
+#
+# Overhead  Command        
+# ........  ...............
+#
+    55.67%  tokio-rt-worker
+    12.71%  queen-raft     
+     5.70%  queen-rsm-apply
+     2.05%  queen-lane-0   
+     2.04%  queen-lane-1   
+     2.04%  queen-lane-3   
+     2.03%  queen-lane-2   
+     2.03%  queen-lane-4   
+     2.02%  queen-lane-6   
+     2.01%  queen-lane-5   
+     2.01%  queen-lane-7   
+     1.93%  queen-qlog-writ
+     1.66%  consume-serve  
+     1.60%  queen-raft-log 
+     1.26%  queen-qlog-hash
+     1.07%  queen-planner  
+     1.07%  queen-rsm-ckpt 
+     0.58%  queen-raft-sync
+     0.32%  queen-rsm-drop 
+     0.20%  queen-qlog-drop
+     0.00%  queen-rsm-retsc
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

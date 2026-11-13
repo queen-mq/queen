@@ -5,6 +5,7 @@
 import * as logger from '../utils/logger.js'
 import { Supervision } from './Supervision.js'
 import { checkConflationResponse, CONFLATION_UNSUPPORTED } from '../utils/conflation.js'
+import { checkFilteredResponse, FILTERED_GROUPS_UNSUPPORTED } from '../utils/routing.js'
 import { popSizing, parseAutopilotDecision, emptyPollDelayMillis } from '../utils/autopilot.js'
 import { CONSUME_DEFAULTS } from '../utils/defaults.js'
 
@@ -119,6 +120,7 @@ export class ConsumerManager {
       subscriptionMode,
       subscriptionFrom,
       conflation,
+      where = null,
       each,
       maxPartitions,
       autopilot,
@@ -141,7 +143,7 @@ export class ConsumerManager {
 
     // Build the path and params for pop requests
     const path = this.#buildPath(queue, partition, namespace, task)
-    const baseParams = this.#buildParams(batch, wait, timeoutMillis, group, subscriptionMode, subscriptionFrom, namespace, task, autoAck, maxPartitions, conflation, this.#autopilotEnabled(autopilot))
+    const baseParams = this.#buildParams(batch, wait, timeoutMillis, group, subscriptionMode, subscriptionFrom, namespace, task, autoAck, maxPartitions, conflation, this.#autopilotEnabled(autopilot), where)
     
     // Generate affinity key for consistent routing to same backend
     const affinityKey = this.#getAffinityKey(queue, partition, namespace, task, group)
@@ -170,7 +172,9 @@ export class ConsumerManager {
         // every response for the broker's echo (PLAN_CONFLATION §4) and needs
         // the pop target to key the once-per-(queue,group) conflict warning.
         conflation,
-        conflationCtx: { queue, namespace, task, group }
+        conflationCtx: { queue, namespace, task, group },
+        // A where was sent: every answer must echo it (utils/routing.js).
+        filtered: where !== null && where !== undefined
       }).finally(async () => {
         if (supervision && --supervision.running === 0) await supervision.stop()
       }))
@@ -200,7 +204,8 @@ export class ConsumerManager {
       group,
       affinityKey,
       conflation,
-      conflationCtx
+      conflationCtx,
+      filtered
     } = options
 
     logger.log('ConsumerManager.worker', { workerId, status: 'started', limit, idleMillis })
@@ -257,6 +262,11 @@ export class ConsumerManager {
         // leaves the loop through the catch below, which stops this worker.
         if (conflation) {
           checkConflationResponse(result, conflationCtx)
+        }
+        // The same for a filtered group: an answer without the echo (an old
+        // broker's 204 too) is a broker that handed the group everything.
+        if (filtered) {
+          checkFilteredResponse(result)
         }
 
         // Handle empty response
@@ -358,6 +368,11 @@ export class ConsumerManager {
         // reason — retrying them forever would be the silent version.
         if (error.code === CONFLATION_UNSUPPORTED || (conflation && error.status === 400)) {
           logger.error('ConsumerManager.worker', { workerId, status: 'conflation-unavailable', code: error.code, httpStatus: error.status, error: error.message })
+          throw error
+        }
+        // A broker that does not filter: terminal for the same reason.
+        if (error.code === FILTERED_GROUPS_UNSUPPORTED) {
+          logger.error('ConsumerManager.worker', { workerId, status: 'filtering-unavailable', code: error.code, error: error.message })
           throw error
         }
 
@@ -636,7 +651,7 @@ export class ConsumerManager {
     return !this.#queen || !this.#queen.autopilotOff
   }
 
-  #buildParams(batch, wait, timeoutMillis, group, subscriptionMode, subscriptionFrom, namespace, task, autoAck, maxPartitions, conflation, autopilot = true) {
+  #buildParams(batch, wait, timeoutMillis, group, subscriptionMode, subscriptionFrom, namespace, task, autoAck, maxPartitions, conflation, autopilot = true, where = null) {
     // Batch, partitions and with them the autopilot flag. null/0 means the user
     // set nothing (QueueBuilder leaves it that way on purpose), which is the
     // dimension the broker gets to choose. THE RULE lives in one place
@@ -670,6 +685,10 @@ export class ConsumerManager {
     // bytes on the wire. THIS IS THE SECOND PARAMETER BUILDER — the pop() one
     // lives inline in QueueBuilder.pop and must gain every parameter too.
     if (conflation) params.append('conflation', 'true')
+    // A filtered group's where (PLAN_ROUTING.md §4): the same value on every
+    // pop of the group, sent only when set. A refusal (400 where_mismatch) is
+    // a 4xx, so it stops the worker and rejects consume() below.
+    if (where !== null && where !== undefined) params.append('where', where)
     // NEVER send autoAck for consume - client always manages acking
     // autoAck is only for pop() where server auto-acks immediately
 

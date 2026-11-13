@@ -4,12 +4,15 @@ namespace Queen\Consumer;
 
 use Queen\Exceptions\ConflationUnsupportedException;
 use Queen\Exceptions\HttpException;
+use Queen\Exceptions\RoutingUnsupportedException;
 use Queen\Http\HttpClient;
 use Queen\Http\Retry429Policy;
 use Queen\Queen;
 use Queen\Support\ConflationGuard;
 use Queen\Support\Defaults;
+use Queen\Support\FilterGuard;
 use Queen\Support\PopAutopilot;
+use Queen\Support\Where;
 use GuzzleHttp\Promise\Utils as PromiseUtils;
 
 class ConsumerManager
@@ -61,6 +64,8 @@ class ConsumerManager
         // manager with options of their own.
         $autopilot = $options['autopilot'] ?? !$this->queen->autopilotOff();
         $conflation = $options['conflation'] ?? false;
+        // A filtered group's where (QueueBuilder::where()): the same on every pop.
+        $where = $options['where'] ?? null;
 
         $path = $this->buildPath($queue, $partition, $namespace, $task);
         $baseParams = $this->buildParams(
@@ -76,11 +81,14 @@ class ConsumerManager
             $conflation,
             $leaseSeconds,
             $autopilot,
+            $where,
         );
         $affinityKey = $this->getAffinityKey($queue, $partition, $namespace, $task, $group);
         // The identity the conflation checks report against: what was asked for,
         // and which (queue, group) pair a declaration conflict belongs to.
         $conflationScope = [$conflation, $queue, $group, $namespace, $task];
+        // A filtered group's pops must say they filtered (FilterGuard).
+        $filtered = $where !== null;
 
         // Install signal handlers, saving previous handlers for restoration
         $running = true;
@@ -104,13 +112,13 @@ class ConsumerManager
                 $this->worker(
                     $handler, $path, $baseParams, $batch, $limit, $idleMillis,
                     $autoAck, $wait, $timeoutMillis, $renewLease, $renewLeaseIntervalMillis,
-                    $each, $group, $affinityKey, $running, $conflationScope
+                    $each, $group, $affinityKey, $running, $conflationScope, $filtered
                 );
             } else {
                 $this->concurrentWorkers(
                     $concurrency, $handler, $path, $baseParams, $batch, $limit, $idleMillis,
                     $autoAck, $wait, $timeoutMillis, $renewLease, $renewLeaseIntervalMillis,
-                    $each, $group, $affinityKey, $running, $conflationScope
+                    $each, $group, $affinityKey, $running, $conflationScope, $filtered
                 );
             }
         } finally {
@@ -152,6 +160,7 @@ class ConsumerManager
         ?string $affinityKey,
         bool &$running,
         array $conflationScope = [false, null, null, null, null],
+        bool $filtered = false,
     ): void {
         // Per-worker state
         $workerProcessed = array_fill(0, $concurrency, 0);
@@ -258,6 +267,7 @@ class ConsumerManager
                 // stops the consumer, which is the point — the alternative is
                 // draining a backlog one message at a time in silence.
                 ConflationGuard::check($result, ...$conflationScope);
+                FilterGuard::check($result, $filtered, $conflationScope[1], $group);
 
                 if (!$result || !isset($result['messages']) || empty($result['messages'])) {
                     if (!$wait) {
@@ -341,6 +351,7 @@ class ConsumerManager
         ?string $affinityKey,
         bool &$running,
         array $conflationScope = [false, null, null, null, null],
+        bool $filtered = false,
     ): void {
         $processedCount = 0;
         $lastMessageTime = $idleMillis !== null ? $this->nowMillis() : null;
@@ -381,6 +392,7 @@ class ConsumerManager
                 // that is the response the degrade-loudly check exists to catch
                 // (PLAN_CONFLATION §4).
                 ConflationGuard::check($result, ...$conflationScope);
+                FilterGuard::check($result, $filtered, $conflationScope[1], $group);
 
                 if (!$result || !isset($result['messages']) || empty($result['messages'])) {
                     if (!$wait) {
@@ -433,9 +445,9 @@ class ConsumerManager
             } catch (\Throwable $error) {
                 // Degrade-loudly (PLAN_CONFLATION §4) is terminal by design and
                 // is re-thrown by TYPE, ahead of the message-matching branches
-                // below: a consumer that asked for conflation and is not getting
-                // it must stop, never back off and poll again.
-                if ($error instanceof ConflationUnsupportedException) {
+                // below: a consumer that asked for conflation, or for a filter,
+                // and is not getting it must stop, never back off and poll again.
+                if ($error instanceof ConflationUnsupportedException || $error instanceof RoutingUnsupportedException) {
                     throw $error;
                 }
 
@@ -723,6 +735,7 @@ class ConsumerManager
         bool $conflation = false,
         ?int $leaseSeconds = null,
         bool $autopilot = true,
+        string|array|null $where = null,
     ): string {
         // Batch, partitions and with them the autopilot flag. null/0 means the
         // user set nothing (QueueBuilder leaves it that way on purpose), which is
@@ -772,6 +785,11 @@ class ConsumerManager
         // group whose stored policy is true.
         if ($conflation) {
             $params['conflation'] = 'true';
+        }
+        // A filtered group's where, last and only when set, as in the pop of
+        // QueueBuilder: the same value on every pop of the group.
+        if ($where !== null) {
+            $params['where'] = Where::param($where);
         }
 
         return http_build_query($params);

@@ -101,7 +101,10 @@ pub(super) fn indexed_page(
         else {
             continue; // retention removed the append after the index read
         };
-        let Some(frames) = unpack_frames_ref(&rec.payload) else {
+        // A reading queue's links, read through (the browser shows the
+        // message; a link whose message is gone shows nothing).
+        let payload = crate::rsm::route::link::resolve(qlog, rec.payload, &mut |_| Some(0));
+        let Some(frames) = unpack_frames_ref(&payload) else {
             continue;
         };
         for (rank, pick) in picks {
@@ -113,6 +116,9 @@ pub(super) fn indexed_page(
                 continue;
             };
             let Some(f) = frames.get(i) else { continue };
+            if f.is_link() {
+                continue;
+            }
             page.push((
                 rank,
                 Picked {
@@ -136,6 +142,7 @@ pub(super) fn indexed_page(
                         producer_sub: f.producer_sub.map(str::to_string),
                         payload: f.payload.to_vec(),
                         encrypted: f.encrypted,
+                        headers: f.headers.map(<[u8]>::to_vec),
                     },
                 },
             ));
@@ -214,6 +221,8 @@ mod tests {
                     producer_sub: Some("producer"),
                     payload: b"{\"value\":42}",
                     encrypted: false,
+                    headers: None,
+                    link: None,
                 })
                 .collect();
             self.seq += 1;

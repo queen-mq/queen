@@ -10,7 +10,14 @@ from ..utils import logger
 class OperationBuilder:
     """Operation builder for create/delete operations with callbacks"""
 
-    def __init__(self, http_client: Any, method: str, path: str, body: Optional[Dict[str, Any]]):
+    def __init__(
+        self,
+        http_client: Any,
+        method: str,
+        path: str,
+        body: Optional[Dict[str, Any]],
+        check: Optional[Callable[[Any], None]] = None,
+    ):
         """
         Initialize operation builder
 
@@ -19,11 +26,14 @@ class OperationBuilder:
             method: HTTP method
             path: Request path
             body: Request body
+            check: Optional check of a successful answer; what it raises is
+                the operation's error (on_error, or raised)
         """
         self._http_client = http_client
         self._method = method
         self._path = path
         self._body = body
+        self._check = check
         self._on_success_callback: Optional[Callable[[Any], Any]] = None
         self._on_error_callback: Optional[Callable[[Exception], Any]] = None
         self._executed = False
@@ -88,6 +98,9 @@ class OperationBuilder:
                     await self._on_error_callback(error)
                     return {"success": False, "error": result["error"]}
                 raise error
+
+            if self._check is not None:
+                self._check(result)
 
             logger.log("OperationBuilder.execute", {"method": self._method, "path": self._path, "status": "success"})
             if self._on_success_callback:

@@ -11,12 +11,17 @@ producer (or the broker) made, and are unpacked here.
 All integers little-endian. A record's bytes are ``count`` frames:
 
     u32 body_len | u8 flags | u8[16] message id | [u8[16] trace id, flag 1]
-    | u16 len, transactionId | [u16 len, producer, flag 2] | payload
+    | u16 len, transactionId | [u16 len, producer, flag 2]
+    | [u16 len, headers, flag 8] | payload
 
 Message i of a record has offset base_offset+i and belongs to the delivery
 when that lies in the claim's start..=end. The JSON object in front holds what
 the JSON answer has beside its messages: the conflation echo and the
 autopilot's choice.
+
+The broker answers JSON instead whenever a record holds headers or links
+(catalogue version 8), as it does for encrypted ones; the headers flag is read
+here all the same, and a link (flag 16) is refused like an encrypted frame.
 """
 
 import json
@@ -33,6 +38,8 @@ _MAGIC = b"QPF1"
 _FLAG_TRACE = 1
 _FLAG_PRODUCER = 2
 _FLAG_ENCRYPTED = 4
+_FLAG_HEADERS = 8
+_FLAG_LINK = 16
 
 _U16 = struct.Struct("<H")
 _U32 = struct.Struct("<I")
@@ -102,13 +109,26 @@ def _iso(created_at_us: int) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(seconds)) + f".{micros // 1000:03d}Z"
 
 
+def decode_headers(block: bytes) -> Dict[str, str]:
+    """A frame's headers block (``u16 count | (u8 len, name | u16 len, value) x
+    count``) as the dict the JSON answer has."""
+    reader = _In(block, "a headers block is malformed")
+    headers: Dict[str, str] = {}
+    for _ in range(reader.u16()):
+        name = reader.take(reader.u8()).decode("utf-8")
+        headers[name] = reader.text()
+    if reader.rest():
+        raise _damaged("a headers block is malformed")
+    return headers
+
+
 def decode_pop_frames(data: bytes) -> Dict[str, Any]:
     """Unpack a framed pop answer into the dict the JSON answer parses to::
 
         {"success", "queue", "partition", "partitionId", "leaseId", "consumerGroup",
          "messages": [{"id", "transactionId", "traceId", "data", "producerSub",
-                       "createdAt", "partitionId", "partition", "leaseId",
-                       "consumerGroup", "deliveryAttempt", "offset"}],
+                       ["headers",] "createdAt", "partitionId", "partition",
+                       "leaseId", "consumerGroup", "deliveryAttempt", "offset"}],
          "partitionsClaimed", ...the answer's own keys}
 
     The messages are in delivery order. Everything that reads a pop answer (the
@@ -172,19 +192,28 @@ def decode_pop_frames(data: bytes) -> Dict[str, Any]:
                 trace = frame.take(16) if flags & _FLAG_TRACE else None
                 transaction_id = frame.text()
                 producer_sub = frame.text() if flags & _FLAG_PRODUCER else None
+                block = frame.take(frame.u16()) if flags & _FLAG_HEADERS else None
                 if flags & _FLAG_ENCRYPTED:
                     raise _damaged("a frame is encrypted")
+                if flags & _FLAG_LINK:
+                    raise _damaged("a frame is a link")
                 offset = base + i
                 if offset < start or offset > end:
                     continue
                 payload = frame.rest()
-                messages.append(
+                message: Dict[str, Any] = {
+                    "id": str(uuid.UUID(bytes=message_id)),
+                    "transactionId": transaction_id,
+                    "traceId": str(uuid.UUID(bytes=trace)) if trace is not None else None,
+                    "data": json.loads(payload) if payload else None,
+                    "producerSub": producer_sub,
+                }
+                # Only when the message has headers, after producerSub: where
+                # the JSON answer puts them.
+                if block is not None:
+                    message["headers"] = decode_headers(block)
+                message.update(
                     {
-                        "id": str(uuid.UUID(bytes=message_id)),
-                        "transactionId": transaction_id,
-                        "traceId": str(uuid.UUID(bytes=trace)) if trace is not None else None,
-                        "data": json.loads(payload) if payload else None,
-                        "producerSub": producer_sub,
                         "createdAt": created_at,
                         "partitionId": partition_id,
                         "partition": partition,
@@ -194,6 +223,7 @@ def decode_pop_frames(data: bytes) -> Dict[str, Any]:
                         "offset": offset,
                     }
                 )
+                messages.append(message)
 
     result: Dict[str, Any] = {
         "success": True,

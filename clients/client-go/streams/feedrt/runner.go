@@ -244,6 +244,10 @@ type output struct {
 	queue, partition string
 	data             interface{}
 	transactionID    string
+	// link is the input message itself, when the output is that message
+	// unchanged: written as a link to it while the runner links, and pushed
+	// as data with transactionID otherwise.
+	link *LinkItem
 }
 
 type pendingT struct {
@@ -334,6 +338,15 @@ type Runner struct {
 	pipeline *Pipeline
 	sink     *SinkSpec
 	hash     string
+	// noLinks: this runner pushes every output, the ones it could link too.
+	// Set once a link was refused (an older broker or cluster, a source the
+	// broker no longer keeps), for the runner's life.
+	noLinks bool
+	// readsAll / selfQueues: the queues the stream itself reads (every queue,
+	// or the ones its patterns match). An output into one of them is pushed,
+	// never linked (linkOf).
+	readsAll   bool
+	selfQueues []*regexp.Regexp
 
 	brokerQueues     []string
 	brokerPartitions []string
@@ -783,6 +796,13 @@ func (r *Runner) planReads() {
 	// Never read back what this query wrote: its outputs carry its prefix.
 	self := feed.Condition{Field: "transactionId", Op: "!prefix", Value: OutputPrefix(r.queryID)}
 	where := r.stream.Pushdown
+	// A link keeps its source's transaction id, so the prefix does not keep
+	// a linked output from coming back: what goes into a queue this stream
+	// reads is pushed (linkOf), and these say which queues those are.
+	r.readsAll, r.selfQueues = queues == nil, nil
+	for _, q := range queues {
+		r.selfQueues = append(r.selfQueues, glob(q))
+	}
 	if len(tables) == 0 {
 		r.brokerQueues = queues
 		r.brokerPartitions = partitions
@@ -1764,6 +1784,7 @@ func (r *Runner) out(env *envelope, entry map[string]interface{}, ctr *counter) 
 	if err != nil {
 		return err
 	}
+	link := r.linkOf(env, entry)
 	for _, tg := range targets {
 		var id string
 		if entry != nil {
@@ -1772,9 +1793,76 @@ func (r *Runner) out(env *envelope, entry map[string]interface{}, ctr *counter) 
 		} else {
 			id = r.emitID()
 		}
-		r.pending.outputs = append(r.pending.outputs, output{queue: tg.Queue, partition: tg.Partition, data: payloadOf(env.value), transactionID: id})
+		l := link
+		if l != nil && r.readsQueue(tg.Queue) {
+			// The feed shows a linked message in its target with its source's
+			// transaction id, past the prefix that keeps this stream from its
+			// own outputs: into a queue the stream reads, a copy goes.
+			l = nil
+		}
+		r.pending.outputs = append(r.pending.outputs, output{queue: tg.Queue, partition: tg.Partition, data: payloadOf(env.value), transactionID: id, link: l})
 	}
 	return nil
+}
+
+// readsQueue reports whether this stream reads queue q itself.
+func (r *Runner) readsQueue(q string) bool {
+	if r.readsAll {
+		return true
+	}
+	return anyGlob(r.selfQueues, q)
+}
+
+func anyGlob(res []*regexp.Regexp, s string) bool {
+	for _, re := range res {
+		if re.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// linkRefused reports whether a commit's refusal can be its links': what a
+// broker that cannot link answers (bad_request from one older than links,
+// cluster_version from a cluster not all on catalogue version 8) and what a
+// link alone fails on (source_gone, source_mismatch). A reading_queue target
+// refuses a push as well, so it is not one. A bad_request of anything else
+// fails the pushed retry the same way, and is then returned.
+func linkRefused(reason string) bool {
+	switch reason {
+	case "bad_request", "cluster_version", "source_gone", "source_mismatch":
+		return true
+	}
+	return false
+}
+
+// stopLinking makes this runner push every output from now on.
+func (r *Runner) stopLinking(why string) {
+	r.noLinks = true
+	logWarn("FeedRunner.links", map[string]interface{}{"queryId": r.id, "reason": why,
+		"message": "a link was refused: the outputs are pushed from now on"})
+}
+
+// linkOf is the feed message an output links to, or nil to push it: the sink
+// links (its chain leaves its input unchanged), the runner still links, and
+// the output is a feed message whose payload the push would send as it is (an
+// object or a list; a push wraps anything else in {value}, which a link would
+// not).
+func (r *Runner) linkOf(env *envelope, entry map[string]interface{}) *LinkItem {
+	if !r.sink.Link || r.noLinks || env.derived || entry == nil || !jsv.IsObject(env.value) {
+		return nil
+	}
+	queue, _ := entry["queue"].(string)
+	partition, _ := entry["partition"].(string)
+	txn, _ := entry["transactionId"].(string)
+	offset, ok := jsv.Num(entry["offset"])
+	if queue == "" || txn == "" || !ok {
+		return nil
+	}
+	if partition == "" {
+		partition = "Default"
+	}
+	return &LinkItem{Queue: queue, Partition: partition, Offset: int64(offset), TransactionID: txn}
 }
 
 func (r *Runner) emitID() string {
@@ -2412,11 +2500,12 @@ func (r *Runner) commitWith(ctx context.Context, next interface{}, stateful bool
 	}
 	type grp struct {
 		queue, partition string
-		items            []PushItem
+		outs             []*output
 	}
 	var order []string
 	groupsBy := map[string]*grp{}
-	for _, it := range r.pending.outputs {
+	for i := range r.pending.outputs {
+		it := &r.pending.outputs[i]
 		k := it.queue + "\x00" + it.partition
 		g, ok := groupsBy[k]
 		if !ok {
@@ -2424,11 +2513,43 @@ func (r *Runner) commitWith(ctx context.Context, next interface{}, stateful bool
 			groupsBy[k] = g
 			order = append(order, k)
 		}
-		g.items = append(g.items, PushItem{Data: it.data, TransactionID: it.transactionID})
+		g.outs = append(g.outs, it)
 	}
+	// An output that is its input unchanged goes as a link while the runner
+	// links and its Tx can; anything else is pushed. Within one partition the
+	// runs of each kind keep the outputs' order.
+	lt, canLink := tx.(LinkTx)
+	linking := canLink && !r.noLinks
+	linked := false
 	for _, k := range order {
 		g := groupsBy[k]
-		tx.Push(g.queue, g.partition, g.items)
+		var pushes []PushItem
+		var links []LinkItem
+		flush := func() {
+			if len(pushes) > 0 {
+				tx.Push(g.queue, g.partition, pushes)
+				pushes = nil
+			}
+			if len(links) > 0 {
+				lt.Link(g.queue, g.partition, links)
+				links = nil
+			}
+		}
+		for _, o := range g.outs {
+			if linking && o.link != nil {
+				if len(pushes) > 0 {
+					flush()
+				}
+				links = append(links, *o.link)
+				linked = true
+				continue
+			}
+			if len(links) > 0 {
+				flush()
+			}
+			pushes = append(pushes, PushItem{Data: o.data, TransactionID: o.transactionID})
+		}
+		flush()
 	}
 	value := map[string]interface{}{"position": jsPos(next), "queryId": r.queryID, "epoch": float64(r.epoch), "updatedAt": jsv.MustISO(r.now())}
 	if r.shard != nil {
@@ -2510,12 +2631,21 @@ func (r *Runner) commitWith(ctx context.Context, next interface{}, stateful bool
 		// A pushed output is already stored: another process committed these
 		// messages -- or this one did, and its answer was lost -- and that
 		// commit moved the position. Carry on from the stored position.
+		// (A link the target already holds is not one of these: the broker
+		// answers it as a duplicate that commits, not a rollback.)
 		var te *TxError
 		if errors.As(err, &te) && te.Reason == "duplicate" {
 			if err := r.reload(ctx, "duplicate"); err != nil {
 				return "", err
 			}
 			return "conflict", nil
+		}
+		// A link the broker does not take: an older broker (400), an older
+		// cluster (cluster_version), a source it no longer keeps. Nothing was
+		// written; the same commit goes again, pushed.
+		if linked && errors.As(err, &te) && linkRefused(te.Reason) {
+			r.stopLinking(te.Reason)
+			return r.commitWith(ctx, next, stateful, snap)
 		}
 		return "", err
 	}

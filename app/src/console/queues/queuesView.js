@@ -15,6 +15,7 @@ import { queueMatches } from '../../composables/navigation.js'
 import {
   OPTION_DEFAULTS, OPTION_META, buildBody, existingQueueName, queueNameError, readFormValue, validate, EDITABLE_OPTIONS, configDiff, readFormValues,
 } from '../../composables/useQueueConfig.js'
+import { READER_KEEPS, fromLabel, readingOptions, routeOf } from './routeView.js'
 
 export const QUEUE_MODE = '__QUEUE_MODE__'
 /** The workload read the shared store makes is one hour, in one-minute buckets. */
@@ -95,6 +96,7 @@ export function queueRows({ queues = [], groups = null, ops = null, series = nul
   const out = []
   for (const q of queues || []) {
     if (!q?.name) continue
+    const route = routeOf(q)
     const all = byQueue.get(q.name) || []
     const live = all.filter((g) => groupAttention(g, linesFor) !== 'mute')
     const worst = [...live].sort(byLag)[0] || null
@@ -129,6 +131,9 @@ export function queueRows({ queues = [], groups = null, ops = null, series = nul
       state: stateOf({ issue, pending, inS, outS, feed }),
       feedOnly: feed !== null,
       feedReaders: Array.isArray(q.feedReaders) ? q.feedReaders : [],
+      // A reading queue's quiet label, "from orders" (routeView.fromLabel), and every source it reads.
+      from: fromLabel(route),
+      sources: route?.reading ? route.from.map((s) => s.queue) : [],
       reader: all.length ? readerOf(all, live) : null,
       inS,
       outS,
@@ -338,27 +343,34 @@ export function queuesVerdict({ rows = [], loaded = false, groupsKnown = false, 
  * The form's own fields go on the wire explicitly; every other option takes
  * the broker's default.
  *   form   { name, namespace, task, leaseTime, retryLimit } (strings, as typed)
+ *          and, for a queue that reads other queues, `reads: true` with
+ *          { from, where, partitionMode, partitionField, start } (routeView.readingOptions)
  *   known  anything with .has / .get by name (queuesStore.queueMeta)
+ * A reading queue keeps what its sources keep: the options it refuses
+ * (READER_KEEPS) are never sent for it, whatever the form still holds.
  */
 export function newQueueDraft(form = {}, known = null) {
   const raw = typeof form.name === 'string' ? form.name : ''
   const name = raw.trim()
   const nameError = queueNameError(raw)
   const exists = existingQueueName(raw, known)
+  const reading = form.reads === true ? readingOptions(form, { name, known }) : null
   const lease = readFormValue(OPTION_META.leaseTime, form.leaseTime)
   const retries = readFormValue(OPTION_META.retryLimit, form.retryLimit)
   // Every other option the form carries: only those that differ from the
   // broker's defaults are sent, so the queue gets the defaults for the rest.
   // A cleared field means "the default", which a new queue already has.
-  const others = EDITABLE_OPTIONS.map((o) => o.key).filter((k) => k !== 'leaseTime' && k !== 'retryLimit' && k in form)
+  const others = EDITABLE_OPTIONS.map((o) => o.key)
+    .filter((k) => k !== 'leaseTime' && k !== 'retryLimit' && k in form && !(reading && READER_KEEPS.includes(k)))
   const extra = configDiff(OPTION_DEFAULTS, readFormValues(Object.fromEntries(others.map((k) => [k, form[k]]))))
   for (const k of Object.keys(extra)) if (extra[k] === null) delete extra[k]
-  const errors = validate({ leaseTime: lease, retryLimit: retries, ...extra })
+  const errors = { ...validate({ leaseTime: lease, retryLimit: retries, ...extra }), ...(reading?.errors || {}) }
   const namespace = String(form.namespace ?? '').trim()
   const task = String(form.task ?? '').trim()
   const options = {}
   if (namespace) options.namespace = namespace
   if (task) options.task = task
+  if (reading) Object.assign(options, reading.options)
   options.leaseTime = lease ?? OPTION_DEFAULTS.leaseTime
   options.retryLimit = retries ?? OPTION_DEFAULTS.retryLimit
   Object.assign(options, extra)
@@ -375,6 +387,7 @@ export function newQueueDraft(form = {}, known = null) {
     leaseTime: options.leaseTime,
     retryLimit: options.retryLimit,
     extra,
+    reading,
     body: buildBody({ queue: name, options, mode: 'merge' }),
   }
 }

@@ -167,7 +167,9 @@ func TestFeedACommitRefusedAsDuplicateReadsOnFromTheStoredPosition(t *testing.T)
 		winner = b.Applied() + 1
 		b.KVPut(NS, "race", m("position", winner, "queryId", "race"))
 	}})
-	r := h.run(streams.FromFeed(q, streams.FeedSource{From: "earliest"}).To(q.Queue("copy")),
+	// Link off: the race is over a pushed copy, whose id is the query's own (a
+	// link keeps its source's id, and a held link is no rollback at all).
+	r := h.run(streams.FromFeed(q, streams.FeedSource{From: "earliest"}).ToWith(q.Queue("copy"), streams.ToOptions{Link: streams.Bool(false)}),
 		fast(streams.FeedRunOptions{QueryID: "race", Exclusive: streams.Bool(false)}))
 	until(t, func() bool { return r.Metrics().Conflicts >= 1 }, 0, "a conflict")
 	h.push("orders", "c1", m("n", 2.0))

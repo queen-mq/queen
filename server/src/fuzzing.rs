@@ -50,6 +50,8 @@ pub fn push_body(data: &[u8]) {
             producer_sub: Some("fuzz-sub"),
             payload,
             encrypted: false,
+            headers: None,
+            link: None,
         }]);
         let back = unpack_frames_ref(&frame).expect("a packed frame unpacks");
         assert_eq!(back.len(), 1);
@@ -152,6 +154,8 @@ mod tests {
             producer_sub: Some("s"),
             payload: b"{}",
             encrypted: true,
+            headers: None,
+            link: None,
         }]);
         frames(&good);
         for cut in 0..good.len() {

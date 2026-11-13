@@ -1,0 +1,9 @@
+{"status":"healthy","engine":"raft","version":"2.8.1","raft":{"role":"leader","leader":true,"term":3,"applied":89268,"commit":89268,"lag":0,"quorumAckMs":106,"storageReady":true,"clusterVersion":8,"kinds":8,"apply":{"failure":null,"skipped":[]}}}
+
+WARN_ERROR=49
+2026-11-12T17:31:11.818779355Z  INFO rsm: planner: cycles since the last line (route_us and land_us per cycle, group_us per parallel run, merge_us per parallel cycle) parallel=11 serial=216 fallback=0 route_us=0 group_us=106 merge_us=83 land_us=0
+2026-11-12T17:31:21.81886707Z  INFO rsm: planner: cycles since the last line (route_us and land_us per cycle, group_us per parallel run, merge_us per parallel cycle) parallel=17424 serial=8867 fallback=0 route_us=16 group_us=84 merge_us=30 land_us=8
+2026-11-12T17:31:31.819370804Z  INFO rsm: planner: cycles since the last line (route_us and land_us per cycle, group_us per parallel run, merge_us per parallel cycle) parallel=14975 serial=6421 fallback=0 route_us=25 group_us=119 merge_us=47 land_us=16
+2026-11-12T17:31:41.819920769Z  INFO rsm: planner: cycles since the last line (route_us and land_us per cycle, group_us per parallel run, merge_us per parallel cycle) parallel=14908 serial=6528 fallback=0 route_us=25 group_us=120 merge_us=47 land_us=16
+2026-11-12T17:31:51.820135846Z  INFO rsm: planner: cycles since the last line (route_us and land_us per cycle, group_us per parallel run, merge_us per parallel cycle) parallel=14213 serial=6433 fallback=0 route_us=26 group_us=123 merge_us=50 land_us=16
+2026-11-12T17:32:01.831378746Z  INFO rsm: planner: cycles since the last line (route_us and land_us per cycle, group_us per parallel run, merge_us per parallel cycle) parallel=124 serial=249 fallback=0 route_us=10 group_us=99 merge_us=36 land_us=3

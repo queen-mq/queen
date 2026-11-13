@@ -57,6 +57,9 @@ verifiedBy:
 # handlers/timers.rs, facade/real/kv.rs carry each request's client scope (None without a client
 # token) and refuse a name outside it 403 scope_denied before any command is built
 # (server/src/scope.rs, b24b53599). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
+# states changes.
 ---
 
 The transaction above already used two of the three: `kv.put` stored the order's state, and `timer()` scheduled tomorrow's reminder, which arrives as a message.
@@ -100,6 +103,7 @@ A timer is a message scheduled for later. It is named by its queue and its key, 
 - A fire is never early, and a little late: the leader checks every 50 ms, then the message waits for a consumer.
 - A cancel that answers `absent` may mean the timer already fired. A handler that compensates (a payment timeout) checks the entity's state before it acts.
 - For the same delay on every message of a queue, use the queue's `delayedProcessing` instead.
+- A schedule takes [headers](/writing-applications/headers/) (`headers`), and the message it fires carries them.
 
 <Why>a timer scheduled in the transaction of the step that wants it exists exactly when that step committed: no cron job, no table to scan, no reminder for an order that was never paid.</Why>
 

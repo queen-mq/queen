@@ -105,6 +105,11 @@ verifiedBy:
 # a unit that was retried. This page: the onLate row of the Event time table.
 # sourceOfTruth re-read 2026-11-11 (scoped keys and client tokens): the Go streams runner takes
 # RunOptions.TokenSource (367f278dc). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. streams.rs takes a
+# link in a cycle's push item, txn.rs commits a link its partition already holds as a no-op, and
+# SinkOperator.js / FeedRunner.js write a link for a result that is its input unchanged. This
+# page: a paragraph in Two ways to end a stream.
 ---
 
 A stream reads a queue and writes its results to another. The partition is the key, so each customer gets its own windows. Streams are in the JavaScript, Python, Go and Rust clients; PHP and C++ have none, and a stream reads any queue, whoever pushes to it. Like a new group it starts at the tail: push a few more orders and a result arrives a minute later.
@@ -155,6 +160,8 @@ By default a window holds the events that arrived during it. Give `eventTime` a 
 ## Two ways to end a stream
 
 `.to(queue)` pushes each result to another queue, in the same commit as the state and the acks, into the partition of the same name unless you pass `{ partition }`. `.foreach(fn)` calls your function for each result, and acks only after it returns: a crash in the middle calls it again.
+
+When a result is its input message unchanged, because only `where`, `filter`, `keyBy` or routing came before `.to()`, the stream writes a [link](/writing-applications/routing/) to that message instead of a copy: the same message, id and transaction id, for about 20 bytes. `.to(queue, { link: false })` writes copies.
 
 <Why>a result that stays inside QueenMQ can be exactly once. A call to the outside world (an email, an API) cannot, so `foreach` makes it at least once and says so. For an external effect that must happen once, send the result to a queue and let a worker do it with an idempotency key.</Why>
 

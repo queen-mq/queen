@@ -1,0 +1,11 @@
+[15:47:06] run big-t10-281: build 281, txn, 200 partitions, steps of 40s at: 80000 120000 160000 200000 240000 280000 | TXN_SIZE=10 KV=0 CONS=25 PROCS=8 BATCH=100 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames -txn-wire bin | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: b1-in, b1-out x 200 partitions
+[15:48:14]    80,000: offered 80,003 | workers 8,000 txn/s = 80,000 msg/s | read 80,000 | shed 0 errors 0 aborts 0 | commit p50 1.2 p99 2.0 | e2e p50 18 p99 32 | feed push p50 2.1 p99 3.3 | cores 6.9 / 3.7 / 3.1 | loaders 4.5c  OK 
+[create] done: b2-in, b2-out x 200 partitions
+[15:49:22]   120,000: offered 119,999 | workers 12,000 txn/s = 120,003 msg/s | read 120,002 | shed 0 errors 0 aborts 0 | commit p50 1.5 p99 2.8 | e2e p50 22 p99 40 | feed push p50 2.4 p99 3.9 | cores 8.3 / 4.5 / 3.6 | loaders 6.1c  OK 
+[create] done: b3-in, b3-out x 200 partitions
+[15:50:30]   160,000: offered 159,996 | workers 16,000 txn/s = 159,998 msg/s | read 160,000 | shed 0 errors 0 aborts 0 | commit p50 2.0 p99 3.7 | e2e p50 28 p99 53 | feed push p50 2.8 p99 4.7 | cores 9.0 / 4.8 / 3.8 | loaders 7.7c  OK 
+[create] done: b4-in, b4-out x 200 partitions
+[15:51:45]   200,000: offered 199,995 | workers 15,807 txn/s = 158,074 msg/s | read 158,056 | shed 0 errors 0 aborts 0 | commit p50 5.4 p99 11.3 | e2e p50 4588 p99 7799 | feed push p50 5.2 p99 11.1 | cores 7.4 / 3.8 / 2.9 | loaders 7.2c  NOT CARRIED 
+[15:51:45] stopping at 200000
+RUN_DONE

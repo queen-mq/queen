@@ -1,5 +1,7 @@
 //! `POST /api/v1/push` — enqueue one or more messages.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// One message to enqueue.
@@ -44,6 +46,13 @@ pub struct PushItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub transaction_id: Option<String>,
+
+    /// The message's headers: names of 1 to 64 bytes of `a-z 0-9 . _ -`
+    /// (`queen-` is the broker's), string values, stored in clear and never
+    /// part of dedup. Catalogue version 8 and later; omitted when `None`, and
+    /// `{}` is the same as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, String>>,
 }
 
 impl PushItem {
@@ -55,6 +64,7 @@ impl PushItem {
             partition: None,
             payload,
             transaction_id: None,
+            headers: None,
         }
     }
 
@@ -65,6 +75,19 @@ impl PushItem {
 
     pub fn transaction_id(mut self, transaction_id: impl Into<String>) -> Self {
         self.transaction_id = Some(transaction_id.into());
+        self
+    }
+
+    /// Add headers (a name given twice keeps its last value).
+    pub fn headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.headers
+            .get_or_insert_with(BTreeMap::new)
+            .extend(headers.into_iter().map(|(k, v)| (k.into(), v.into())));
         self
     }
 }
@@ -174,6 +197,26 @@ mod tests {
         let s = serde_json::to_string(&item).unwrap();
         assert!(s.contains(r#""transactionId":"txn-1""#), "{s}");
         assert!(s.contains(r#""partition":"eu""#), "{s}");
+    }
+
+    #[test]
+    fn push_item_carries_headers_only_when_given() {
+        let item = PushItem::new("orders", serde_json::json!({"id": 1}))
+            .transaction_id("t1")
+            .headers([("type", "order.paid"), ("source", "web")]);
+        assert_eq!(
+            serde_json::to_string(&item).unwrap(),
+            r#"{"queue":"orders","payload":{"id":1},"transactionId":"t1","headers":{"source":"web","type":"order.paid"}}"#,
+            "headers are written in name order, after the other keys"
+        );
+        let back: PushItem = serde_json::from_str(&serde_json::to_string(&item).unwrap()).unwrap();
+        assert_eq!(back, item);
+        // Two calls add up; a name given again keeps its last value.
+        let item = PushItem::new("q", serde_json::json!(1))
+            .headers([("a", "1")])
+            .headers([("a", "2"), ("b", "3")]);
+        let h = item.headers.unwrap();
+        assert_eq!((h["a"].as_str(), h["b"].as_str()), ("2", "3"));
     }
 
     #[test]

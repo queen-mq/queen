@@ -1,11 +1,12 @@
 <script setup>
 // What the Consumer groups view and a queue's page do to a group, one dialog
 // at a time: skip what waits, read again from a time, move one partition (to
-// its newest message, or back to a time), delete it on one queue or
-// everywhere. Each shows what changes, the cluster and the exact call before
-// it runs (groupsView builds the call; sendCall sends those same parts
-// through the app's API layer), and the broker's answer comes back in a
-// toast. A 2xx that moved or deleted nothing says so: it did nothing.
+// its newest message, or back to a time), change a filtered group's where,
+// delete it on one queue or everywhere. Each shows what changes, the cluster
+// and the exact call before it runs (groupsView builds the call; sendCall
+// sends those same parts through the app's API layer), and the broker's
+// answer comes back in a toast. A 2xx that moved or deleted nothing says so:
+// it did nothing.
 import { computed, ref, shallowRef, watch } from 'vue'
 import { consumers as consumersApi, queues as queuesApi } from '@/api'
 import { describeApiError } from '@/api/errors'
@@ -16,11 +17,12 @@ import { fmt } from '../useQueuePage'
 import { span } from '../useOverview'
 import { clock, timeZone } from '../useWindow'
 import {
-  deleteCall, deleteOutcome, parseWhen, partitionCall, restartOf, seekCall, seekOutcome, sendCall, whenText,
+  deleteCall, deleteOutcome, parseWhen, partitionCall, restartOf, seekCall, seekOutcome, sendCall, whenText, whereCall, whereOutcome,
 } from './groupsView'
+import { parseWhere } from './whereText'
 
 const props = defineProps({
-  // { kind: 'skip'|'seek'|'partition'|'delete'|'deleteAll', row, partition?, waiting?, to?, queues?, allMembers?, allWaiting? }
+  // { kind: 'skip'|'seek'|'partition'|'where'|'delete'|'deleteAll', row, partition?, waiting?, to?, queues?, allMembers?, allWaiting? }
   // A 'partition' act with no partition asks for one; `to` ('end' | 'time') is where it starts.
   act: { type: Object, default: null },
   where: { type: String, default: '' }, // the cluster
@@ -33,6 +35,7 @@ const field = ref('')
 const partTo = ref('end') // one partition: 'end' (skip what waits) or 'time'
 const partField = ref('') // one partition, when the act named none
 const partList = shallowRef([]) // the queue's partitions, for the field's suggestions
+const whereField = ref('') // a filtered group's new where, from the one it has
 watch(() => props.act, (a) => {
   if (!a) return
   keep.value = false
@@ -40,6 +43,7 @@ watch(() => props.act, (a) => {
   partTo.value = a.to === 'time' ? 'time' : 'end'
   partField.value = ''
   partList.value = []
+  whereField.value = a.kind === 'where' ? (a.row?.filter?.where || '') : ''
   if (a.kind === 'partition' && !a.partition && a.row?.queue) loadPartitions(a.row.queue)
 })
 async function loadPartitions(queue) {
@@ -96,6 +100,19 @@ const atWords = computed(() => {
   return sameDay ? clock(at.value) : DAY(at.value)
 })
 
+// ---- a filtered group's where: read as the broker reads it (whereText) ----
+const whereNow = computed(() => row.value?.filter || null) // { where, known }
+const whereProblem = computed(() => {
+  if (kind.value !== 'where') return ''
+  const err = parseWhere(whereField.value).error
+  if (err) return err
+  if (whereNow.value?.known && whereField.value.trim() === whereNow.value.where) return 'That is the where it has.'
+  return ''
+})
+const whereNote = computed(() => (whereField.value.trim()
+  ? 'Conditions on data.<path>, headers.<name>, queue or partition, joined by and.'
+  : `Empty: it gets every message of ${queue.value}.`))
+
 // ---- the call each dialog shows, and sends ----
 const call = computed(() => {
   const x = a.value
@@ -104,6 +121,7 @@ const call = computed(() => {
   if (x.kind === 'skip') return seekCall(r.name, r.queue)
   if (x.kind === 'seek') return seekCall(r.name, r.queue, at.value ?? Date.now())
   if (x.kind === 'partition') return partitionCall(r.name, r.queue, part.value || '…', partTo.value === 'time' ? (at.value ?? Date.now()) : null)
+  if (x.kind === 'where') return whereCall(r.name, r.queue, whereField.value)
   if (x.kind === 'delete') return deleteCall(r.name, r.queue, !keep.value)
   if (x.kind === 'deleteAll') return deleteCall(r.name, null, !keep.value)
   return null
@@ -145,6 +163,7 @@ const title = computed(() => {
     case 'skip': return `Skip what waits for ${label.value}?`
     case 'seek': return `Seek ${label.value} to a time?`
     case 'partition': return partTo.value === 'time' ? `Seek one partition of ${label.value} to a time?` : `Skip one partition for ${label.value}?`
+    case 'where': return `Change the where of ${label.value}?`
     case 'delete': return `Delete ${label.value} on ${queue.value}?`
     case 'deleteAll': return `Delete ${label.value} everywhere?`
     default: return ''
@@ -155,12 +174,14 @@ const confirmLabel = computed(() => {
     case 'skip': return `Skip on ${props.where}`
     case 'seek': return `Seek on ${props.where}`
     case 'partition': return partTo.value === 'time' ? `Seek on ${props.where}` : `Skip on ${props.where}`
+    case 'where': return `Change on ${props.where}`
     default: return `Delete on ${props.where}`
   }
 })
-// Reading again delivers twice, skipping loses: only the second is red.
-const danger = computed(() => !wantsTime.value)
-const blocked = computed(() => !!seekProblem.value || !!partProblem.value)
+// Reading again delivers twice, skipping loses: only the second is red. A
+// where applies from the next push and takes back nothing: not red either.
+const danger = computed(() => kind.value !== 'where' && !wantsTime.value)
+const blocked = computed(() => !!seekProblem.value || !!partProblem.value || !!whereProblem.value)
 // Skipping a whole queue and deleting are typed; one partition is named in full instead.
 const typedFor = computed(() => (['skip', 'delete', 'deleteAll'].includes(kind.value) ? typed.value : ''))
 
@@ -178,7 +199,14 @@ async function run() {
   const on = props.where
   try {
     const r = await sendCall(consumersApi, c)
-    if (c.kind === 'seek' || c.kind === 'seekPartition') {
+    if (c.kind === 'where') {
+      const o = whereOutcome(r?.data)
+      if (!o.ok) toast(`Nothing changed on ${on}`, o.problem, 'red')
+      else {
+        toast(`Changed the where of ${who} on ${on}`, `The broker answered ${r.status || 200}: it applies from the next push to ${c.queue}.`)
+      }
+      emit('done', { call: c, ok: o.ok })
+    } else if (c.kind === 'seek' || c.kind === 'seekPartition') {
       const o = seekOutcome(r?.data)
       if (!o.ok) {
         toast(`Nothing moved on ${on}`, o.problem, 'red')
@@ -206,7 +234,7 @@ async function run() {
       emit('done', { call: c, ok: o.ok })
     }
   } catch (e) {
-    toast(c.method === 'DELETE' ? 'Not deleted' : 'Not moved', describeApiError(e), 'red')
+    toast(c.method === 'DELETE' ? 'Not deleted' : c.kind === 'where' ? 'Not changed' : 'Not moved', describeApiError(e), 'red')
   } finally {
     busy.value = false
   }
@@ -301,6 +329,24 @@ async function run() {
         </template>
       </template>
 
+      <!-- a filtered group's where -->
+      <template v-else-if="kind === 'where'">
+        <label class="qa-part">
+          <span class="qn-t2">What <span class="qn-mono">{{ label }}</span> gets of <span class="qn-mono">{{ queue }}</span></span>
+          <span class="qn-field qa-pfield"><input v-model="whereField" class="qn-mono" type="text" spellcheck="false" autocomplete="off" placeholder="data.kind = 'order.paid'" aria-describedby="qa-where-note" /></span>
+        </label>
+        <p id="qa-where-note" class="qa-note" :class="whereProblem ? 'red' : 'qn-t3'">{{ whereProblem || whereNote }}</p>
+        <dl class="qn-dl qa-wdl">
+          <dt>Now</dt>
+          <dd v-if="whereNow && whereNow.where" class="qn-mono">{{ whereNow.where }}</dd>
+          <dd v-else class="qn-t2">{{ whereNow && whereNow.known ? 'every message' : 'not in this listing' }}</dd>
+          <dt>Then</dt>
+          <dd v-if="whereField.trim()" class="qn-mono">{{ whereField.trim() }}</dd>
+          <dd v-else class="qn-t2">every message</dd>
+        </dl>
+        <p class="qn-t2 qa-p">It applies from the next push: what already waits for {{ label }} stays, and nothing pushed before is added or taken back.</p>
+      </template>
+
       <!-- delete: one queue, or everywhere -->
       <template v-else>
         <div class="qa-change qn-num">
@@ -335,4 +381,6 @@ async function run() {
 .qa-segtop { margin-top: 12px; }
 .qa-part { display: flex; flex-direction: column; gap: 6px; }
 .qa-pfield { width: 100%; }
+.qa-note { font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
+.qa-wdl { grid-template-columns: 48px minmax(0, 1fr); margin-top: 14px; }
 </style>

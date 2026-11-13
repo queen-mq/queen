@@ -1,0 +1,9 @@
+{"status":"healthy","engine":"raft","version":"2.8.1","raft":{"role":"leader","leader":true,"term":3,"applied":88381,"commit":88381,"lag":0,"quorumAckMs":43,"storageReady":true,"clusterVersion":8,"kinds":8,"apply":{"failure":null,"skipped":[]}}}
+
+WARN_ERROR=51
+2026-11-13T13:31:37.187908682Z  INFO rsm: planner: cycles since the last line (times per cycle, µs; bins and shared groups in all) parallel=7 serial=218 fallback=0 cycle_us=18 idle_us=44506 route_us=0 land_us=0 group_us=2 asm_us=2 merge_us=1 tail_us=0 bins=48 shared=2
+2026-11-13T13:31:47.188008603Z  INFO rsm: planner: cycles since the last line (times per cycle, µs; bins and shared groups in all) parallel=4448 serial=10772 fallback=0 cycle_us=82 idle_us=570 route_us=9 land_us=2 group_us=18 asm_us=2 merge_us=1 tail_us=0 bins=25846 shared=9655
+2026-11-13T13:31:57.188416172Z  INFO rsm: planner: cycles since the last line (times per cycle, µs; bins and shared groups in all) parallel=10870 serial=9722 fallback=0 cycle_us=283 idle_us=198 route_us=24 land_us=11 group_us=67 asm_us=10 merge_us=3 tail_us=0 bins=57619 shared=148179
+2026-11-13T13:32:07.189341544Z  INFO rsm: planner: cycles since the last line (times per cycle, µs; bins and shared groups in all) parallel=10585 serial=9178 fallback=0 cycle_us=296 idle_us=205 route_us=25 land_us=11 group_us=70 asm_us=10 merge_us=3 tail_us=0 bins=56220 shared=150087
+2026-11-13T13:32:17.189413473Z  INFO rsm: planner: cycles since the last line (times per cycle, µs; bins and shared groups in all) parallel=10279 serial=9184 fallback=0 cycle_us=297 idle_us=212 route_us=26 land_us=11 group_us=70 asm_us=10 merge_us=3 tail_us=0 bins=55159 shared=148592
+2026-11-13T13:32:27.232719678Z  INFO rsm: planner: cycles since the last line (times per cycle, µs; bins and shared groups in all) parallel=6996 serial=7324 fallback=0 cycle_us=273 idle_us=423 route_us=24 land_us=10 group_us=63 asm_us=9 merge_us=3 tail_us=0 bins=38179 shared=92935

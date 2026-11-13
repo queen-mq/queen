@@ -89,6 +89,7 @@ mod replicator_crash;
 mod retention_per_file;
 mod retention_scan;
 mod roundtrip;
+mod routing;
 mod rowless;
 pub(super) mod samples;
 #[cfg(feature = "server")]

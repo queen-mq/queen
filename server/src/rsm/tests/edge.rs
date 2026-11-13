@@ -285,6 +285,7 @@ fn push_cmd() -> Command {
         partition: "p".into(),
         items: Vec::new(),
         create_cfg: crate::rsm::planner::timers::implicit_queue_config_for("q"),
+        links: Default::default(),
     })
 }
 

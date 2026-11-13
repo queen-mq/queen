@@ -183,7 +183,8 @@ export class HttpClient {
       retry429 = {},
       // A push to /api/v1/push goes out as the binary push body instead of
       // JSON. It needs a broker that accepts that body. Items with a trace id
-      // stay JSON.
+      // stay JSON, and so do items with headers unless pushCompression frames
+      // them.
       binaryPush = false,
       // With binaryPush: the messages are framed as the broker stores them and
       // each partition's batch is zstd-compressed once, here; the broker keeps

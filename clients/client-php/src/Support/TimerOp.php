@@ -67,7 +67,8 @@ final class TimerOp
      * @param mixed $payload any JSON-serializable value. It is JSON-encoded and
      *   then base64-encoded, so the consumer of the destination queue reads the
      *   same shape it would have read from a push.
-     * @param array $opts txn, partition.
+     * @param array $opts txn, partition, headers: the fired message's, as on a
+     *   push (Support\Headers), and shown by a peek.
      */
     public static function schedule(string $queue, string $timerKey, int $delayMs, mixed $payload, array $opts = []): array
     {
@@ -114,9 +115,9 @@ final class TimerOp
                 );
             }
 
-            if (!in_array($name, ['txn', 'partition'], true)) {
+            if (!in_array($name, ['txn', 'partition', 'headers'], true)) {
                 throw new \InvalidArgumentException(
-                    "unknown timer option `{$name}`; schedule accepts: txn, partition"
+                    "unknown timer option `{$name}`; schedule accepts: txn, partition, headers"
                 );
             }
 
@@ -143,6 +144,13 @@ final class TimerOp
 
         if (isset($opts['partition'])) {
             $op['partition'] = $opts['partition'];
+        }
+
+        // Left out when there are none: a timer without headers is the
+        // operation every broker knows.
+        $headers = Headers::wire($opts['headers'] ?? null);
+        if ($headers !== null) {
+            $op['headers'] = $headers;
         }
 
         return $op;

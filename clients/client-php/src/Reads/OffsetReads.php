@@ -65,11 +65,12 @@ final class OffsetReads
      * 'nextOffset']. A partition nobody has written, or of a queue that does not
      * exist, answers no records. So does an offset past the end of the
      * partition ('nextOffset' above 'highWatermark' says so: the partition was
-     * deleted and written again).
+     * deleted and written again). A record of a message with headers has
+     * them under 'headers'; the others have no such key.
      *
      * @param string|array<int|string> $partitions
      * @param array<string,int> $offsets
-     * @return array<string, array{partition: string, records: list<array{offset: int, transactionId: ?string, payload: mixed, ts: ?string}>, highWatermark: int, logStartOffset: int, nextOffset: int}>
+     * @return array<string, array{partition: string, records: list<array{offset: int, transactionId: ?string, payload: mixed, ts: ?string, headers?: array<string, string>}>, highWatermark: int, logStartOffset: int, nextOffset: int}>
      */
     public static function fetch(HttpClient $http, string $queue, string|array $partitions, array $offsets = [], int $maxBytes = self::DEFAULT_MAX_BYTES): array
     {
@@ -161,12 +162,17 @@ final class OffsetReads
                     if ($records !== []) {
                         $delivered += count($records);
                         foreach ($records as $r) {
-                            $s['records'][] = [
+                            $record = [
                                 'offset' => (int) $r['offset'],
                                 'transactionId' => $r['transactionId'] ?? null,
                                 'payload' => $r['payload'] ?? null,
                                 'ts' => $r['ts'] ?? null,
                             ];
+                            // Only a record that has headers carries them, as on the wire.
+                            if (is_array($r['headers'] ?? null)) {
+                                $record['headers'] = $r['headers'];
+                            }
+                            $s['records'][] = $record;
                         }
                         $s['nextOffset'] = (int) $records[count($records) - 1]['offset'] + 1;
                         if ($s['nextOffset'] < $s['end']) {

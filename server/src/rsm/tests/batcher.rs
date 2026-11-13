@@ -76,6 +76,7 @@ fn push(id: u64, queue: &str, partition: &str, txns: &[&str]) -> Command {
         partition: partition.to_string(),
         items: txns.iter().map(|t| item(t)).collect(),
         create_cfg: qcfg(),
+        links: Default::default(),
     })
 }
 
@@ -1662,7 +1663,7 @@ impl LanesNode {
         let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
         let repl = Arc::new(open_repl(&dir, store.clone()));
         let cfg = BatcherConfig {
-            lanes,
+            planner_threads: lanes,
             ..small_pipeline(4, 5_000)
         };
         let (tx, handle) = Batcher::new(store.clone(), repl.clone(), cfg).spawn();
@@ -1805,7 +1806,7 @@ async fn an_entry_above_the_cluster_version_is_refused_and_never_proposed() {
         }
         let fake = Arc::new(FakeReplicator::new(1));
         let cfg = BatcherConfig {
-            lanes,
+            planner_threads: lanes,
             ..small_pipeline(4, 5_000)
         };
         let (tx, handle) = Batcher::new(store.clone(), fake.clone(), cfg).spawn();

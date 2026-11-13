@@ -1,0 +1,9 @@
+5348c5348
+<         let route_frames = self.cluster_allows(crate::rsm::effect::VERSION_8);
+---
+>         let route_frames = false;
+homes1x built in 540 s: 90875c70
+n1: 90875c70
+n2: 90875c70
+n3: 90875c70
+BUILDX_DONE homes1x

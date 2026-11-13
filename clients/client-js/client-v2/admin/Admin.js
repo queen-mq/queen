@@ -4,6 +4,7 @@
  */
 
 import * as logger from '../utils/logger.js'
+import { whereValue } from '../feed/Feed.js'
 
 export class Admin {
   #httpClient
@@ -357,6 +358,31 @@ export class Admin {
     logger.log('Admin.seekConsumerGroup', { consumerGroup, queueName, options })
     const url = `/api/v1/consumer-groups/${encodeURIComponent(consumerGroup)}/queues/${encodeURIComponent(queueName)}/seek`
     return this.#httpClient.post(url, options)
+  }
+
+  /**
+   * Change the `where` of a filtered consumer group (PLAN_ROUTING.md §4), the
+   * one its pops send (`.group(g).where(...)`); it applies from the next push.
+   * Update the consumers' `.where()` to match, or their pops are refused with
+   * `where_mismatch`. The broker answers 404 when the group does not filter
+   * the queue: a group filters from its first pop with a where.
+   *
+   *   await queen.admin.updateConsumerGroupWhere('billing', 'orders', "data.kind = 'order.paid'")
+   *   await queen.admin.updateConsumerGroupWhere('billing', 'orders', [['data.kind', 'in', ['order.paid', 'order.refunded']]])
+   *
+   * @param {string} consumerGroup - Consumer group name
+   * @param {string} queueName - The queue it filters
+   * @param {string|Array|object} where - one string, or conditions as `.where()` takes them
+   * @returns {Promise<object>} `{ success, consumerGroup, queueName, where }`
+   */
+  async updateConsumerGroupWhere(consumerGroup, queueName, where) {
+    const value = whereValue(where)
+    if (value === null) {
+      throw new Error('updateConsumerGroupWhere: give the new where (one string, or conditions)')
+    }
+    logger.log('Admin.updateConsumerGroupWhere', { consumerGroup, queueName })
+    const url = `/api/v1/consumer-groups/${encodeURIComponent(consumerGroup)}/subscription`
+    return this.#httpClient.post(url, { queue: queueName, where: value })
   }
 
   // ===========================

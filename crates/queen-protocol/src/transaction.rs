@@ -8,6 +8,8 @@
 //! A rolled-back transaction still answers **HTTP 200** with
 //! `success: false` — the status code is not the signal.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::ack::AckStatus;
@@ -42,6 +44,11 @@ pub struct TxnPushItem {
     /// rejected.
     #[serde(rename = "traceId", default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+
+    /// The message's headers, as on [`crate::PushItem::headers`]. Catalogue
+    /// version 8 and later; omitted when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, String>>,
 }
 
 impl TxnPushItem {
@@ -52,7 +59,21 @@ impl TxnPushItem {
             payload,
             transaction_id: None,
             trace_id: None,
+            headers: None,
         }
+    }
+
+    /// Add headers (a name given twice keeps its last value).
+    pub fn headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.headers
+            .get_or_insert_with(BTreeMap::new)
+            .extend(headers.into_iter().map(|(k, v)| (k.into(), v.into())));
+        self
     }
 
     pub fn partition(mut self, partition: impl Into<String>) -> Self {
@@ -932,6 +953,21 @@ mod tests {
         assert!(
             s.contains(r#""traceId":"6f1a3d0e-0000-7000-8000-000000000000""#),
             "{s}"
+        );
+    }
+
+    #[test]
+    fn txn_push_item_carries_headers_only_when_given() {
+        let bare = TxnPushItem::new("q", serde_json::json!(1)).partition("p");
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"queue":"q","partition":"p","payload":1}"#
+        );
+        let item = bare.headers([("k", "v")]);
+        let req = TransactionRequest::new(vec![TxnOperation::Push { items: vec![item] }]);
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"operations":[{"type":"push","items":[{"queue":"q","partition":"p","payload":1,"headers":{"k":"v"}}]}],"requiredLeases":[]}"#
         );
     }
 

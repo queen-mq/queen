@@ -24,7 +24,8 @@ class Defaults
         // broker knows.
         //
         // binaryPush: a push goes out as the binary push body (Http\PushBinary)
-        // instead of JSON. Items with a trace id stay JSON.
+        // instead of JSON. Items with a trace id stay JSON, and so do items
+        // with headers unless pushCompression frames them.
         'binaryPush' => false,
         // pushCompression (with binaryPush): the client frames the messages as
         // the broker stores them, mints their ids and zstd-compresses each
@@ -49,6 +50,25 @@ class Defaults
         'retentionSeconds' => 0,
         'completedRetentionSeconds' => 0,
         'encryptionEnabled' => false,
+    ];
+
+    /**
+     * What a queue keeps, and for how long. A reading queue (config() with
+     * `from`) keeps what its sources keep, so the broker refuses these on one
+     * (400 reading_queue): config() leaves out the QUEUE_DEFAULTS among them
+     * when it is given `from`, `where`, `partitionBy` or `start`, and sends
+     * only the ones the caller set.
+     */
+    public const READING_QUEUE_KEEPS = [
+        'retentionEnabled',
+        'retentionSeconds',
+        'completedRetentionSeconds',
+        'maxWaitTimeSeconds',
+        'dedupWindowSeconds',
+        'encryptionEnabled',
+        'maxSize',
+        'retentionSinkHold',
+        'retentionSinkHoldMaxSeconds',
     ];
 
     // `batch` and `maxPartitions` here are the AUTOPILOT-OFF defaults. With

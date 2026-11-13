@@ -502,6 +502,7 @@ impl EphemeralPushBuilder {
                     partition: self.partition.clone(),
                     payload: m.payload,
                     transaction_id: None,
+                    headers: None,
                 };
                 // Awaited one at a time: `add_to` is where `max_size` blocks, so
                 // a buffered push that resolved without awaiting would report

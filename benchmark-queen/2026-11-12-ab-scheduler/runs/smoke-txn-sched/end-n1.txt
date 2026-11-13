@@ -1,0 +1,7 @@
+{"status":"healthy","engine":"raft","version":"2.8.1","raft":{"role":"leader","leader":true,"term":1,"applied":48109,"commit":48109,"lag":0,"quorumAckMs":63,"storageReady":true,"clusterVersion":8,"kinds":8,"apply":{"failure":null,"skipped":[]}}}
+
+WARN_ERROR=10
+2026-11-12T15:02:33.789768147Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=8 serial=217 fallback=0 route_us=0 group_us=112
+2026-11-12T15:02:43.789795113Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=537 serial=3136 fallback=0 route_us=3 group_us=24
+2026-11-12T15:02:53.789886157Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=4925 serial=22109 fallback=0 route_us=4 group_us=23
+2026-11-12T15:03:03.790288289Z  INFO rsm: planner: cycles since the last line (route_us per cycle, group_us per parallel run) parallel=3371 serial=14627 fallback=0 route_us=4 group_us=24

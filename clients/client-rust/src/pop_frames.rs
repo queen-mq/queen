@@ -13,25 +13,34 @@
 //!
 //! ```text
 //! u32 body_len | u8 flags | u8[16] message id | [u8[16] trace id, flag 1]
-//! | u16 len, transactionId | [u16 len, producer, flag 2] | payload
+//! | u16 len, transactionId | [u16 len, producer, flag 2]
+//! | [u16 len, headers block, flag 8] | payload
 //! ```
 //!
 //! Message `i` of a record has offset `base_offset + i` and belongs to the
 //! delivery when that lies in the claim's `start..=end`. The JSON object in
 //! front holds what the JSON answer has beside its messages: the conflation
 //! echo and the autopilot's choice.
+//!
+//! A headers block is `u16 count | (u8 len, name | u16 len, value) x count`.
+//! The broker answers JSON for a claim that holds headers or links, as for an
+//! encrypted one, so the block is read here for completeness; a link frame
+//! (flag 16), which only the broker can resolve, is refused as damage.
 
 use std::cell::RefCell;
 
 use queen_protocol::{Message, PopResponse};
 
 use crate::error::{Error, Result};
+use crate::routing::Headers;
 use crate::uuid::format_uuid;
 
 const MAGIC: &[u8; 4] = b"QPF1";
 const FLAG_TRACE: u8 = 1;
 const FLAG_PRODUCER: u8 = 2;
 const FLAG_ENCRYPTED: u8 = 4;
+const FLAG_HEADERS: u8 = 8;
+const FLAG_LINK: u8 = 16;
 
 /// Largest record the decoder inflates: the broker's own bound on a stored one.
 const MAX_RECORD_BYTES: u64 = 1 << 30;
@@ -85,6 +94,23 @@ impl<'a> In<'a> {
         let n = self.u16()?;
         String::from_utf8(self.take(n)?.to_vec()).map_err(|_| damaged("a name is not UTF-8"))
     }
+}
+
+/// A frame's headers block: `u16 count | (u8 len, name | u16 len, value) x count`.
+fn headers_of(block: &[u8]) -> Result<Headers> {
+    let mut b = In::new(block, "a headers block is malformed");
+    let mut out = Headers::new();
+    for _ in 0..b.u16()? {
+        let n = b.u8()? as usize;
+        let name = String::from_utf8(b.take(n)?.to_vec())
+            .map_err(|_| damaged("a header name is not UTF-8"))?;
+        let value = b.text()?;
+        out.insert(name, value);
+    }
+    if !b.bytes.is_empty() {
+        return Err(damaged("a headers block is malformed"));
+    }
+    Ok(out)
 }
 
 /// Whether a pop answer's bytes are the framed one.
@@ -210,8 +236,17 @@ pub fn decode_pop_frames(bytes: &[u8]) -> Result<PopResponse> {
                 } else {
                     None
                 };
+                let headers = if flags & FLAG_HEADERS != 0 {
+                    let n = frame.u16()?;
+                    Some(frame.take(n)?)
+                } else {
+                    None
+                };
                 if flags & FLAG_ENCRYPTED != 0 {
                     return Err(damaged("a frame is encrypted"));
+                }
+                if flags & FLAG_LINK != 0 {
+                    return Err(damaged("a frame is a link"));
                 }
                 let offset = base + u64::from(i);
                 if offset < start || offset > end {
@@ -229,11 +264,13 @@ pub fn decode_pop_frames(bytes: &[u8]) -> Result<PopResponse> {
                             .map_err(|e| damaged(format!("a payload: {e}")))?
                     },
                     producer_sub,
+                    headers: headers.map(headers_of).transpose()?,
                     created_at: created_at.clone(),
                     partition_id: partition_id.clone(),
                     partition: partition.clone(),
                     lease_id: out.lease_id.clone(),
                     consumer_group: out.consumer_group.clone(),
+                    offset: i64::try_from(offset).ok(),
                 });
             }
         }
@@ -244,6 +281,25 @@ pub fn decode_pop_frames(bytes: &[u8]) -> Result<PopResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_headers_block_reads_as_the_broker_writes_it() {
+        // `frames::encode_headers([("source", "web"), ("type", "order.paid")])`.
+        let mut block = 2u16.to_le_bytes().to_vec();
+        for (k, v) in [("source", "web"), ("type", "order.paid")] {
+            block.push(k.len() as u8);
+            block.extend_from_slice(k.as_bytes());
+            block.extend_from_slice(&(v.len() as u16).to_le_bytes());
+            block.extend_from_slice(v.as_bytes());
+        }
+        let h = headers_of(&block).unwrap();
+        assert_eq!(h.len(), 2);
+        assert_eq!(h["type"], "order.paid");
+        assert!(headers_of(&block[..block.len() - 1]).is_err(), "truncated");
+        let mut long = block.clone();
+        long.push(0);
+        assert!(headers_of(&long).is_err(), "bytes after the last header");
+    }
 
     #[test]
     fn created_at_is_written_as_the_broker_writes_it() {

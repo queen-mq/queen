@@ -243,10 +243,63 @@ fn every_kind_pins_its_catalogue_version() {
     }
     assert_eq!(kinds_version_of(&all), crate::rsm::effect::VERSION_6 as u32);
     // Version 7 is an outcome shape (a push written as runs), not an effect
-    // kind: the effects stop at 6, the build reads 7.
+    // kind. Version 8 is one shape of one kind: a queue that takes part in a
+    // route (PLAN_ROUTING.md), its RouteCfg after the version-1 fields. It
+    // round-trips whole, and a queue without a route keeps its version-1
+    // bytes.
+    if let Effect::QueueUpsert { tenant, queue, cfg } = effect_sample(Kind::QueueUpsert) {
+        assert_eq!(
+            Effect::QueueUpsert {
+                tenant: tenant.clone(),
+                queue: queue.clone(),
+                cfg: cfg.clone(),
+            }
+            .version(),
+            VERSION_1
+        );
+        let mut routed = cfg.clone();
+        {
+            let r = routed.route_mut();
+            r.sources = vec![crate::rsm::effect::SourceRule {
+                queue: "orders".into(),
+                where_json: r#"[{"field":"data.kind","op":"=","value":"paid"}]"#.into(),
+            }];
+            r.partition_by = "data.customer".into();
+            r.hidden_group = "billing".into();
+            r.catching_up = true;
+            r.readers = vec!["z".into()];
+            r.holders = vec!["h".into()];
+            r.marks = vec![(7, 40), (9, 2)];
+        }
+        let v8 = Effect::QueueUpsert {
+            tenant,
+            queue,
+            cfg: routed.clone(),
+        };
+        assert_eq!(v8.version(), crate::rsm::effect::VERSION_8);
+        let bytes = encode_effect(&v8);
+        assert_eq!(
+            u16::from_le_bytes([bytes[2], bytes[3]]),
+            crate::rsm::effect::VERSION_8
+        );
+        let mut e = Entry::new(1_768_000_000_000_000, 1, 1);
+        e.add_command(uuid(9), crate::rsm::entry::Outcome::Empty, vec![v8.clone()])
+            .unwrap();
+        let back = decode_entry(&encode_entry(&e).expect("encode")).expect("decode");
+        assert_eq!(back.effects[0], v8, "a v8 queue upsert round-trips");
+        // The store's row: the second layout, the route after the fields.
+        let stored = crate::rsm::store::rows::queue_encode(&routed);
+        assert_eq!(stored[0], crate::rsm::store::rows::ROW_V2);
+        assert_eq!(
+            crate::rsm::store::rows::queue_decode(&stored).expect("row"),
+            routed
+        );
+        all.push(v8);
+    }
+    assert_eq!(kinds_version_of(&all), crate::rsm::effect::VERSION_8 as u32);
     assert_eq!(
         SUPPORTED_KINDS_VERSION,
-        crate::rsm::effect::VERSION_7 as u32
+        crate::rsm::effect::VERSION_8 as u32
     );
 }
 
@@ -585,9 +638,19 @@ fn optional_fields_survive_both_arms() {
         error: String::new(),
         retry_count: 0,
         failed_at_us: -1,
+        headers: Vec::new(),
     };
     let (back, _) = decode_effect(&encode_effect(&e)).unwrap();
     assert_eq!(back, e);
+    assert_eq!(e.version(), crate::rsm::effect::VERSION_1);
+    // A dead letter with headers is minted at version 8, and comes back whole.
+    let mut h = e.clone();
+    if let Effect::DlqInsert { headers, .. } = &mut h {
+        *headers = crate::frames::encode_headers([("type", "order")]);
+    }
+    assert_eq!(h.version(), crate::rsm::effect::VERSION_8);
+    let (back, _) = decode_effect(&encode_effect(&h)).unwrap();
+    assert_eq!(back, h);
 
     let e = Effect::TraceAppend {
         event: TraceEvent {
@@ -680,6 +743,7 @@ fn every_field_has_its_own_slot() {
         retention_sink_hold: "sink-16".into(),
         retention_sink_hold_max_seconds: 17,
         created_at_us: 18,
+        route: None,
     };
     let e = Effect::QueueUpsert {
         tenant: "t-19".into(),
@@ -778,6 +842,7 @@ fn every_field_has_its_own_slot() {
         error: "e-10".into(),
         retry_count: 11,
         failed_at_us: 12,
+        headers: Vec::new(),
     };
     assert_eq!(decode_effect(&encode_effect(&e)).unwrap().0, e);
 

@@ -47,6 +47,16 @@ pub(crate) struct Emit {
     pub window_end: i64,
     pub window_key: String,
     pub value: Value,
+    /// The source message this result is, unchanged: the sink links to it
+    /// rather than pushing its payload again. `None` for anything computed.
+    pub source: Option<SourceRef>,
+}
+
+/// A message of the cycle's own partition, as a cycle's `link` names it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SourceRef {
+    pub offset: i64,
+    pub transaction_id: String,
 }
 
 #[derive(Debug, Default)]
@@ -245,6 +255,7 @@ pub(crate) fn run_reduce(
                 window_end: entry.window_end,
                 window_key: entry.window_key,
                 value: entry.acc,
+                source: None,
             });
             if entry.seeded {
                 out.state_ops.push(StateOp::Delete { key: state_key });
@@ -402,6 +413,7 @@ fn build_session_emit(key: &str, s: &Session, gap_ms: i64) -> Emit {
         window_end: s.last_event.unwrap_or(start) + gap_ms,
         window_key: format_iso_ms(start),
         value: s.acc.clone(),
+        source: None,
     }
 }
 

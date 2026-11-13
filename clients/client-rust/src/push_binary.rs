@@ -16,13 +16,17 @@
 //!
 //! ```text
 //! body:  u32 groups | per group: u16 len, queue | u16 len, partition | u32 n | u32 z_len | z
-//! z:     one zstd frame of n frames: u32 body_len | u8 0 | u8[16] message id
-//!        | u16 len, transactionId | payload
+//! z:     one zstd frame of n frames: u32 body_len | u8 flags | u8[16] message id
+//!        | u16 len, transactionId | [u16 len, headers block, flag 8] | payload
 //! ```
 //!
 //! The message id is a version-7 UUID minted by the client; a message without
-//! its own transaction id uses the id's text. The broker checks every frame and
-//! keeps the compressed bytes as they are, so it does not compress them again.
+//! its own transaction id uses the id's text. A frame's flags are 0, or 8 when
+//! it carries headers: `u16 count | (u8 len, name | u16 len, value) x count`,
+//! in name order (broker catalogue version 8). The broker checks every frame
+//! and keeps the compressed bytes as they are, so it does not compress them
+//! again. The plain body (without flag 8) has no place for headers: a push
+//! whose messages carry some goes as the framed body or as JSON.
 //!
 //! A broker that does not know this body answers 400; a client sends it only
 //! when [`Config::binary_push`](crate::Config::binary_push) is set, so by
@@ -51,6 +55,7 @@ use queen_protocol::{
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
+use crate::routing::Headers;
 
 /// `Content-Type` of a binary push body.
 pub const CONTENT_TYPE: &str = "application/x-queen-push";
@@ -61,6 +66,8 @@ const FLAG_ZSTD: u8 = 1;
 const FLAG_COUNTS: u8 = 2;
 const FLAG_TXN: u8 = 4;
 const FLAG_FRAMES: u8 = 8;
+/// A frame's flag: a headers block follows its transaction id.
+const FRAME_HEADERS: u8 = 8;
 
 /// One partition's messages for [`encode_push_binary`] and
 /// [`encode_push_frames`].
@@ -192,6 +199,16 @@ pub fn encode_push_binary(
 /// as the broker stores them and compressed once, here. `counts`: the broker
 /// answers with [`PushCounts`] instead of one object per message.
 pub fn encode_push_frames(batches: &[PushBatch<'_>], counts: bool) -> Result<Vec<u8>> {
+    encode_push_frames_with(batches, &[], counts)
+}
+
+/// [`encode_push_frames`], message `i` of `batches[b]` with the headers
+/// `headers[b][i]` (none past the end of either).
+fn encode_push_frames_with(
+    batches: &[PushBatch<'_>],
+    headers: &[Vec<Option<&Headers>>],
+    counts: bool,
+) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(1024);
     out.extend_from_slice(MAGIC);
     out.push(if counts {
@@ -199,7 +216,7 @@ pub fn encode_push_frames(batches: &[PushBatch<'_>], counts: bool) -> Result<Vec
     } else {
         FLAG_FRAMES
     });
-    append_frame_groups(out, batches)
+    append_frame_groups(out, batches, headers)
 }
 
 /// Encode a binary transaction body: `head`, the JSON transaction body without
@@ -212,21 +229,67 @@ pub fn encode_transaction_frames(
     batches: &[PushBatch<'_>],
     counts: bool,
 ) -> Result<Vec<u8>> {
+    encode_transaction_frames_with(head, batches, &[], counts)
+}
+
+/// [`encode_transaction_frames`], with headers as [`encode_push_frames_with`]
+/// takes them.
+fn encode_transaction_frames_with(
+    head: &[u8],
+    batches: &[PushBatch<'_>],
+    headers: &[Vec<Option<&Headers>>],
+    counts: bool,
+) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(1024 + head.len());
     out.extend_from_slice(TXN_MAGIC);
     out.push(if counts { FLAG_COUNTS } else { 0 });
     out.extend_from_slice(&len32(head.len(), "the head")?);
     out.extend_from_slice(head);
-    append_frame_groups(out, batches)
+    append_frame_groups(out, batches, headers)
+}
+
+/// `headers` as a frame's block: `u16 count | (u8 len, name | u16 len, value)
+/// x count`, in name order, as the broker stores it. `None` for no headers: an
+/// empty block is written as none. An error when a name, a value or the whole
+/// block does not fit its length field; the caller then sends the JSON
+/// request.
+fn headers_block(headers: &Headers) -> Result<Option<Vec<u8>>> {
+    if headers.is_empty() {
+        return Ok(None);
+    }
+    let count = u16::try_from(headers.len())
+        .map_err(|_| Error::Invalid("more than 65535 headers on one message".into()))?;
+    let size: usize = headers.iter().map(|(k, v)| 3 + k.len() + v.len()).sum();
+    let mut out = Vec::with_capacity(2 + size);
+    out.extend_from_slice(&count.to_le_bytes());
+    // A BTreeMap of Strings iterates in byte order: the broker's name order.
+    for (name, value) in headers {
+        let len = u8::try_from(name.len())
+            .map_err(|_| Error::Invalid(format!("header name {name:?} is over 255 bytes")))?;
+        out.push(len);
+        out.extend_from_slice(name.as_bytes());
+        text16(&mut out, value, "a header value")?;
+    }
+    if out.len() > u16::MAX as usize {
+        return Err(Error::Invalid(
+            "a message's headers do not fit a frame (65535 bytes)".into(),
+        ));
+    }
+    Ok(Some(out))
 }
 
 /// Appends `u32 groups | per group: u16 len, queue | u16 len, partition | u32 n
 /// | u32 z_len | z` to `out`: each batch's messages framed as the broker stores
-/// them, with a version-7 id minted here, as one zstd frame.
-fn append_frame_groups(mut out: Vec<u8>, batches: &[PushBatch<'_>]) -> Result<Vec<u8>> {
+/// them, with a version-7 id minted here, as one zstd frame. Message `i` of
+/// `batches[b]` carries the headers `headers[b][i]`, when there are some.
+fn append_frame_groups(
+    mut out: Vec<u8>,
+    batches: &[PushBatch<'_>],
+    headers: &[Vec<Option<&Headers>>],
+) -> Result<Vec<u8>> {
     out.extend_from_slice(&len32(batches.len(), "the number of groups")?);
     let mut frames: Vec<u8> = Vec::new();
-    for batch in batches {
+    for (b, batch) in batches.iter().enumerate() {
         check(batch)?;
         frames.clear();
         frames.reserve(
@@ -246,11 +309,22 @@ fn append_frame_groups(mut out: Vec<u8>, batches: &[PushBatch<'_>]) -> Result<Ve
             } else {
                 own
             };
-            let body_len = 1 + 16 + 2 + txn.len() + payload.len();
+            let block = match headers.get(b).and_then(|h| h.get(i)).copied().flatten() {
+                Some(h) => headers_block(h)?,
+                None => None,
+            };
+            let mut body_len = 1 + 16 + 2 + txn.len() + payload.len();
+            if let Some(block) = &block {
+                body_len += 2 + block.len();
+            }
             frames.extend_from_slice(&len32(body_len, "a message")?);
-            frames.push(0);
+            frames.push(if block.is_some() { FRAME_HEADERS } else { 0 });
             frames.extend_from_slice(&id);
             text16(&mut frames, txn, "transaction id")?;
+            if let Some(block) = &block {
+                frames.extend_from_slice(&(block.len() as u16).to_le_bytes());
+                frames.extend_from_slice(block);
+            }
             frames.extend_from_slice(payload);
         }
         text16(&mut out, batch.queue, "queue name")?;
@@ -268,13 +342,20 @@ fn append_frame_groups(mut out: Vec<u8>, batches: &[PushBatch<'_>]) -> Result<Ve
 /// messages framed and compressed here, kept by the broker as they are.
 ///
 /// An error means an item does not fit the body (a name or a transaction id
-/// over 65535 bytes): the caller then sends the JSON request, and the broker
-/// answers that as it always did.
+/// over 65535 bytes, or headers on the plain body, which has no place for
+/// them): the caller then sends the JSON request, and the broker answers that
+/// as it always did.
 pub(crate) fn body_of(items: &[PushItem], compress: bool) -> Result<Vec<u8>> {
     // Every payload once, into one buffer the batches borrow from.
     let mut payloads: Vec<u8> = Vec::new();
     let mut pushed: Vec<Pushed<'_>> = Vec::with_capacity(items.len());
     for item in items {
+        let headers = item.headers.as_ref().filter(|h| !h.is_empty());
+        if headers.is_some() && !compress {
+            return Err(Error::Invalid(
+                "the plain binary push body carries no headers".into(),
+            ));
+        }
         let start = payloads.len();
         serde_json::to_writer(&mut payloads, &item.payload)?;
         pushed.push(Pushed {
@@ -286,11 +367,12 @@ pub(crate) fn body_of(items: &[PushItem], compress: bool) -> Result<Vec<u8>> {
                 .unwrap_or(DEFAULT_PARTITION),
             transaction_id: item.transaction_id.as_deref().unwrap_or(""),
             payload: start..payloads.len(),
+            headers,
         });
     }
-    let batches = batches_of(&pushed, &payloads);
+    let (batches, headers) = batches_of(&pushed, &payloads);
     if compress {
-        encode_push_frames(&batches, false)
+        encode_push_frames_with(&batches, &headers, false)
     } else {
         encode_push_binary(&batches, false, false)
     }
@@ -303,11 +385,20 @@ struct Pushed<'a> {
     partition: &'a str,
     transaction_id: &'a str,
     payload: std::ops::Range<usize>,
+    headers: Option<&'a Headers>,
 }
 
-/// `pushed` as batches: consecutive messages of one partition share one.
-fn batches_of<'a>(pushed: &[Pushed<'a>], payloads: &'a [u8]) -> Vec<PushBatch<'a>> {
+/// One headers entry per message of each batch: `None` for a message without.
+type BatchHeaders<'a> = Vec<Vec<Option<&'a Headers>>>;
+
+/// `pushed` as batches, consecutive messages of one partition sharing one,
+/// and each batch's headers, message by message.
+fn batches_of<'a>(
+    pushed: &[Pushed<'a>],
+    payloads: &'a [u8],
+) -> (Vec<PushBatch<'a>>, BatchHeaders<'a>) {
     let mut batches: Vec<PushBatch<'a>> = Vec::new();
+    let mut headers: BatchHeaders<'a> = Vec::new();
     for p in pushed {
         let same = batches
             .last()
@@ -319,14 +410,16 @@ fn batches_of<'a>(pushed: &[Pushed<'a>], payloads: &'a [u8]) -> Vec<PushBatch<'a
                 payloads: Vec::new(),
                 transaction_ids: Some(Vec::new()),
             });
+            headers.push(Vec::new());
         }
         let batch = batches.last_mut().expect("a batch");
         batch.payloads.push(&payloads[p.payload.clone()]);
         if let Some(ids) = batch.transaction_ids.as_mut() {
             ids.push(p.transaction_id);
         }
+        headers.last_mut().expect("a batch").push(p.headers);
     }
-    batches
+    (batches, headers)
 }
 
 /// A transaction as a binary body, when its pushes can travel in one: there is
@@ -368,6 +461,7 @@ pub(crate) fn transaction_frames(
                     .unwrap_or(DEFAULT_PARTITION),
                 transaction_id: item.transaction_id.as_deref().unwrap_or(""),
                 payload: start..payloads.len(),
+                headers: item.headers.as_ref().filter(|h| !h.is_empty()),
             });
             push_at.push(flat);
             flat += 1;
@@ -382,7 +476,8 @@ pub(crate) fn transaction_frames(
         .with_kv(req.kv.clone())
         .with_timers(req.timers.clone());
     let head = serde_json::to_vec(&head).ok()?;
-    let body = encode_transaction_frames(&head, &batches_of(&pushed, &payloads), false).ok()?;
+    let (batches, headers) = batches_of(&pushed, &payloads);
+    let body = encode_transaction_frames_with(&head, &batches, &headers, false).ok()?;
     head_at.append(&mut push_at);
     let order = head_at;
     let in_order = order.iter().enumerate().all(|(k, &at)| at == k);

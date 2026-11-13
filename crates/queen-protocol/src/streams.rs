@@ -14,6 +14,8 @@
 //!   engine exactly-once against its own state: either the window advanced,
 //!   the output was written and the input was acked, or none of it happened.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Deserializer, Serialize};
 
 // --------------------------------------------------------------- register
@@ -167,6 +169,19 @@ pub struct SinkPushItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub transaction_id: Option<String>,
+
+    /// The message's headers (catalogue version 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, String>>,
+
+    /// A link instead of a push (catalogue version 8): `{"offset",
+    /// "transactionId"}` of a message of the cycle's own partition, or with
+    /// `partitionId`, or `queue` and `partition`, of another. The sink then
+    /// holds that same message, id and transaction id included, and a broker
+    /// that links ignores `payload`; one older than links pushes `payload`, so
+    /// a client that keeps it there stays correct on both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<serde_json::Value>,
 }
 
 /// The source ack a cycle carries.
@@ -259,6 +274,12 @@ pub struct CycleResponse {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+
+    /// The code of a rolled-back cycle, when the broker gives one: a link that
+    /// could not resolve says `source_gone`, `source_mismatch` or
+    /// `reading_queue`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// `POST /streams/v1/state/partitions`: the partitions holding state for a
@@ -557,6 +578,8 @@ mod tests {
                 payload: serde_json::json!({"sum": 5}),
                 message_id: None,
                 transaction_id: None,
+                headers: None,
+                link: None,
             }],
             ack: Some(CycleAck {
                 transaction_id: "order-1".into(),
@@ -671,6 +694,8 @@ mod tests {
                     payload: serde_json::json!({"lost": true}),
                     message_id: None,
                     transaction_id: None,
+                    headers: None,
+                    link: None,
                 },
                 SinkPushItem {
                     queue: "out".into(),
@@ -678,6 +703,8 @@ mod tests {
                     payload: serde_json::json!({"kept": true}),
                     message_id: None,
                     transaction_id: None,
+                    headers: None,
+                    link: None,
                 },
             ],
             ack: None,
@@ -1106,10 +1133,45 @@ mod tests {
             payload: serde_json::json!({ "n": 1 }),
             message_id: None,
             transaction_id: None,
+            headers: None,
+            link: None,
         };
         assert_eq!(
             serde_json::to_string(&item).unwrap(),
             r#"{"queue":"out","partition":"eu","payload":{"n":1}}"#
         );
+    }
+
+    #[test]
+    fn a_sink_item_links_with_its_payload_kept_for_an_older_broker() {
+        let item = SinkPushItem {
+            queue: "out".into(),
+            partition: Some("eu".into()),
+            payload: serde_json::json!({ "n": 1 }),
+            message_id: None,
+            transaction_id: None,
+            headers: Some([("type".to_string(), "x".to_string())].into()),
+            link: Some(serde_json::json!({ "offset": 41, "transactionId": "t1" })),
+        };
+        assert_eq!(
+            serde_json::to_string(&item).unwrap(),
+            concat!(
+                r#"{"queue":"out","partition":"eu","payload":{"n":1},"#,
+                r#""headers":{"type":"x"},"link":{"offset":41,"transactionId":"t1"}}"#,
+            )
+        );
+        let back: SinkPushItem =
+            serde_json::from_str(&serde_json::to_string(&item).unwrap()).unwrap();
+        assert_eq!(back, item);
+    }
+
+    #[test]
+    fn a_cycle_a_link_rolled_back_says_why() {
+        let wire = r#"{"success":false,"error":"push item at index 0: offset 41 is gone","reason":"source_gone"}"#;
+        let got: CycleResponse = serde_json::from_str(wire).unwrap();
+        assert!(!got.success);
+        assert_eq!(got.reason.as_deref(), Some("source_gone"));
+        let committed: CycleResponse = serde_json::from_str(r#"{"success":true}"#).unwrap();
+        assert_eq!(committed.reason, None);
     }
 }

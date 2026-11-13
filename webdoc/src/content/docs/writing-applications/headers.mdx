@@ -1,0 +1,59 @@
+---
+title: "Headers: what a message is, beside what it says"
+description: "Give a message headers, a small map of strings stored in clear beside its payload: its type, its trace context, its source. A where reads them without the payload, the Kafka facade maps them, and a link adds its own."
+type: how-to
+tier: use
+sidebar:
+  label: "Headers"
+  order: 4.5
+sourceOfTruth:
+  - server/src/frames.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/kafka_inproc.rs
+  - server/src/rsm/planner/timers.rs
+  - server/src/rsm/facade/remote.rs
+---
+
+A message can carry headers: a map of strings, stored beside its payload.
+
+```js
+await queen.queue('orders').partition('order-9137').push([{
+  transactionId: 'order-9137-paid',
+  data: { orderId: 9137, total: 120 },
+  headers: { type: 'order.paid', traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' },
+}])
+```
+
+The headers come back on every read of the message: a pop, a fetch, the feed, the message browser and the dead-letter list.
+
+<Why>without headers, an application puts its trace context and its routing facts inside the payload, which forces every payload to be a JSON object, makes every filter parse the body, and leaves tools that must not read the body (it may hold personal data) with nothing to read.</Why>
+
+| Rule | |
+| --- | --- |
+| Names | 1 to 64 bytes of `a-z`, `0-9`, `.`, `_` and `-`; lower case only |
+| Values | any UTF-8 string |
+| Reserved | names starting with `queen-` are the broker's |
+| How many | 64 per message by default (`QUEEN_MAX_HEADERS`) |
+| How big | 8 KiB per message by default, names and values together (`QUEEN_MAX_HEADER_BYTES`, at most 64 KiB) |
+| Encryption | never: headers are stored in clear on an encrypted queue too, so routing and monitoring read them without the body. Put no secret and no personal data in a header. |
+| Dedup | not part of it: `transactionId` stays the key |
+| Dead letters | a dead letter keeps the message's headers, and a replay sends them again |
+| Timers | a schedule takes `headers` too, and the message it fires carries them |
+
+A header describes the message: what it is, where it came from, which trace it belongs to. It never says where the message should go. Queen routes on a header only when a reader asks for it in its own [`where`](/writing-applications/routing/): `headers.type = 'order.paid'`. Such a condition never reads the payload, so it costs little and works on an encrypted queue.
+
+Names that tools understand, documented and not enforced: `traceparent` and `tracestate` (W3C trace context), `type`, `content-type`.
+
+## Headers and links
+
+A [link](/writing-applications/routing/) can carry headers of its own. Reading through it gives the source's headers with the link's written over them (the link's value wins for a name both have). That is how a hop adds its own trace context, or a stamp, to a message it does not copy.
+
+## Headers and Kafka
+
+A record produced through the Kafka facade keeps its headers exactly as they came, for Kafka consumers. Its headers whose value is UTF-8 are also stored as the message's headers, with their names in lower case (a name that is not a valid header name, or a repeated one, is left out of that copy), so a `where` and a native consumer read them too.
+
+## On the wire
+
+A push item, a push operation of a transaction, a timer's schedule and a stream cycle's push item take `"headers": {"name": "value"}`. A client that sends frames (the framed push, the binary transaction) marks a frame with flag `8` and puts the block after the transaction id: `u16 length | u16 count | (u8 name length | name | u16 value length | value) × count`, names sorted. A framed pop answers in JSON for any record that holds headers, so a client that reads frames never meets a flag it does not know.
+
+All of this needs every node on a broker that reads catalogue version 8; before that, headers are refused with `cluster_version`.

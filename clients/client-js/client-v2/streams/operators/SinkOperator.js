@@ -19,11 +19,23 @@
  * If the sink has a partition function (opts.partition), it's called with
  * the value to derive the partition name; otherwise the source partition
  * name is reused (preserves entity-level co-partitioning by default).
+ *
+ * Links (PLAN_ROUTING.md §7): a record that is its source message unchanged
+ * -- only where/filter/keyBy (and a gate, on a queue source) before the sink,
+ * no map, flatMap, window or pattern -- is written as a `link` to that
+ * message instead of a push of a copy: the sink holds the same message, id
+ * and transactionId, and the log keeps about 20 bytes instead of its payload.
+ * A feed source commits `link` operations; a queue source's cycle
+ * (`/streams/v1/cycle`) sends push items with `link: {offset,
+ * transactionId}`. `opts.link: false` pushes copies, as before. `link` is not
+ * in `config`: it changes how a record travels, not the chain's shape, and a
+ * hash change would refuse every running query's next deploy.
  */
 export class SinkOperator {
   constructor(target, opts = {}) {
     this.kind = 'sink'
     this.partitionResolver = opts.partition
+    this.link = opts.link !== false
     if (typeof target === 'function') {
       this.route = target
       this.queues = null
@@ -51,13 +63,26 @@ export class SinkOperator {
   /**
    * Build sink push items from a list of {key, value, sourceMsg} entries.
    * Called by the Runner after upstream operators have produced final values.
+   *
+   * `link`: the values are their source messages unchanged (the Runner knows
+   * from the chain), so each item also names its message, `link: { offset,
+   * transactionId }` of the cycle's own partition. The payload goes too: a
+   * broker that links ignores it, and one older than links ignores `link`
+   * and stores the payload, as before, instead of an empty message.
    */
-  buildPushItems(entries, sourcePartitionName) {
-    return entries.map(({ value, sourceMsg }) => ({
-      queue: this.queueName,
-      partition: this._resolvePartition(value, sourcePartitionName),
-      payload: payloadOf(value)
-    }))
+  buildPushItems(entries, sourcePartitionName, { link = false } = {}) {
+    return entries.map(({ value, sourceMsg }) => {
+      const item = {
+        queue: this.queueName,
+        partition: this._resolvePartition(value, sourcePartitionName),
+        payload: payloadOf(value)
+      }
+      if (link && sourceMsg && Number.isSafeInteger(sourceMsg.offset) &&
+          typeof sourceMsg.transactionId === 'string' && sourceMsg.transactionId.length > 0) {
+        item.link = { offset: sourceMsg.offset, transactionId: sourceMsg.transactionId }
+      }
+      return item
+    })
   }
 
   /**
@@ -108,6 +133,33 @@ export class SinkOperator {
 /** A pushed payload is an object: anything else travels as `{ value }`. */
 export function payloadOf(value) {
   return value === null || typeof value !== 'object' ? { value } : value
+}
+
+// A commit with links refused because of them, by what the reason means for
+// the rest of the run (decided as the Python and Go SDKs decide it): the broker
+// or the credential cannot link, or one linked message is gone or changed.
+const LINKS_OFF = new Set(['cluster_version', 'scope_denied', 'reading_queue', 'bad_request'])
+const LINK_ONCE = new Set(['source_gone', 'source_mismatch'])
+
+/**
+ * What a refused commit with links says about links, read from the answer's
+ * reason code, never its text:
+ *
+ * - 'off': the broker or the credential cannot link (`cluster_version`,
+ *   `scope_denied`, `reading_queue`, or a 400 / `bad_request` from a broker
+ *   that does not know `link`). The runner pushes copies for the rest of the
+ *   run, as before links, and says so once.
+ * - 'once': a linked message is gone or changed at its source
+ *   (`source_gone`, `source_mismatch`). That commit goes again as pushes,
+ *   and the runner links after it.
+ * - null: a refusal for some other reason.
+ */
+export function linkRefusal(err) {
+  if (!err) return null
+  const codes = [err.reason, err.code, err.body && err.body.reason, err.body && err.body.code]
+  if (codes.some((c) => LINK_ONCE.has(c))) return 'once'
+  if (codes.some((c) => LINKS_OFF.has(c)) || err.status === 400) return 'off'
+  return null
 }
 
 function requireQueue(name) {

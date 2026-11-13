@@ -2091,6 +2091,69 @@ fn render_guard_families(s: &mut String) {
         "gauge",
         &[("", PARKED_POPS.load(Ordering::Relaxed))],
     );
+    // Routing (PLAN_ROUTING.md §11).
+    fam(
+        "queen_route_links_total",
+        "Links this node's planner appended to reading queues and filtered groups",
+        "counter",
+        &[(
+            "",
+            crate::rsm::planner::route::ROUTED.load(Ordering::Relaxed),
+        )],
+    );
+    fam(
+        "queen_route_unrouted_total",
+        "Messages a reader's where took but whose partitionBy field was missing, so not routed",
+        "counter",
+        &[(
+            "{reason=\"partition_field\"}",
+            crate::rsm::planner::route::UNROUTED.load(Ordering::Relaxed),
+        )],
+    );
+    fam(
+        "queen_link_reads_total",
+        "Links read through to their message on this node",
+        "counter",
+        &[(
+            "",
+            crate::rsm::route::link::LINK_READS.load(Ordering::Relaxed),
+        )],
+    );
+    fam(
+        "queen_link_expired_at_source_total",
+        "Links whose message its source no longer keeps, skipped on read",
+        "counter",
+        &[(
+            "",
+            crate::rsm::route::link::LINK_EXPIRED.load(Ordering::Relaxed),
+        )],
+    );
+    let ages: Vec<(String, u64)> = crate::rsm::maintenance::holder_floor_ages()
+        .into_iter()
+        .map(|(q, age)| (queue_label(&q), age))
+        .collect();
+    let rows: Vec<(&str, u64)> = ages.iter().map(|(l, a)| (l.as_str(), *a)).collect();
+    fam(
+        "queen_holder_floor_age_seconds",
+        "Per source queue, how old the oldest message its reading queues, filtered groups and link targets keep unconsumed is: how far back they hold its completed retention",
+        "gauge",
+        &rows,
+    );
+}
+
+/// `{queue="..."}`, the name escaped as the exposition format wants.
+fn queue_label(q: &str) -> String {
+    let mut lbl = String::from("{queue=\"");
+    for c in q.chars() {
+        match c {
+            '\\' => lbl.push_str("\\\\"),
+            '"' => lbl.push_str("\\\""),
+            '\n' => lbl.push_str("\\n"),
+            _ => lbl.push(c),
+        }
+    }
+    lbl.push_str("\"}");
+    lbl
 }
 
 /// Spawn the background samplers feeding the dashboard-facing gauges:

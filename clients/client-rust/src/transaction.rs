@@ -8,12 +8,13 @@ use queen_protocol::kv::KvOperation;
 use queen_protocol::timers::TimerOperation;
 use queen_protocol::{
     AckStatus, Expiry, Message, TransactionRequest, TransactionResponse, TxnAckOperation,
-    TxnOperation, TxnPushItem,
+    TxnOperation, TxnPushItem, DEFAULT_PARTITION,
 };
 
 use crate::error::{Error, Result};
 use crate::http::Opts;
 use crate::inner::Inner;
+use crate::routing::{self, Headers, LinkFrom, LinkSource};
 use crate::uuid;
 
 /// Builds one transaction.
@@ -69,6 +70,67 @@ pub struct TransactionBuilder {
     /// lock's own renewal changes it.
     guards: Vec<crate::locks::Lock>,
     timers: Vec<TimerOperation>,
+    /// The `link` operations, each with its place among `operations`: it goes
+    /// before `operations[at]`, so after everything staged before it.
+    links: Vec<(usize, LinkOp)>,
+}
+
+/// One `link` operation (broker catalogue version 8): the message `from`
+/// names, into `queue`'s `partition`, with the link's own headers.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct LinkOp {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    queue: String,
+    partition: String,
+    from: LinkFrom,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    headers: Option<Headers>,
+}
+
+/// The JSON body of a bundle that links: [`TransactionRequest`]'s, key for
+/// key, with each `link` operation at its place among the others. A link has
+/// no place in the binary body, so a bundle with one always goes as this.
+#[derive(Serialize)]
+struct Linked<'a> {
+    operations: Vec<LinkedOp<'a>>,
+    #[serde(rename = "requiredLeases")]
+    required_leases: &'a [String],
+    #[serde(skip_serializing_if = "is_empty")]
+    kv: &'a [KvOperation],
+    #[serde(skip_serializing_if = "is_empty")]
+    timers: &'a [TimerOperation],
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum LinkedOp<'a> {
+    Op(&'a TxnOperation),
+    Link(&'a LinkOp),
+}
+
+fn is_empty<T>(items: &&[T]) -> bool {
+    items.is_empty()
+}
+
+impl<'a> Linked<'a> {
+    fn new(req: &'a TransactionRequest, links: &'a [(usize, LinkOp)]) -> Self {
+        let mut operations = Vec::with_capacity(req.operations.len() + links.len());
+        let mut links = links.iter().peekable();
+        for (i, op) in req.operations.iter().enumerate() {
+            while let Some((_, link)) = links.next_if(|(at, _)| *at <= i) {
+                operations.push(LinkedOp::Link(link));
+            }
+            operations.push(LinkedOp::Op(op));
+        }
+        operations.extend(links.map(|(_, link)| LinkedOp::Link(link)));
+        Self {
+            operations,
+            required_leases: &req.required_leases,
+            kv: &req.kv,
+            timers: &req.timers,
+        }
+    }
 }
 
 impl TransactionBuilder {
@@ -80,6 +142,7 @@ impl TransactionBuilder {
             kv: Vec::new(),
             guards: Vec::new(),
             timers: Vec::new(),
+            links: Vec::new(),
         }
     }
 
@@ -147,6 +210,7 @@ impl TransactionBuilder {
             payload: serde_json::to_value(payload)?,
             transaction_id: Some(uuid::uuidv7()),
             trace_id: None,
+            headers: None,
         })
     }
 
@@ -163,11 +227,15 @@ impl TransactionBuilder {
             payload: serde_json::to_value(payload)?,
             transaction_id: Some(uuid::uuidv7()),
             trace_id: None,
+            headers: None,
         })
     }
 
     /// Push a fully-formed item. Unlike a plain push, a `traceId` set here is
     /// stored and comes back at delivery.
+    ///
+    /// Headers ride the item ([`TxnPushItem::headers`]), checked as
+    /// [`crate::QueueBuilder::headers`] checks them.
     pub fn push_item(mut self, item: TxnPushItem) -> Result<Self> {
         if let Some(t) = &item.trace_id {
             if !uuid::is_valid_uuid(t) {
@@ -176,19 +244,123 @@ impl TransactionBuilder {
                 )));
             }
         }
+        routing::check_headers(item.headers.as_ref())?;
         // Consecutive pushes to the same (queue, partition) join one operation,
-        // matching how the broker groups frames anyway.
+        // matching how the broker groups frames anyway — unless a link was
+        // staged in between, which must stay between them.
+        let after_link = self
+            .links
+            .last()
+            .is_some_and(|(at, _)| *at == self.operations.len());
         match self.operations.last_mut() {
             Some(TxnOperation::Push { items })
-                if items
-                    .last()
-                    .is_some_and(|l| l.queue == item.queue && l.partition == item.partition) =>
+                if !after_link
+                    && items.last().is_some_and(|l| {
+                        l.queue == item.queue && l.partition == item.partition
+                    }) =>
             {
                 items.push(item);
             }
             _ => self
                 .operations
                 .push(TxnOperation::Push { items: vec![item] }),
+        }
+        Ok(self)
+    }
+
+    /// Link messages into `queue`'s `partition`: the target gets each one with
+    /// the same id and transaction id, and its payload is not sent or stored
+    /// again (broker catalogue version 8). One `link` operation per message.
+    ///
+    /// A message is named as a pop returned it (a [`Message`]: its
+    /// `partitionId`, `offset`, `transactionId` and consumer group), as a feed
+    /// entry names it ([`crate::feed::FeedEntry`]), or by hand
+    /// ([`LinkFrom`]). The link commits with the rest of the bundle or not at
+    /// all: a message its source no longer keeps rolls the bundle back
+    /// (`source_gone`), as do a transaction id that does not match
+    /// (`source_mismatch`) and a reading queue as the target
+    /// (`reading_queue`). A target partition that already holds the message
+    /// makes its link a no-op that answers `duplicate: true`, so forwarding is
+    /// safe to retry.
+    ///
+    /// ```no_run
+    /// # async fn example(queen: queen_mq::Queen, msg: queen_mq::Message) -> queen_mq::Result<()> {
+    /// queen
+    ///     .transaction()
+    ///     .ack(&msg)
+    ///     .link_with_headers("manual-review", &msg.partition, [&msg], [("review-reason", "amount")])?
+    ///     .commit()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn link<'a, I, S>(
+        self,
+        queue: impl Into<String>,
+        partition: impl Into<String>,
+        messages: I,
+    ) -> Result<Self>
+    where
+        I: IntoIterator<Item = &'a S>,
+        S: LinkSource + ?Sized + 'a,
+    {
+        self.link_op(queue.into(), partition.into(), messages, None)
+    }
+
+    /// [`Self::link`] with the link's own headers. A reader of the target sees
+    /// the source message's headers with these written over them.
+    pub fn link_with_headers<'a, I, S, H, K, V>(
+        self,
+        queue: impl Into<String>,
+        partition: impl Into<String>,
+        messages: I,
+        headers: H,
+    ) -> Result<Self>
+    where
+        I: IntoIterator<Item = &'a S>,
+        S: LinkSource + ?Sized + 'a,
+        H: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let mut own = None;
+        routing::extend_headers(&mut own, headers);
+        self.link_op(queue.into(), partition.into(), messages, own)
+    }
+
+    fn link_op<'a, I, S>(
+        mut self,
+        queue: String,
+        partition: String,
+        messages: I,
+        headers: Option<Headers>,
+    ) -> Result<Self>
+    where
+        I: IntoIterator<Item = &'a S>,
+        S: LinkSource + ?Sized + 'a,
+    {
+        if queue.is_empty() {
+            return Err(Error::Invalid("link: name the queue to link into".into()));
+        }
+        routing::check_headers(headers.as_ref())?;
+        let headers = headers.filter(|h| !h.is_empty());
+        let partition = if partition.is_empty() {
+            DEFAULT_PARTITION.to_string()
+        } else {
+            partition
+        };
+        let at = self.operations.len();
+        for m in messages {
+            self.links.push((
+                at,
+                LinkOp {
+                    kind: "link",
+                    queue: queue.clone(),
+                    partition: partition.clone(),
+                    from: m.link_from()?,
+                    headers: headers.clone(),
+                },
+            ));
         }
         Ok(self)
     }
@@ -310,15 +482,16 @@ impl TransactionBuilder {
         self.timer(TimerOperation::cancel(queue, timer_key))
     }
 
-    /// How many operations are staged. Riders are not operations and are not
-    /// counted here — they occupy their own arrays, and their results sit after
-    /// the operations' in the response.
+    /// How many operations are staged (each link is one). Riders are not
+    /// operations and are not counted here — they occupy their own arrays,
+    /// and their results sit after the operations' in the response.
     pub fn len(&self) -> usize {
-        self.operations.len()
+        self.operations.len() + self.links.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.operations.is_empty()
+            && self.links.is_empty()
             && self.kv.is_empty()
             && self.guards.is_empty()
             && self.timers.is_empty()
@@ -382,7 +555,7 @@ impl TransactionBuilder {
         }
 
         // Where the `kv` rider starts in the flat `results` space: one slot
-        // per pushed item and one per ack come first.
+        // per pushed item, per ack and per link come first.
         let ops_flat: usize = self
             .operations
             .iter()
@@ -390,12 +563,14 @@ impl TransactionBuilder {
                 TxnOperation::Push { items } => items.len(),
                 TxnOperation::Ack(_) => 1,
             })
-            .sum();
+            .sum::<usize>()
+            + self.links.len();
         let base = TransactionRequest::new(self.operations)
             .with_required_leases(self.leases)
             .with_kv(self.kv)
             .with_timers(self.timers);
         let guards = self.guards;
+        let links = self.links;
 
         // A bundle is sent again in ONE case: its guard lost to the lock's
         // own background renewal, which moved the token between the moment
@@ -419,8 +594,18 @@ impl TransactionBuilder {
                 kv.append(&mut req.kv);
                 req.kv = kv;
             }
-            let resp: Option<TransactionResponse> =
-                self.inner.http.transaction(&req, &Opts::default()).await?;
+            let resp: Option<TransactionResponse> = if links.is_empty() {
+                self.inner.http.transaction(&req, &Opts::default()).await?
+            } else {
+                self.inner
+                    .http
+                    .post_json(
+                        "/api/v1/transaction",
+                        &Linked::new(&req, &links),
+                        &Opts::default(),
+                    )
+                    .await?
+            };
             let resp =
                 resp.ok_or_else(|| Error::Decode("transaction returned an empty body".into()))?;
             let lost_guard = resp.lost_precondition().and_then(|lost| {
@@ -482,12 +667,128 @@ mod tests {
             trace_id: None,
             data: serde_json::json!(null),
             producer_sub: None,
+            headers: None,
             created_at: "2026-08-04T10:00:00Z".into(),
             partition_id: "p1".into(),
             partition: "Default".into(),
             lease_id: lease.into(),
             consumer_group: group.into(),
+            offset: Some(41),
         }
+    }
+
+    /// The body `commit` sends for a bundle with links.
+    fn linked_body(t: &TransactionBuilder) -> serde_json::Value {
+        let req = TransactionRequest::new(t.operations.clone())
+            .with_required_leases(t.leases.clone())
+            .with_kv(t.kv.clone())
+            .with_timers(t.timers.clone());
+        serde_json::to_value(Linked::new(&req, &t.links)).unwrap()
+    }
+
+    #[test]
+    fn a_link_is_one_operation_per_message_at_its_place() {
+        let entry_from = crate::LinkFrom::by_name("orders", "order-1", 7, "t-feed");
+        let t = queen()
+            .transaction()
+            .ack(&msg("t1", "L1", "billing"))
+            .link("review", "order-1", [&msg("t1", "L1", "billing")])
+            .unwrap()
+            .push_to("audit", "order-1", serde_json::json!({"n": 1}))
+            .unwrap()
+            .link_with_headers("review", "", [&entry_from], [("review-reason", "amount")])
+            .unwrap();
+        assert_eq!(t.len(), 4);
+        let body = linked_body(&t);
+        let ops = body["operations"].as_array().unwrap();
+        let kinds: Vec<&str> = ops.iter().map(|o| o["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, vec!["ack", "link", "push", "link"]);
+        assert_eq!(
+            ops[1],
+            serde_json::json!({"type": "link", "queue": "review", "partition": "order-1",
+                "from": {"partitionId": "p1", "offset": 41, "transactionId": "t1",
+                         "consumerGroup": "billing"}})
+        );
+        assert_eq!(
+            ops[3],
+            serde_json::json!({"type": "link", "queue": "review", "partition": "Default",
+                "from": {"queue": "orders", "partition": "order-1", "offset": 7,
+                         "transactionId": "t-feed"},
+                "headers": {"review-reason": "amount"}})
+        );
+        assert_eq!(body["requiredLeases"], serde_json::json!(["L1"]));
+        assert!(body.get("kv").is_none() && body.get("timers").is_none());
+    }
+
+    #[test]
+    fn a_bundle_without_links_is_written_as_the_request_type_writes_it() {
+        let t = queen()
+            .transaction()
+            .ack(&msg("t1", "L1", "g"))
+            .push_to("out", "p", serde_json::json!(1))
+            .unwrap()
+            .kv_delete("ns", "k");
+        let req = TransactionRequest::new(t.operations.clone())
+            .with_required_leases(t.leases.clone())
+            .with_kv(t.kv.clone());
+        assert_eq!(
+            serde_json::to_string(&Linked::new(&req, &[])).unwrap(),
+            serde_json::to_string(&req).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_push_after_a_link_does_not_join_the_push_before_it() {
+        let t = queen()
+            .transaction()
+            .push_to("out", "p", serde_json::json!(1))
+            .unwrap()
+            .link("out", "p", [&msg("t1", "L1", "g")])
+            .unwrap()
+            .push_to("out", "p", serde_json::json!(2))
+            .unwrap();
+        let kinds: Vec<String> = linked_body(&t)["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["type"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds, vec!["push", "link", "push"]);
+    }
+
+    #[test]
+    fn a_link_needs_an_offset_a_queue_and_names_the_broker_takes() {
+        let mut no_offset = msg("t1", "L1", "g");
+        no_offset.offset = None;
+        let err = queen()
+            .transaction()
+            .link("review", "p", [&no_offset])
+            .err()
+            .expect("no offset, no link")
+            .to_string();
+        assert!(err.contains("carries no offset"), "{err}");
+        assert!(queen()
+            .transaction()
+            .link("", "p", [&msg("t1", "L1", "g")])
+            .is_err());
+        assert!(queen()
+            .transaction()
+            .link_with_headers("review", "p", [&msg("t1", "L1", "g")], [("Bad Name", "x")])
+            .is_err());
+        // An empty list stages nothing.
+        let t = queen()
+            .transaction()
+            .link("review", "p", Vec::<&Message>::new())
+            .unwrap();
+        assert!(t.is_empty());
+    }
+
+    #[test]
+    fn a_push_items_headers_are_checked() {
+        let bad = TxnPushItem::new("q", serde_json::json!(1)).headers([("queen-x", "1")]);
+        assert!(queen().transaction().push_item(bad).is_err());
+        let good = TxnPushItem::new("q", serde_json::json!(1)).headers([("type", "a")]);
+        assert!(queen().transaction().push_item(good).is_ok());
     }
 
     #[test]

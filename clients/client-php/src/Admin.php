@@ -4,6 +4,7 @@ namespace Queen;
 
 use GuzzleHttp\Promise\PromiseInterface;
 use Queen\Http\HttpClient;
+use Queen\Support\Where;
 
 class Admin
 {
@@ -268,6 +269,26 @@ class Admin
     public function seekConsumerGroup(string $consumerGroup, string $queueName, array $options = []): mixed
     {
         return $this->httpClient->post('/api/v1/consumer-groups/' . rawurlencode($consumerGroup) . '/queues/' . rawurlencode($queueName) . '/seek', $options);
+    }
+
+    /**
+     * Change a filtered group's where (QueueBuilder::where()) on purpose: it
+     * applies from the next push, and the group's pops then send the new one.
+     * $where is one string or a list of conditions (Support\Where).
+     *
+     *     $queen->admin()->setConsumerGroupWhere('billing', 'order-events', "data.kind = 'order.paid'");
+     *
+     * The broker answers 404 when the group does not filter that queue (a
+     * group starts filtering at its first pop with a where), which throws an
+     * HttpException. Delete a filtered group as any other:
+     * deleteConsumerGroupForQueue().
+     */
+    public function setConsumerGroupWhere(string $consumerGroup, string $queueName, string|array $where): mixed
+    {
+        return $this->httpClient->post(
+            '/api/v1/consumer-groups/' . rawurlencode($consumerGroup) . '/subscription',
+            ['queue' => $queueName, 'where' => Where::of($where)],
+        );
     }
 
     // ===========================

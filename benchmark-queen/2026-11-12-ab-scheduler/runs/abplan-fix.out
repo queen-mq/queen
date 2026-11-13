@@ -1,0 +1,15 @@
+[17:20:10] abplan-fix start
+[17:20:10] == push on sched2
+fix-push-sched2 [17:21:45]   500,000: offered 499,984 | pushed 499,977 | consumed 499,960 | shed 0 errors 0 | push p50 2.0 p99 3.6 | e2e p50 3.3 p99 6.0 | cores 5.0 / 2.7 / 2.3 | loader 4.1c  OK 
+fix-push-sched2 [17:22:59] 1,000,000: offered 999,983 | pushed 999,996 | consumed 999,969 | shed 0 errors 0 | push p50 2.9 p99 5.4 | e2e p50 5.8 p99 10.1 | cores 7.2 / 3.6 / 2.9 | loader 7.3c  OK 
+fix-push-sched2 [17:24:13] 1,500,000: offered 1,499,979 | pushed 1,500,029 | consumed 1,500,066 | shed 0 errors 0 | push p50 3.4 p99 6.5 | e2e p50 7.3 p99 12.7 | cores 9.4 / 4.7 / 3.6 | loader 10.2c  OK 
+fix-push-sched2 [17:25:27] 2,000,000: offered 2,000,026 | pushed 1,999,959 | consumed 2,000,162 | shed 0 errors 0 | push p50 4.2 p99 11.0 | e2e p50 9.5 p99 22.0 | cores 11.7 / 5.8 / 4.3 | loader 13.2c  OK 
+fix-push-sched2 [17:26:41] 2,500,000: offered 2,500,006 | pushed 2,500,063 | consumed 2,500,100 | shed 0 errors 0 | push p50 5.8 p99 78.8 | e2e p50 14.1 p99 103.4 | cores 13.8 / 6.7 / 4.8 | loader 16.2c  OK 
+fix-push-sched2 [17:27:55] 3,000,000: offered 2,999,852 | pushed 2,717,323 | consumed 2,716,804 | shed 5,477,400 errors 0 | push p50 655.4 p99 1605.6 | e2e p50 688.1 p99 1638.4 | cores 15.0 / 8.2 / 5.2 | loader 18.5c  NOT CARRIED 
+fix-push-sched2 [17:27:55] stopping at 3000000
+[17:28:01] == t10 on sched2
+fix-t10-sched2 [17:29:27]   200,000: offered 200,000 | workers 20,000 txn/s = 199,996 msg/s | read 199,988 | shed 0 errors 0 aborts 0 | commit p50 2.2 p99 4.2 | e2e p50 31 p99 59 | feed push p50 2.8 p99 4.9 | cores 11.0 / 5.9 / 4.7 | loaders 9.3c  OK 
+fix-t10-sched2 [17:30:34]   240,000: offered 240,013 | workers 24,003 txn/s = 240,029 msg/s | read 240,038 | shed 0 errors 0 aborts 0 | commit p50 3.0 p99 5.6 | e2e p50 42 p99 82 | feed push p50 3.4 p99 6.0 | cores 12.0 / 6.6 / 5.1 | loaders 10.8c  OK 
+[17:30:37] == t10kv on sched2
+fix-t10kv-sched2 [17:32:10]   200,000: offered 200,000 | workers 19,987 txn/s = 199,869 msg/s | read 199,883 | shed 0 errors 0 aborts 0 | commit p50 4.7 p99 8.6 | e2e p50 56 p99 115 | feed push p50 3.9 p99 7.0 | cores 12.4 / 6.9 / 5.2 | loaders 9.4c  OK 
+[17:32:13] == t10w on sched2

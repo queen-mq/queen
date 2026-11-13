@@ -61,6 +61,9 @@ digest: >-
 # facade/real.rs carry each request's client scope (None without a client token) and refuse a name
 # outside it 403 scope_denied before any command is built (server/src/scope.rs, b24b53599); main.rs
 # declares the scope module. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
+# states changes.
 # sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): raft/admin.rs runs a
 # checked membership change on a task of its own until openraft has taken its second step, so a
 # request that went away (its deadline, a closed connection) no longer leaves a joint configuration;

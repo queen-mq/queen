@@ -81,6 +81,8 @@ function stateTitle(r) {
 }
 const cells = (r) => ({
   name: r.name,
+  from: r.from,
+  fromTitle: r.sources.length ? `Reads ${r.sources.join(', ')}` : undefined,
   to: qlink(r.name),
   mark: toneOf(r.sev),
   state: r.state?.word || '',
@@ -304,6 +306,7 @@ function created({ name, ns }) { reveal(name, ns) }
                 <span role="rowheader" class="qs-name">
                   <span class="qs-markslot" aria-hidden="true"><span v-if="r.mark" class="qn-mark" :class="r.mark" /></span>
                   <RouterLink :to="r.to" class="qn-mono" :class="{ strong: r.mark }" :title="r.name">{{ r.name }}</RouterLink>
+                  <span v-if="r.from" class="qn-t3 qs-from" :title="r.fromTitle">{{ r.from }}</span>
                 </span>
                 <span role="cell" :class="r.stateClass" :title="r.stateTitle || undefined">{{ r.state }}</span>
                 <span role="cell" class="r qn-num" :class="{ 'qn-t3': r.waiting.dim }">{{ r.waiting.text }}</span>
@@ -398,6 +401,8 @@ function created({ name, ns }) { reveal(name, ns) }
 .qs-markslot { flex: 0 0 8px; display: flex; align-items: center; justify-content: center; }
 .qs-name a { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .qs-name a.strong { font-weight: 500; }
+/* a reading queue's source: it gives way before the name does */
+.qs-from { flex: 0 10 auto; min-width: 0; margin-left: -2px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
 .qs-dlq { text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
 .qs-dlq:hover { text-decoration-color: currentColor; }
 .qs-sparkcell { display: flex; align-items: center; padding-left: 4px; }

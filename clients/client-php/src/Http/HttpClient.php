@@ -108,7 +108,8 @@ class HttpClient
         $this->retry429 = $options['retry429'] ?? [];
         // binaryPush: a push to /api/v1/push goes out as the binary push body
         // instead of JSON; it needs a broker that accepts that body, and items
-        // with a trace id stay JSON. pushCompression (with binaryPush): the
+        // with a trace id stay JSON, as do items with headers unless
+        // pushCompression frames them. pushCompression (with binaryPush): the
         // messages are framed as the broker stores them and each partition's
         // batch is zstd-compressed once, here; a transaction that pushes sends
         // its pushes the same way through post(). framedPop: pops ask for the

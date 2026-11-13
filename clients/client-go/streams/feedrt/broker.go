@@ -84,6 +84,24 @@ type Tx interface {
 	Commit(ctx context.Context) (TxResult, error)
 }
 
+// LinkItem is one message a commit links into a queue: the feed entry it is,
+// named by its queue, partition, offset and transaction id (a feed entry's
+// partition id is not the one a link takes).
+type LinkItem struct {
+	Queue         string
+	Partition     string
+	Offset        int64
+	TransactionID string
+}
+
+// LinkTx is a Tx that can also link (the client's own, for a cluster at
+// catalogue version 8): the target gets the source message itself -- the same
+// id, transaction id and headers -- and its payload is not sent again. A
+// runner whose Tx is not one pushes every output, as before links.
+type LinkTx interface {
+	Link(queue, partition string, items []LinkItem) Tx
+}
+
 // TxResult is a commit's answer.
 type TxResult struct {
 	Success bool

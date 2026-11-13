@@ -113,6 +113,57 @@ async fn direct_kv(
 }
 
 /// The answer the route would have given for `e`.
+/// A Kafka record's headers as Queen headers (PLAN_ROUTING.md §6.2), read
+/// from the facade's envelope (`queen_kafka::records`: `"h": [{"k", "v"}]`,
+/// values base64): every header whose value is UTF-8 and whose name, in lower
+/// case, is a Queen header name, the first of a repeated name, within the
+/// limits. The envelope keeps them all, so a Kafka consumer reads the record
+/// exactly as it was produced; the copy is what `where` and native consumers
+/// read. Stored only where every member reads catalogue version 8 (the push
+/// path drops it before).
+fn kafka_headers_of(payload: &[u8]) -> Vec<(String, String)> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    // Only an envelope with headers carries `"h"`; anything else has none.
+    if !payload.windows(4).any(|w| w == b"\"h\":") {
+        return Vec::new();
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else {
+        return Vec::new();
+    };
+    let Some(list) = v.get("h").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut bytes = 2usize;
+    for h in list {
+        let (Some(k), Some(raw)) = (
+            h.get("k").and_then(serde_json::Value::as_str),
+            h.get("v").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        let key = k.to_ascii_lowercase();
+        if !crate::frames::header_key_valid(&key)
+            || key.starts_with(crate::frames::RESERVED_HEADER_PREFIX)
+            || out.iter().any(|(n, _)| *n == key)
+        {
+            continue;
+        }
+        let Ok(decoded) = STANDARD.decode(raw) else {
+            continue;
+        };
+        let Ok(text) = String::from_utf8(decoded) else {
+            continue;
+        };
+        bytes += 3 + key.len() + text.len();
+        if out.len() >= crate::frames::max_headers() || bytes > crate::frames::max_header_bytes() {
+            break;
+        }
+        out.push((key, text));
+    }
+    out
+}
+
 async fn refusal(e: crate::rsm::facade::RsmError) -> LocalResponse {
     let response = crate::handlers::raft::err_response(e);
     let status = response.status().as_u16();
@@ -227,6 +278,7 @@ impl Broker for RouterDispatch {
             let records = items
                 .into_iter()
                 .map(|i| crate::rsm::facade::RecordPush {
+                    headers: kafka_headers_of(&i.payload),
                     queue: i.queue,
                     partition: i.partition,
                     payload: i.payload,

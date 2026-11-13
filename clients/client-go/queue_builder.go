@@ -2,9 +2,13 @@ package queen
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
+
+	"github.com/smartpricing/queen/clients/client-go/v2/feed"
 )
 
 // QueueBuilder provides a fluent API for queue operations.
@@ -41,6 +45,13 @@ type QueueBuilder struct {
 	// that zero is load-bearing — it is what "let the broker decide this one"
 	// looks like all the way down to buildPopParams.
 	autopilot *bool
+	// The consumer group's where (a filtered group): the conditions of Where
+	// calls, or the one string of WhereExpr. whereErr is the first condition a
+	// Where call refused, or the two forms mixed: Pop and Consume answer it
+	// before any request.
+	whereConds []feed.Condition
+	whereExpr  string
+	whereErr   error
 }
 
 // NewQueueBuilder creates a new QueueBuilder.
@@ -275,6 +286,109 @@ func (qb *QueueBuilder) Conflation(enabled bool) *QueueBuilder {
 	return qb
 }
 
+// Where makes the consumer group a filtered group (a cluster at catalogue
+// version 8): the group gets only the messages of the queue where `field op
+// value` holds, and its lag, retries and dead letters count only those. Several
+// calls are ANDed:
+//
+//	client.Queue("order-events").Group("billing").SubscriptionMode("all").
+//		Where("data.kind", "in", []string{"order.paid", "order.refunded"}).
+//		Where("headers.region", "=", "eu").
+//		Consume(ctx, handler).Execute(ctx)
+//
+// Fields: queue, partition, transactionId, data, data.<path> (depth 16),
+// headers.<name>. Ops: = != < <= > >= in exists prefix !prefix; in takes a list
+// (64 values at most), prefix a string, a comparison a number or a string. A
+// field the message lacks matches no op, != included. 16 conditions at most.
+// WhereExpr takes the same as one string.
+//
+// It is a GROUP setting, as SubscriptionMode is: every pop of the group sends
+// it, and the broker fixes it at the group's first pop (with "all" or
+// SubscriptionFrom the group starts with the history that matches, which the
+// broker catches up first). Another where for the same group is refused with
+// 400 where_mismatch, and so is a where on a group that already reads the
+// queue unfiltered: start a new group. Admin.SetConsumerGroupWhere changes a
+// group's where on purpose. Acks, renewals and transactions take the popped
+// messages as always.
+//
+// A where needs Group and a queue name: Pop and Consume answer
+// ErrWhereNeedsGroup or ErrWhereNeedsQueue otherwise, before any request, and
+// the same for a condition this call refuses (an unknown op, in without a list).
+func (qb *QueueBuilder) Where(field, op string, value ...interface{}) *QueueBuilder {
+	c, err := feed.WhereCondition(field, op, value...)
+	if err != nil {
+		qb.failWhere(err)
+		return qb
+	}
+	if qb.whereExpr != "" {
+		qb.failWhere(errors.New("where: Where conditions and a WhereExpr string are two wheres for one group: write one"))
+		return qb
+	}
+	qb.whereConds = append(qb.whereConds, c)
+	return qb
+}
+
+// WhereExpr is Where in its one-string form, ANDed conditions as the broker
+// reads them:
+//
+//	client.Queue("order-events").Group("billing").
+//		WhereExpr("data.kind in ('order.paid', 'order.refunded') and data.total > 100").
+//		Consume(ctx, handler).Execute(ctx)
+//
+// AND only (`or` is refused; in covers most of it). It replaces an earlier
+// WhereExpr; with Where conditions on the same builder it is refused, as two
+// wheres for one group. "" removes it.
+func (qb *QueueBuilder) WhereExpr(expr string) *QueueBuilder {
+	if len(qb.whereConds) > 0 && strings.TrimSpace(expr) != "" {
+		qb.failWhere(errors.New("where: Where conditions and a WhereExpr string are two wheres for one group: write one"))
+		return qb
+	}
+	qb.whereExpr = strings.TrimSpace(expr)
+	return qb
+}
+
+func (qb *QueueBuilder) failWhere(err error) {
+	if qb.whereErr == nil {
+		qb.whereErr = err
+	}
+}
+
+// whereParam is the `where` every pop of the group sends: the one string, or
+// the conditions as their JSON list. "" for an unfiltered group.
+func (qb *QueueBuilder) whereParam() string {
+	if qb.whereExpr != "" {
+		return qb.whereExpr
+	}
+	if len(qb.whereConds) > 0 {
+		return string(conditionList(qb.whereConds))
+	}
+	return ""
+}
+
+// checkWhere refuses, before any request, a where the broker would refuse or
+// drop: a condition a Where call refused, no group, no queue name.
+func (qb *QueueBuilder) checkWhere() error {
+	if qb.whereErr != nil {
+		return qb.whereErr
+	}
+	return checkWhereTarget(qb.whereParam(), qb.queueName, qb.consumerGroup)
+}
+
+// checkWhereTarget is the rule a where's pop must meet: a consumer group, and
+// a named queue (a namespace or task pop takes no where).
+func checkWhereTarget(where, queue, group string) error {
+	if where == "" {
+		return nil
+	}
+	if queue == "" {
+		return ErrWhereNeedsQueue
+	}
+	if group == "" || group == QueueModeConsumerGroup {
+		return ErrWhereNeedsGroup
+	}
+	return nil
+}
+
 // Each sets whether to process messages one at a time.
 func (qb *QueueBuilder) Each() *QueueBuilder {
 	qb.each = true
@@ -332,6 +446,9 @@ func (qb *QueueBuilder) PopResult(ctx context.Context) (PopResult, error) {
 	if qb.queueName == "" && qb.namespace == "" && qb.task == "" {
 		return PopResult{}, fmt.Errorf("queue name, namespace, or task is required")
 	}
+	if err := qb.checkWhere(); err != nil {
+		return PopResult{}, err
+	}
 
 	// Build path
 	var path string
@@ -384,6 +501,10 @@ func (qb *QueueBuilder) PopResult(ctx context.Context) (PopResult, error) {
 	if cerr := checkConflationEcho(result, qb.conflation,
 		conflationTarget(qb.queueName, qb.namespace, qb.task), qb.consumerGroup); cerr != nil {
 		return PopResult{}, cerr
+	}
+	// The same for a where: a broker that ignored it hands back every message.
+	if ferr := checkFilteredEcho(result, qb.whereParam(), qb.queueName, qb.consumerGroup); ferr != nil {
+		return PopResult{}, ferr
 	}
 
 	// Parse response
@@ -463,6 +584,12 @@ func (qb *QueueBuilder) buildPopParams() string {
 		params.Set("conflation", "true")
 	}
 
+	// Where: the filtered group's conditions, the same on every pop (the
+	// broker fixes them at the group's first). Emitted only when set.
+	if w := qb.whereParam(); w != "" {
+		params.Set("where", w)
+	}
+
 	// Namespace and task (for namespace/task mode)
 	if qb.namespace != "" {
 		params.Set("namespace", qb.namespace)
@@ -528,6 +655,7 @@ func (qb *QueueBuilder) getConsumeOptions() ConsumeOptions {
 		MaxPartitions:            qb.maxPartitions,
 		Conflation:               qb.conflation,
 		Autopilot:                &autopilot,
+		Where:                    qb.whereParam(),
 	}
 
 	// Apply defaults
@@ -625,6 +753,13 @@ func parseMessages(result map[string]interface{}) []*Message {
 		}
 		if v, ok := msgMap["producerSub"].(string); ok {
 			msg.ProducerSub = v
+		}
+		msg.Headers = headersOf(msgMap["headers"])
+		if v, ok := msgMap["offset"].(float64); ok {
+			msg.Offset = int64(v)
+		}
+		if v, ok := msgMap["consumerGroup"].(string); ok {
+			msg.ConsumerGroup = v
 		}
 
 		messages = append(messages, msg)

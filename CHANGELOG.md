@@ -3,6 +3,52 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Upgrading: a rolling restart; the new features turn on by themselves once every node runs this
+release (cluster version 8).** Until then a `where`, a reading queue, headers and `link` are
+refused with `cluster_version`, and nothing a node writes changes form.
+
+**Routing without copies: filtered groups, reading queues and `link`.** A consumer group can take
+only the messages a `where` takes (`.group('billing').where('data.kind', '=', 'order.paid')`),
+fixed at its first pop. A queue can read other queues (`config({ from: 'orders', where:
+"data.country = 'IT'", partitionBy: 'same' })`): it gets a link to every message its `where`
+takes, in the same commit as the push, with its own leases, retries, dead-letter queue, groups and
+token; `partitionBy: 'data.customerId'` gives the same messages another order, `from: [...]`
+merges queues in commit order, `start: 'all'` starts with history. A transaction can forward the
+message it holds into another queue with `link`, without sending its payload again. A link is
+written once at the source and costs about 20 to 80 bytes, whatever the payload weighs; the
+source keeps the message, and its completed retention waits for its readers. Why: a reader that
+wanted some of a queue read and acked all of it, and routing meant a router process that copied
+every message and added a commit per batch.
+
+A stream's `.to()` writes a link when its result is its input message unchanged (`{ link: false }`
+writes copies), and the feed shows a reading queue's and a link target's messages read through
+their links. A link a partition already holds is a no-op, not a `duplicate` rollback. Every pop
+of a filtered group says `"filtered": true`, an empty one too, so a client stops on a broker that
+would ignore its `where`; group listings show a filtered group under its queue with its `where`,
+and a queue's page shows its readers' ages, its holders and a catch-up's progress.
+
+**Headers.** A message can carry headers, a map of strings stored in clear beside its payload
+(`headers: { type: 'order.paid', traceparent: '...' }`), returned by pop, fetch, the feed and the
+message browser, readable by a `where` without the payload (so on an encrypted queue too). A timer
+takes them and its message fires with them; a dead letter keeps them and its replay sends them
+again. Kafka records keep their headers as before, and their UTF-8 ones are also stored as Queen
+headers. A refused push item now says why, as `error`. Why: without headers, trace context and
+routing facts lived inside payloads.
+
+**One planner on every thread: the footprint scheduler.** The leader's lanes (`pid % 8`) and its
+one control step are gone. Before a cycle is planned, every command names what it reads and
+writes (a partition, a queue's settings, a KV key, a timer, a cursor); commands that share none of
+these plan at the same time on `QUEEN_PLANNER_THREADS` threads (8 by default, `QUEEN_LANES` is
+still read), and the entry holds every command in batch order, as one thread would have planned
+it. A check after planning compares what each group touched with what the others wrote, and plans
+that part of the batch again on one thread when they met. Transactions that ack, push and write
+KV or timers, KV calls, timers, pushes to queues that others read and first pushes to new
+partitions no longer wait for one thread. Followers apply the entries as before: no cluster
+version, a rolling restart. Why: the control step was the transaction ceiling, about 70 µs a
+transaction on one thread whatever the machine's size.
+
 ## 2.8.1 - 2026-11-11
 
 **Upgrading from 2.8.0: a rolling restart, nothing else.** Nothing in the raft log or on disk

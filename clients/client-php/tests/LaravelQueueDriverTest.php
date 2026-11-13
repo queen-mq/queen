@@ -18,6 +18,7 @@ use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\RequestInterface;
 use Queen\Exceptions\ConflationPolicyMismatchException;
 use Queen\Exceptions\HttpException;
+use Queen\Laravel\Contracts\QueenHeaders;
 use Queen\Laravel\Contracts\QueenPartitionable;
 use Queen\Laravel\Queue\HandBackJournal;
 use Queen\Laravel\Queue\LeaseRenewer;
@@ -1880,6 +1881,224 @@ class LaravelQueueDriverTest extends TestCase
         );
     }
 
+    // ===========================
+    // Message headers (QueenHeaders)
+    // ===========================
+    //
+    // A job's headers travel beside its payload, never in it, and stay with
+    // the job when the driver puts it back on the queue.
+
+    public function testAJobThatGivesHeadersPushesThemBesideAnUnchangedPayload(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 201, 'json' => [['status' => 'queued']]],
+            ['status' => 201, 'json' => [['status' => 'queued']]],
+        ]);
+        [$queue] = $this->queueFor($handler);
+
+        $queue->push(new HeaderedTestJob('customer-42', ['job' => HeaderedTestJob::class, 'customer' => 42]), queue: 'orders');
+        $queue->push(new PartitionedTestJob('customer-42'), queue: 'orders');
+
+        [$headered, $plain] = array_map(
+            static fn ($request): array => json_decode((string) $request->getBody(), true)['items'][0],
+            $handler->requests,
+        );
+        $this->assertSame(['job' => HeaderedTestJob::class, 'customer' => '42'], $headered['headers']);
+        $this->assertSame('customer-42', $headered['partition']);
+        // The payload is the one a job without headers gets.
+        $this->assertSame(array_keys($plain['payload']), array_keys($headered['payload']));
+        $this->assertSame($plain['payload']['_queen'], $headered['payload']['_queen']);
+        $this->assertArrayNotHasKey('headers', $plain);
+    }
+
+    public function testBulkGivesEachJobItsOwnHeaders(): void
+    {
+        $handler = new PlanHandler([['status' => 201, 'json' => array_fill(0, 3, ['status' => 'queued'])]]);
+        [$queue] = $this->queueFor($handler, ['bulk_batch' => 100]);
+
+        $queue->bulk([
+            new HeaderedTestJob('customer-1', ['customer' => 'c-1']),
+            new PartitionedTestJob('customer-2'),
+            new HeaderedTestJob('customer-3', ['customer' => 'c-3', 'job' => 'refund']),
+        ], queue: 'orders');
+
+        $items = json_decode((string) $handler->requests[0]->getBody(), true)['items'];
+        $this->assertSame(['customer' => 'c-1'], $items[0]['headers']);
+        $this->assertArrayNotHasKey('headers', $items[1]);
+        $this->assertSame(['customer' => 'c-3', 'job' => 'refund'], $items[2]['headers']);
+    }
+
+    public function testPushRawTakesHeadersInItsOptions(): void
+    {
+        $handler = new PlanHandler([['status' => 201, 'json' => [['status' => 'queued']]]]);
+        [$queue] = $this->queueFor($handler);
+
+        $queue->pushRaw(json_encode($this->payload('job-123')), 'emails', ['headers' => ['type' => 'invoice']]);
+
+        $item = json_decode((string) $handler->requests[0]->getBody(), true)['items'][0];
+        $this->assertSame(['type' => 'invoice'], $item['headers']);
+        $this->assertSame('job-123', $item['transactionId']);
+    }
+
+    public function testAHeaderThatIsNotTextFailsTheDispatchBeforeAnyRequest(): void
+    {
+        $handler = new PlanHandler();
+        [$queue] = $this->queueFor($handler);
+
+        try {
+            $queue->push(new HeaderedTestJob('customer-1', ['vip' => true]), queue: 'orders');
+            $this->fail('a boolean header was dispatched');
+        } catch (\InvalidArgumentException $error) {
+            $this->assertSame('header [vip] must be text, got bool', $error->getMessage());
+        }
+        $this->assertCount(0, $handler->requests);
+    }
+
+    public function testAReleasedJobKeepsTheHeadersOfItsDelivery(): void
+    {
+        $response = $this->popResponse($this->payload('job-123'));
+        $response['messages'][0]['headers'] = ['job' => 'Handler', 'customer' => 'c-7'];
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $response],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        [$queue] = $this->queueFor($handler);
+
+        $queue->pop('emails')->release();
+
+        $body = json_decode((string) $handler->requests[1]->getBody(), true);
+        $this->assertSame('push', $body['operations'][1]['type']);
+        $this->assertSame(['job' => 'Handler', 'customer' => 'c-7'], $body['operations'][1]['items'][0]['headers']);
+    }
+
+    public function testADelayedJobsTimerCarriesItsHeaders(): void
+    {
+        $scheduled = ['status' => 200, 'json' => ['results' => [[
+            'ok' => true,
+            'status' => 'scheduled',
+            'queue' => 'orders',
+            'txn' => 'job',
+        ]]]];
+        $handler = new PlanHandler([$scheduled, $scheduled]);
+        [$queue] = $this->queueFor($handler);
+
+        $queue->later(10, new HeaderedTestJob('customer-1', ['customer' => 'c-1']), '', 'orders');
+        $queue->later(10, new PartitionedTestJob('customer-2'), '', 'orders');
+
+        $this->assertSame('/api/v1/timers', $handler->requests[0]->getUri()->getPath());
+        [$headered, $plain] = array_map(
+            static fn ($request): array => json_decode((string) $request->getBody(), true)['operations'][0],
+            $handler->requests,
+        );
+        $this->assertSame(['customer-1', ['customer' => 'c-1']], [$headered['partition'], $headered['headers']]);
+        $this->assertArrayNotHasKey('headers', $plain);
+    }
+
+    public function testAReleaseWithADelayKeepsTheHeadersOfItsDelivery(): void
+    {
+        $response = $this->popResponse($this->payload('job-123'));
+        $response['messages'][0]['headers'] = ['job' => 'Handler', 'customer' => 'c-7'];
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $response],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        [$queue] = $this->queueFor($handler);
+
+        $queue->pop('emails')->release(5);
+
+        $body = json_decode((string) $handler->requests[1]->getBody(), true);
+        $this->assertSame(5000, $body['timers'][0]['delayMs']);
+        $this->assertSame(['job' => 'Handler', 'customer' => 'c-7'], $body['timers'][0]['headers']);
+    }
+
+    /**
+     * The failed copy Laravel stores names its delivery's headers in the
+     * `_queen` block, beside the retry provenance; queue:retry pushes them
+     * as the message's again, and the payload goes back as it was.
+     */
+    public function testQueueRetryPushesTheHeadersOfTheFailedDeliveryAgain(): void
+    {
+        $payload = $this->payload('job-123');
+        $payload['job'] = RetryableTestHandler::class . '@handle';
+        $response = $this->popResponse($payload);
+        $response['messages'][0]['headers'] = ['job' => 'Handler', 'customer' => 'c-7'];
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $response],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
+            ['status' => 201, 'json' => [['status' => 'queued']]],
+        ]);
+        [$queue] = $this->queueFor($handler);
+        $container = new Container();
+        $events = new Dispatcher($container);
+        $container->instance(\Illuminate\Contracts\Events\Dispatcher::class, $events);
+        $queue->setContainer($container);
+        $failedBody = null;
+        $events->listen(JobFailed::class, function ($event) use (&$failedBody): void {
+            $failedBody = $event->job->getRawBody();
+        });
+
+        $queue->pop('emails')->fail(new \RuntimeException('failed intentionally'));
+        $stored = json_decode($failedBody, true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(['job' => 'Handler', 'customer' => 'c-7'], $stored['_queen']['headers']);
+        $queue->pushRaw($failedBody, 'emails');
+
+        $item = json_decode((string) $handler->requests[2]->getBody(), true)['items'][0];
+        $this->assertSame('/api/v1/push', $handler->requests[2]->getUri()->getPath());
+        $this->assertSame(['job' => 'Handler', 'customer' => 'c-7'], $item['headers']);
+        $this->assertSame($stored['_queen']['manual_retry'], $item['transactionId']);
+        $this->assertSame(['attempts', 'partition'], array_keys($item['payload']['_queen']), 'only the job\'s own keys');
+    }
+
+    public function testAHandBackCopyKeepsTheHeadersOfItsDelivery(): void
+    {
+        $response = $this->popBatchResponse([$this->payload('job-1'), $this->payload('job-2')]);
+        $response['messages'][1]['headers'] = ['customer' => 'c-7'];
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $response],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        $queue = $this->queueWithLeaseRenewer($handler, new RecordingLeaseRenewer(), prefetch: 2);
+        $container = new Container();
+        $events = new Dispatcher($container);
+        $container->instance('events', $events);
+        $queue->setContainer($container);
+
+        $queue->pop('emails')->delete();
+        $events->dispatch(new WorkerStopping());
+
+        $this->assertCount(3, $handler->requests);
+        $handBack = $this->handBack($handler->requests[2]);
+        $this->assertSame(['job-2'], $this->copiedJobs($handBack));
+        $this->assertSame(['customer' => 'c-7'], $handBack['copies'][0]['headers']);
+    }
+
+    public function testTheJournalHandsBackEachDeliveryWithItsHeaders(): void
+    {
+        $response = $this->popBatchResponse([$this->payload('job-1'), $this->payload('job-2')]);
+        $response['messages'][1]['headers'] = ['customer' => 'c-7'];
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $response],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $renewer->journal = new HandBackJournal($prefix = $this->journalPrefix());
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 2);
+
+        $queue->pop('emails');
+        $journaled = $this->journaledHandBack($prefix);
+        $queue->shutdown();
+
+        $this->assertSame(['job-1', 'job-2'], $this->copiedJobs($journaled));
+        $this->assertArrayNotHasKey('headers', $journaled['copies'][0]);
+        $this->assertSame(['customer' => 'c-7'], $journaled['copies'][1]['headers']);
+        // Shutdown hands back the same copies.
+        $this->assertSame(
+            array_column($journaled['copies'], 'headers'),
+            array_column($this->handBack($handler->requests[1])['copies'], 'headers'),
+        );
+    }
+
     private function queueFor(PlanHandler $handler, array $overrides = []): array
     {
         $connector = new QueenConnector();
@@ -2193,6 +2412,23 @@ class PartitionedTestJob implements QueenPartitionable
     public function queenPartition(): string
     {
         return $this->partition;
+    }
+}
+
+class HeaderedTestJob implements QueenPartitionable, QueenHeaders
+{
+    public function __construct(private string $partition, private array $headers)
+    {
+    }
+
+    public function queenPartition(): string
+    {
+        return $this->partition;
+    }
+
+    public function queenHeaders(): array
+    {
+        return $this->headers;
     }
 }
 

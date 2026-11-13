@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -104,6 +105,12 @@ type Message struct {
 	Partition     string                 `json:"partition"`
 	PartitionID   string                 `json:"partitionId"`
 	ConsumerGroup string                 `json:"consumerGroup"`
+	// Headers are the message's headers (catalogue version 8): a .Where() on
+	// headers.<name> reads them.
+	Headers map[string]string `json:"headers,omitempty"`
+	// Offset is the message's offset in its partition: with TransactionID it
+	// names the message for a sink that links it (catalogue version 8).
+	Offset int64 `json:"offset,omitempty"`
 }
 
 // Stages is the compiled chain consumed by the Runner.
@@ -234,6 +241,41 @@ type Runner struct {
 	// the cycle just emitted+deleted (duplicate) or clobber a freshly-reduced
 	// accumulator (drop). Guarded by mu.
 	partLocks map[string]*sync.Mutex
+	// linking: every output is its input message unchanged (the chain only
+	// filters, keys or gates before a .To() that links), so the cycle names
+	// the input as a link instead of storing a copy. noLinks is set once a
+	// broker refused a link: the runner pushes from then on.
+	linking bool
+	noLinks atomic.Bool
+}
+
+// linksUnchangedInput reports whether a compiled chain's outputs are its
+// input messages as they came, to a sink that links them: no map or flatMap,
+// no window or reducer, and a .To() that leaves Link on.
+func linksUnchangedInput(st Stages) bool {
+	var sink operators.SinkOperator
+	switch s := st.Sink.(type) {
+	case operators.SinkOperator:
+		sink = s
+	case *operators.SinkOperator:
+		if s == nil {
+			return false
+		}
+		sink = *s
+	default:
+		return false
+	}
+	if !sink.Linking() || st.Window != nil || st.Reducer != nil {
+		return false
+	}
+	for _, ops := range [][]StatelessOp{st.Pre, st.Post} {
+		for _, op := range ops {
+			if op.Kind() != "filter" {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // recentPartition is one entry of the idle-flush sweep set: the partition name
@@ -274,6 +316,7 @@ func NewRunner(stream *CompiledStream, opts RunOptions) *Runner {
 		recent:        map[string]recentPartition{},
 		nowMs:         func() int64 { return time.Now().UnixMilli() },
 		partLocks:     map[string]*sync.Mutex{},
+		linking:       stream != nil && linksUnchangedInput(stream.Stages),
 	}
 }
 
@@ -568,6 +611,9 @@ func (r *Runner) processCycle(ctx context.Context, g partitionGroup) error {
 			Key:   m.PartitionID,
 			Value: m.Data,
 		}
+		if r.linking {
+			envs[i].Source = &operators.CycleLink{Offset: m.Offset, TransactionID: m.TransactionID}
+		}
 	}
 	for _, op := range stages.Pre {
 		next := []operators.Envelope{}
@@ -629,7 +675,7 @@ func (r *Runner) processCycle(ctx context.Context, g partitionGroup) error {
 		}
 	} else {
 		for _, env := range envs {
-			emits = append(emits, operators.ReduceEmit{Key: env.Key, Value: env.Value})
+			emits = append(emits, operators.ReduceEmit{Key: env.Key, Value: env.Value, Source: env.Source})
 		}
 	}
 
@@ -666,7 +712,7 @@ func (r *Runner) processCycle(ctx context.Context, g partitionGroup) error {
 	r.stats.PushItemsTotal += int64(len(pushItems))
 	r.mu.Unlock()
 
-	_, err = CommitCycle(ctx, r.http, r.serverQueryID, pid, g.ConsumerGroup, stateOps, pushItems, ack, true)
+	err = r.commitCycle(ctx, pid, g.ConsumerGroup, stateOps, pushItems, ack, true)
 	if err != nil {
 		return err
 	}
@@ -746,7 +792,7 @@ func (r *Runner) processGate(ctx context.Context, stages Stages, envs []operator
 
 	emits := make([]operators.ReduceEmit, len(allowedEnvs))
 	for i, env := range allowedEnvs {
-		emits[i] = operators.ReduceEmit{Key: env.Key, Value: env.Value}
+		emits[i] = operators.ReduceEmit{Key: env.Key, Value: env.Value, Source: env.Source}
 	}
 	emits, err = r.applyPostStages(ctx, stages.Post, emits, pid, g.PartitionName, ordered)
 	if err != nil {
@@ -790,8 +836,7 @@ func (r *Runner) processGate(ctx context.Context, stages Stages, envs []operator
 	r.stats.PushItemsTotal += int64(len(pushItems))
 	r.mu.Unlock()
 
-	_, err = CommitCycle(ctx, r.http, r.serverQueryID, pid, g.ConsumerGroup, ops, pushItems, ack, releaseLease)
-	return err
+	return r.commitCycle(ctx, pid, g.ConsumerGroup, ops, pushItems, ack, releaseLease)
 }
 
 // ---------------------------------------------------------------------------
@@ -955,6 +1000,67 @@ func (r *Runner) processSession(ctx context.Context, stages Stages, envs []opera
 	return res, nil
 }
 
+// commitCycle commits one cycle. A cycle whose links the broker refuses --
+// a cluster not all on catalogue version 8 (cluster_version), a source it no
+// longer keeps or that holds another message there (source_gone,
+// source_mismatch), a broker that cannot link at all (bad_request) -- applied
+// nothing: it goes once more with every item pushed, and the runner pushes
+// from then on. Any other failure, and a refusal of the pushed cycle, is the
+// caller's.
+func (r *Runner) commitCycle(ctx context.Context, pid, group string, stateOps []operators.StateOp,
+	pushItems []operators.PushItem, ack map[string]interface{}, releaseLease bool) error {
+	res, err := CommitCycle(ctx, r.http, r.serverQueryID, pid, group, stateOps, pushItems, ack, releaseLease)
+	if err == nil || !hasLinks(pushItems) || !linkRefusal(cycleReason(res, err)) {
+		return err
+	}
+	r.noLinks.Store(true)
+	r.logger.Warn("a link was refused: the outputs are pushed from now on", map[string]interface{}{
+		"queryId": r.opts.QueryID, "reason": cycleReason(res, err)})
+	pushed := make([]operators.PushItem, len(pushItems))
+	for i, it := range pushItems {
+		it.Link = nil
+		pushed[i] = it
+	}
+	_, err = CommitCycle(ctx, r.http, r.serverQueryID, pid, group, stateOps, pushed, ack, releaseLease)
+	return err
+}
+
+func hasLinks(items []operators.PushItem) bool {
+	for _, it := range items {
+		if it.Link != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// cycleReason is the machine-readable reason of a refused cycle: the answer's
+// `reason` (an HTTP 200 with success false), or the `reason` or `code` of an
+// HTTP error's body.
+func cycleReason(res map[string]interface{}, err error) string {
+	if s, ok := res["reason"].(string); ok && s != "" {
+		return s
+	}
+	var he *HTTPError
+	if errors.As(err, &he) && he.Status >= 400 && he.Status < 500 {
+		for _, k := range []string{"reason", "code"} {
+			if s, ok := he.Body[k].(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// linkRefusal: the reasons a cycle fails on because of its links.
+func linkRefusal(reason string) bool {
+	switch reason {
+	case "cluster_version", "source_gone", "source_mismatch", "bad_request":
+		return true
+	}
+	return false
+}
+
 // ---------------------------------------------------------------------------
 // Post stages, sink, idle flush
 // ---------------------------------------------------------------------------
@@ -991,9 +1097,12 @@ func (r *Runner) applyPostStages(ctx context.Context, post []StatelessOp, emits 
 				if newVal == nil {
 					newVal = o.Msg
 				}
+				// Source rides along: only a chain of filters links (the
+				// runner's linking), and a filter hands its emit on as it was.
 				next = append(next, operators.ReduceEmit{
 					Key: e.Key, Value: newVal,
 					WindowStart: e.WindowStart, WindowEnd: e.WindowEnd, WindowKey: e.WindowKey,
+					Source: e.Source,
 				})
 			}
 		}
@@ -1008,17 +1117,26 @@ func (r *Runner) buildSink(_ context.Context, sink SinkLike, emits []operators.R
 	}
 	// Operators are stored as VALUES (not pointers) by Stream.extend, so the
 	// type-switch must match values too.
+	// An emit that is its input message unchanged names it, while the runner
+	// links: the cycle then links instead of storing a copy.
+	link := r.linking && !r.noLinks.Load()
+	sourceOf := func(e operators.ReduceEmit) *operators.CycleLink {
+		if link {
+			return e.Source
+		}
+		return nil
+	}
 	switch s := sink.(type) {
 	case operators.SinkOperator:
 		entries := make([]operators.SinkEntry, len(emits))
 		for i, e := range emits {
-			entries[i] = operators.SinkEntry{Key: e.Key, Value: e.Value}
+			entries[i] = operators.SinkEntry{Key: e.Key, Value: e.Value, Source: sourceOf(e)}
 		}
 		return s.BuildPushItems(entries, pname), nil
 	case *operators.SinkOperator:
 		entries := make([]operators.SinkEntry, len(emits))
 		for i, e := range emits {
-			entries[i] = operators.SinkEntry{Key: e.Key, Value: e.Value}
+			entries[i] = operators.SinkEntry{Key: e.Key, Value: e.Value, Source: sourceOf(e)}
 		}
 		return s.BuildPushItems(entries, pname), nil
 	case operators.ForeachOperator:
@@ -1579,7 +1697,7 @@ func newestCreatedAt(messages []Message) (int64, bool) {
 }
 
 func messageToMap(m Message) map[string]interface{} {
-	return map[string]interface{}{
+	out := map[string]interface{}{
 		"id":            m.ID,
 		"data":          m.Data,
 		"createdAt":     m.CreatedAt,
@@ -1589,4 +1707,13 @@ func messageToMap(m Message) map[string]interface{} {
 		"partitionId":   m.PartitionID,
 		"consumerGroup": m.ConsumerGroup,
 	}
+	// Only when there are some: a message without headers is the map it was.
+	if len(m.Headers) > 0 {
+		h := make(map[string]interface{}, len(m.Headers))
+		for k, v := range m.Headers {
+			h[k] = v
+		}
+		out["headers"] = h
+	}
+	return out
 }

@@ -9,13 +9,20 @@ use Queen\Http\Retry429Policy;
 use Queen\Buffer\BufferManager;
 use Queen\Consumer\HighLevelConsumer;
 use Queen\Reads\OffsetReads;
+use Queen\Exceptions\RoutingUnsupportedException;
 use Queen\Support\ConflationGuard;
 use Queen\Support\Defaults;
+use Queen\Support\FilterGuard;
+use Queen\Support\Headers;
 use Queen\Support\PopAutopilot;
 use Queen\Support\Uuid;
+use Queen\Support\Where;
 
 class QueueBuilder
 {
+    /** The config() options that only a reading queue has. */
+    private const READING_OPTIONS = ['from', 'where', 'partitionBy', 'start'];
+
     private Queen $queen;
     private HttpClient $httpClient;
     private BufferManager $bufferManager;
@@ -56,6 +63,13 @@ class QueueBuilder
     /** Per-builder override: null = the client default (on unless the env turned it off). */
     private ?bool $consumeAutopilot = null;
     private ?array $consumeSupervision = null;
+    /**
+     * The group's filter, as Support\Where::of() returns it (one string, or a
+     * list of conditions); null = the group reads every message.
+     *
+     * @var string|list<array>|null
+     */
+    private string|array|null $consumeWhere = null;
 
     // Buffer options
     private ?array $bufferOptions = null;
@@ -119,25 +133,101 @@ class QueueBuilder
         return $this;
     }
 
+    /**
+     * The queue's options, over Defaults::QUEUE_DEFAULTS.
+     *
+     * A READING QUEUE takes the messages of other queues that match a where,
+     * without copying them: the same message, with the same id and
+     * transactionId, with its own offsets, consumer groups, retries, DLQ and
+     * priority.
+     *
+     *     $queen->queue('orders-it')->config([
+     *         'from' => 'orders',                  // or ['orders', ['queue' => 'refunds', 'where' => ...]]
+     *         'where' => "data.country = 'IT'",    // or a list of conditions (Support\Where)
+     *         'partitionBy' => 'same',             // or 'data.<path>', 'headers.<name>'
+     *         'start' => 'now',                    // or 'all': every match the sources still keep
+     *         'leaseTime' => 30,
+     *         'retryLimit' => 5,
+     *     ])->create()->execute();
+     *
+     * It keeps what its sources keep, so the broker refuses the keep settings
+     * on it (Defaults::READING_QUEUE_KEEPS, 400 reading_queue): with `from`,
+     * `where`, `partitionBy` or `start` the defaults of those are not filled
+     * in, and only the ones set here are sent. So name the `from` again in
+     * every config() of a reading queue: without any of the four, this is an
+     * ordinary queue's config(), keep defaults included. `from` => null stops
+     * the reading. A push into a reading queue is refused (reading_queue):
+     * push to its sources. Needs a cluster that reads catalogue version 8
+     * (cluster_version otherwise); with `from`, create() throws
+     * RoutingUnsupportedException when the answer has no `route`, the answer
+     * of a broker that configured an ordinary queue instead.
+     */
     public function config(array $options): static
     {
-        $this->config = array_merge(Defaults::QUEUE_DEFAULTS, $options);
+        if (array_intersect_key($options, array_flip(self::READING_OPTIONS)) === []) {
+            $this->config = array_merge(Defaults::QUEUE_DEFAULTS, $options);
+            return $this;
+        }
+
+        $defaults = array_diff_key(Defaults::QUEUE_DEFAULTS, array_flip(Defaults::READING_QUEUE_KEEPS));
+        $this->config = array_merge($defaults, self::readingOptions($options));
         return $this;
+    }
+
+    /**
+     * A reading queue's `from` and `where` in the form the broker reads: one
+     * source as a name or a list of them, each a name or ['queue' => ...,
+     * 'where' => ...]; each where as Where::of() writes it.
+     */
+    private static function readingOptions(array $options): array
+    {
+        $from = $options['from'] ?? null;
+        if (is_array($from) && isset($from['queue'])) {
+            $from = [$from];
+        }
+        if (is_array($from)) {
+            $options['from'] = array_map(static function (mixed $source): mixed {
+                if (is_array($source) && isset($source['where'])) {
+                    $source['where'] = Where::of($source['where']);
+                }
+                return $source;
+            }, $from);
+        }
+        if (isset($options['where'])) {
+            $options['where'] = Where::of($options['where']);
+        }
+
+        return $options;
     }
 
     public function create(): OperationBuilder
     {
         $fullConfig = !empty($this->config) ? $this->config : Defaults::QUEUE_DEFAULTS;
+        $queue = $this->queueName;
 
         return new OperationBuilder($this->httpClient, 'POST', '/api/v1/configure', [
             'queue' => $this->queueName,
             'namespace' => $this->namespace,
             'task' => $this->task,
             'options' => $fullConfig,
-        ]);
+        ], ($fullConfig['from'] ?? null) === null ? null : static function (mixed $answer) use ($queue): void {
+            // A broker that does not read other queues configures an ordinary
+            // queue and says nothing: only the route in its answer says it
+            // read the `from`.
+            if (!is_array($answer) || !is_array($answer['route'] ?? null)) {
+                throw new RoutingUnsupportedException(
+                    RoutingUnsupportedException::READING_MESSAGE . " ('{$queue}' was configured as an ordinary queue)"
+                );
+            }
+        });
     }
 
-    public function delete(): OperationBuilder
+    /**
+     * Delete the queue. A queue that reading queues read is refused (409
+     * has_readers, naming them) unless $force: the readers then stay, and
+     * their messages from this queue read as gone.
+     */
+    public function delete(bool $force = false): OperationBuilder
     {
         if ($this->queueName === null) {
             throw new \RuntimeException('Queue name is required for delete operation');
@@ -146,7 +236,7 @@ class QueueBuilder
         return new OperationBuilder(
             $this->httpClient,
             'DELETE',
-            '/api/v1/resources/queues/' . rawurlencode($this->queueName),
+            '/api/v1/resources/queues/' . rawurlencode($this->queueName) . ($force ? '?force=true' : ''),
             null
         );
     }
@@ -167,6 +257,13 @@ class QueueBuilder
         return $this;
     }
 
+    /**
+     * One item, or a list: ['data' => ..., 'transactionId' => ..., 'partition'
+     * => ..., 'headers' => ['type' => 'order.paid']], every key but the
+     * payload optional. Headers (Support\Headers) travel beside `data` (or
+     * `payload`): an item without either is the payload itself, every key
+     * included, as it always was.
+     */
     public function push(array $payload): PushBuilder
     {
         if ($this->queueName === null) {
@@ -175,10 +272,13 @@ class QueueBuilder
 
         $items = isset($payload[0]) || empty($payload) ? $payload : [$payload];
         $formattedItems = array_map(function (array $item) {
+            $headers = null;
             if (array_key_exists('data', $item)) {
                 $payloadValue = $item['data'];
+                $headers = Headers::wire($item['headers'] ?? null);
             } elseif (array_key_exists('payload', $item)) {
                 $payloadValue = $item['payload'];
+                $headers = Headers::wire($item['headers'] ?? null);
             } else {
                 $payloadValue = $item;
             }
@@ -192,6 +292,12 @@ class QueueBuilder
 
             if (isset($item['traceId'])) {
                 $result['traceId'] = $item['traceId'];
+            }
+
+            // Left out when there are none: a push without headers is the
+            // request every broker knows, byte for byte.
+            if ($headers !== null) {
+                $result['headers'] = $headers;
             }
 
             return $result;
@@ -400,6 +506,57 @@ class QueueBuilder
         return $this;
     }
 
+    /**
+     * A filtered consumer group: the group gets only the messages that match,
+     * and its lag counts only those.
+     *
+     *     $queen->queue('order-events')->group('billing')->subscriptionMode('all')
+     *         ->where('data.kind', 'in', ['order.paid', 'order.refunded'])
+     *         ->consume($handler)->execute();
+     *
+     * where($field, $op, $value) calls are ANDed and travel as a list of
+     * conditions; where("data.kind in ('order.paid', 'order.refunded') and
+     * data.total > 100") says the same as one string, and is then the whole
+     * filter (see Support\Where for the fields and the ops). A list of
+     * conditions is taken too.
+     *
+     * Like subscriptionMode(), it is the GROUP's: it goes with every pop of
+     * this builder, the group's first pop fixes it, and a pop with another
+     * where is refused (400 where_mismatch). Admin::setConsumerGroupWhere()
+     * changes it on purpose. A group that already reads the queue unfiltered
+     * cannot start filtering: name a new group. subscriptionMode('all') or
+     * subscriptionFrom() start it with the history (the broker catches it up;
+     * the first pops may take a few seconds).
+     *
+     * It needs a group() (the broker refuses one without, 400) and a queue: a
+     * namespace or task pop cannot filter, and throws a LogicException here.
+     * Needs a cluster that reads catalogue version 8 (cluster_version
+     * otherwise). A broker that filters says so on every answer, empty ones
+     * too (`"filtered":true`); one that does not would hand out the whole
+     * queue, so its first answer throws RoutingUnsupportedException, before a
+     * message is returned.
+     */
+    public function where(string|array $field, ?string $op = null, mixed $value = null): static
+    {
+        if (is_array($field) && $op !== null) {
+            throw new \InvalidArgumentException('where(): a list of conditions takes no op');
+        }
+        $where = is_string($field) && $op !== null
+            ? [Where::condition($field, $op, $value)]
+            : Where::of($field);
+
+        if ($this->consumeWhere === null) {
+            $this->consumeWhere = $where;
+        } elseif (is_array($this->consumeWhere) && is_array($where)) {
+            $this->consumeWhere = [...$this->consumeWhere, ...$where];
+        } else {
+            throw new \LogicException(
+                'where(): a string is the whole filter; write every condition in it, or call where($field, $op, $value) for each'
+            );
+        }
+        return $this;
+    }
+
     public function each(): static
     {
         $this->consumeEach = true;
@@ -531,6 +688,12 @@ class QueueBuilder
         if ($this->consumeConflation) {
             $params['conflation'] = 'true';
         }
+        // Last, and only when set: a pop without a where is the request this
+        // SDK has always sent.
+        if ($this->consumeWhere !== null) {
+            $this->refuseWhereWithoutQueue();
+            $params['where'] = Where::param($this->consumeWhere);
+        }
 
         return "{$path}?" . http_build_query($params);
     }
@@ -588,6 +751,9 @@ class QueueBuilder
             $this->namespace,
             $this->task
         );
+        // The same for a filtered group: a broker that does not filter answers
+        // a 204 or no echo, and its messages are the whole queue's.
+        FilterGuard::check($result, $this->consumeWhere !== null, $this->queueName, $this->group);
 
         // The broker's own account of how it sized this pop, when the request
         // engaged autopilot and the answer had a body to carry it (a bodiless
@@ -687,8 +853,23 @@ class QueueBuilder
         }
     }
 
+    /**
+     * A namespace or task pop discovers its queues, and the broker filters
+     * only a named queue's group: such a pop would hand out every message.
+     */
+    private function refuseWhereWithoutQueue(): void
+    {
+        if ($this->consumeWhere !== null && $this->queueName === null) {
+            throw new \LogicException(
+                "where() filters a queue's consumer group: name the queue (\$queen->queue('orders')->group(..)->where(..)); a namespace or task pop cannot filter"
+            );
+        }
+    }
+
     private function buildConsumeOptions(): array
     {
+        $this->refuseWhereWithoutQueue();
+
         return [
             'queue' => $this->queueName,
             'partition' => $this->partition !== 'Default' ? $this->partition : null,
@@ -711,6 +892,7 @@ class QueueBuilder
             'each' => $this->consumeEach,
             'maxPartitions' => $this->consumeMaxPartitions,
             'conflation' => $this->consumeConflation,
+            'where' => $this->consumeWhere,
             // Resolved here so the consumers see a decision and not a null.
             // batch and maxPartitions keep their null when autopilot is on, and
             // that null has to survive all the way to the param builders: it is

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::Serialize;
+use serde_json::Value;
 
 use queen_protocol::{
     ConfigureRequest, DlqParams, DlqResponse, Message, PopParams, PopResponse, PushItem,
@@ -16,6 +17,7 @@ use crate::config::RetryKind;
 use crate::error::{Error, Result};
 use crate::http::Opts;
 use crate::inner::Inner;
+use crate::routing::{self, Headers, Where};
 use crate::uuid;
 
 /// What one pop returned, plus the broker's account of how it sized it.
@@ -76,8 +78,12 @@ pub struct QueueBuilder {
     pub(crate) subscription_from: Option<String>,
     pub(crate) conflation: bool,
     pub(crate) cancel: Option<crate::consumer::Cancel>,
+    /// The consumer group's `where`, sent on every pop: a filtered group.
+    pub(crate) filter: Where,
 
     pub(crate) buffer: Option<BufferOptions>,
+    /// The headers of every message `push` and `push_many` build.
+    pub(crate) headers: Option<Headers>,
 }
 
 impl QueueBuilder {
@@ -108,7 +114,9 @@ impl QueueBuilder {
             subscription_from: None,
             conflation: false,
             cancel: None,
+            filter: Where::new(),
             buffer: None,
+            headers: None,
         }
     }
 
@@ -334,11 +342,65 @@ impl QueueBuilder {
         self
     }
 
+    /// Make this consumer group a **filtered group**: it gets only the
+    /// messages where `field op value` holds (`value`: `None` for `exists`).
+    /// Several calls are ANDed, and the conditions travel as the list form of
+    /// `where` on every pop of the group.
+    ///
+    /// Fields: `queue`, `partition`, `transactionId`, `data`, `data.<path>`,
+    /// `headers.<name>`. Ops: `= != < <= > >= in exists prefix !prefix`.
+    ///
+    /// # It is a property of the group, like conflation
+    ///
+    /// The broker fixes the group's `where` at its first pop, and a pop with
+    /// another one is refused (400 `where_mismatch`): change it on purpose
+    /// with [`crate::Admin::set_consumer_group_where`]. A group that already
+    /// reads the queue without one is refused too: a filter starts as a new
+    /// group. With [`SubscriptionMode::All`] or [`Self::subscription_from`] the
+    /// new group starts with the history the queue keeps (the broker catches it
+    /// up; the first pops may take a few seconds).
+    ///
+    /// Needs a [`Self::group`] and a named queue: a pop without one, or a
+    /// discovery pop, fails with [`Error::Invalid`] before any request. Broker
+    /// catalogue version 8 and later.
+    pub fn where_(mut self, field: &str, op: &str, value: impl Into<Option<Value>>) -> Self {
+        self.filter = std::mem::take(&mut self.filter).and(field, op, value);
+        self
+    }
+
+    /// [`Self::where_`] in the string form:
+    /// `"data.kind in ('order.paid', 'order.refunded') and data.total > 100"`.
+    /// Several calls are joined with `and`. One group's `where` takes one form:
+    /// a builder that has both fails at its pop.
+    pub fn where_str(mut self, text: impl Into<String>) -> Self {
+        self.filter = std::mem::take(&mut self.filter).and_text(text);
+        self
+    }
+
     // -------------------------------------------------------------- pushing
 
     /// Batch pushes client-side instead of sending each one.
     pub fn buffer(mut self, opts: BufferOptions) -> Self {
         self.buffer = Some(opts);
+        self
+    }
+
+    /// Headers for every message [`Self::push`] and [`Self::push_many`] send
+    /// (a name given twice keeps its last value). [`Self::push_items`] sends
+    /// each item's own: set those with [`PushItem::headers`].
+    ///
+    /// A name is 1 to 64 bytes of `a-z 0-9 . _ -`, and `queen-` is the
+    /// broker's: a push with another name fails with [`Error::Invalid`] before
+    /// anything is sent or buffered. Headers are stored in clear whatever the
+    /// queue's encryption (no secrets in them), are not part of dedup, and come
+    /// back on [`Message::headers`]. Broker catalogue version 8 and later.
+    pub fn headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        routing::extend_headers(&mut self.headers, headers);
         self
     }
 
@@ -372,6 +434,7 @@ impl QueueBuilder {
                     partition: Some(self.partition.clone()),
                     payload: serde_json::to_value(p)?,
                     transaction_id: Some(uuid::uuidv7()),
+                    headers: self.headers.clone(),
                 })
             })
             .collect();
@@ -382,9 +445,17 @@ impl QueueBuilder {
     ///
     /// Note there is no `traceId`: the broker's push path cannot store one.
     /// Push inside a transaction if you need a trace id to survive.
+    ///
+    /// Each item carries its own headers ([`PushItem::headers`]); the
+    /// builder's [`Self::headers`] are for `push` and `push_many`.
     pub async fn push_items(&self, items: Vec<PushItem>) -> Result<Vec<PushResult>> {
         if items.is_empty() {
             return Ok(Vec::new());
+        }
+        // Before anything is buffered: a batch the broker refuses is retried,
+        // not dropped, so one bad name would hold its whole buffer.
+        for item in &items {
+            routing::check_headers(item.headers.as_ref())?;
         }
 
         if let Some(opts) = self.buffer {
@@ -484,6 +555,35 @@ impl QueueBuilder {
         }
     }
 
+    /// The query of one pop: [`Self::pop_params`], then the group's `where`
+    /// when it filters. The `where` is refused here, before any request, where
+    /// the broker would refuse it: without a group, and on a discovery pop.
+    pub(crate) fn pop_pairs(
+        &self,
+        commit_on_delivery: bool,
+    ) -> Result<Vec<(&'static str, String)>> {
+        let mut pairs = self.pop_params(commit_on_delivery).to_pairs();
+        if let Some(w) = self.filter.to_query()? {
+            if self.queue.is_none() {
+                return Err(Error::Invalid(
+                    "where filters a consumer group of a named queue; a discovery pop takes none"
+                        .into(),
+                ));
+            }
+            let grouped = self
+                .group
+                .as_deref()
+                .is_some_and(|g| !g.is_empty() && g != queen_protocol::QUEUE_MODE_GROUP);
+            if !grouped {
+                return Err(Error::Invalid(
+                    "where filters a consumer group: name one with .group(...)".into(),
+                ));
+            }
+            pairs.push(("where", w));
+        }
+        Ok(pairs)
+    }
+
     /// The pair a conflation policy is stored under, and therefore the unit a
     /// declaration conflict is warned about — once per process, §4. Not the
     /// partition: every lane of a queue shares one stored policy, so warning per
@@ -560,6 +660,20 @@ impl QueueBuilder {
         Ok(())
     }
 
+    /// The degrade-loudly contract of a filtered group (PLAN_ROUTING §4), as
+    /// conflation has it: a broker that filters echoes `"filtered":true` on
+    /// every answer to a pop that sent a `where`, the empty ones included,
+    /// which then come as a 200 with a body and never as a bodiless 204. A
+    /// broker before catalogue version 8 drops the parameter without a word
+    /// and would hand the group the whole queue, so an answer without the echo
+    /// fails the pop before any of its messages is handed over.
+    fn check_filtered(&self, resp: Option<&PopResponse>) -> Result<()> {
+        if self.filter.is_empty() || resp.and_then(|r| r.filtered) == Some(true) {
+            return Ok(());
+        }
+        Err(Error::Invalid(FILTER_UNSUPPORTED.to_string()))
+    }
+
     /// Claim messages once.
     ///
     /// Unlike the JS and Python clients, a failed pop returns `Err` rather than
@@ -613,8 +727,10 @@ impl QueueBuilder {
     /// from the builder so the consume loop can always ask for a leased pop.
     pub(crate) async fn pop_once(&self, commit_on_delivery: bool) -> Result<PopOutcome> {
         let path = self.pop_path()?;
-        let params = self.pop_params(commit_on_delivery);
-        let url = format!("{path}?{}", encode_pairs(&params.to_pairs()));
+        let url = format!(
+            "{path}?{}",
+            encode_pairs(&self.pop_pairs(commit_on_delivery)?)
+        );
 
         let mut opts = Opts::affinity(self.affinity_key());
         if self.wait {
@@ -633,8 +749,10 @@ impl QueueBuilder {
             // A bodiless 204 — the shape a pre-1.1.0 broker gives an empty pop.
             // A conflating broker never sends it, so for a consumer that asked
             // for conflation this is the version check firing on the first
-            // round trip rather than an ordinary quiet poll.
+            // round trip rather than an ordinary quiet poll. The same holds for
+            // a filtered group's pop.
             self.check_conflation(None)?;
+            self.check_filtered(None)?;
             return Ok(PopOutcome::empty());
         };
         if !resp.success {
@@ -652,6 +770,7 @@ impl QueueBuilder {
         // that no message from a backlog the caller asked to skip is ever
         // processed. §4.
         self.check_conflation(Some(&resp))?;
+        self.check_filtered(Some(&resp))?;
         Ok(PopOutcome {
             messages: resp.messages,
             autopilot: resp.autopilot,
@@ -661,8 +780,15 @@ impl QueueBuilder {
     // ------------------------------------------------------------- lifecycle
 
     /// Create or reconfigure the queue.
+    ///
+    /// With [`QueueOptions::from`] it is a **reading queue** (broker catalogue
+    /// version 8): its answer carries the `route` it reads by, and an answer
+    /// without one, from a broker that does not read other queues and so
+    /// configured an ordinary queue, is an error.
     pub async fn configure(&self, options: QueueOptions) -> Result<serde_json::Value> {
         let queue = self.require_queue()?;
+        // `null` stops reading: there is no route to answer with then.
+        let reads = options.from.as_ref().is_some_and(|f| !f.is_null());
         let mut req = ConfigureRequest::new(queue).options(options);
         req.namespace = self.namespace.clone();
         req.task = self.task.clone();
@@ -677,6 +803,9 @@ impl QueueBuilder {
         if let Some(err) = out.get("error").and_then(|e| e.as_str()) {
             return Err(Error::Invalid(format!("configure failed: {err}")));
         }
+        if reads && out.get("route").is_none_or(Value::is_null) {
+            return Err(Error::Invalid(READING_UNSUPPORTED.to_string()));
+        }
         Ok(out)
     }
 
@@ -687,8 +816,18 @@ impl QueueBuilder {
 
     /// Drop the queue and everything in it.
     pub async fn delete(&self) -> Result<serde_json::Value> {
+        self.delete_with(false).await
+    }
+
+    /// [`Self::delete`], and with `force` also a queue that reading queues
+    /// read, which is otherwise refused (409 `has_readers`): their links then
+    /// read as gone.
+    pub async fn delete_with(&self, force: bool) -> Result<serde_json::Value> {
         let queue = self.require_queue()?;
-        let path = format!("/api/v1/resources/queues/{}", urlencode(queue));
+        let mut path = format!("/api/v1/resources/queues/{}", urlencode(queue));
+        if force {
+            path.push_str("?force=true");
+        }
         let out: Option<serde_json::Value> =
             self.inner.http.delete_json(&path, &Opts::default()).await?;
         Ok(out.unwrap_or(serde_json::Value::Null))
@@ -718,6 +857,18 @@ impl QueueBuilder {
 /// in their code.
 pub(crate) const CONFLATION_UNSUPPORTED: &str =
     "conflation was requested but this broker did not apply it — requires broker >= 1.1.0";
+
+/// What a pop with a `where` says when the answer did not echo the filter.
+/// It names the remedy: the cause is the broker's version, never the caller's
+/// code.
+pub(crate) const FILTER_UNSUPPORTED: &str = "where was sent, but this broker does not filter \
+     consumer groups (its answer did not say \"filtered\"): upgrade it to one that reads catalogue \
+     version 8";
+
+/// What `configure` with `from` says when the answer carries no route.
+pub(crate) const READING_UNSUPPORTED: &str = "from was sent, but this broker does not read other \
+     queues (its answer carries no route) and configured an ordinary queue: upgrade it to one \
+     that reads catalogue version 8";
 
 /// True the first time this (queue, group) scope reports a declaration conflict,
 /// false for ever after. Process-global on purpose: the point is one line per
@@ -1206,6 +1357,54 @@ mod tests {
             scope.contains("billing") && scope.contains("invoice"),
             "{scope}"
         );
+    }
+
+    #[test]
+    fn a_filtered_pop_needs_the_brokers_echo() {
+        let filtered =
+            q("orders")
+                .group("billing")
+                .where_("data.kind", "=", serde_json::json!("x"));
+        // A bodiless 204 and an answer without the echo: an older broker that
+        // ignored the where.
+        assert_eq!(
+            filtered.check_filtered(None).unwrap_err().to_string(),
+            FILTER_UNSUPPORTED
+        );
+        assert!(filtered
+            .check_filtered(Some(&pop_response(r#"{"messages":[]}"#)))
+            .is_err());
+        assert!(filtered
+            .check_filtered(Some(&pop_response(r#"{"messages":[],"filtered":false}"#)))
+            .is_err());
+        assert!(filtered
+            .check_filtered(Some(&pop_response(r#"{"messages":[],"filtered":true}"#)))
+            .is_ok());
+        // A pop that sent no where is never failed by the echo.
+        let plain = q("orders").group("billing");
+        assert!(plain.check_filtered(None).is_ok());
+        assert!(plain
+            .check_filtered(Some(&pop_response(r#"{"messages":[]}"#)))
+            .is_ok());
+    }
+
+    #[test]
+    fn the_where_travels_last_on_the_pop_query() {
+        let pairs = q("orders")
+            .group("billing")
+            .where_str("data.kind = 'x'")
+            .pop_pairs(false)
+            .unwrap();
+        assert_eq!(
+            pairs.last(),
+            Some(&("where", "data.kind = 'x'".to_string()))
+        );
+        assert!(!q("orders")
+            .group("billing")
+            .pop_pairs(false)
+            .unwrap()
+            .iter()
+            .any(|(k, _)| *k == "where"));
     }
 
     #[tokio::test]

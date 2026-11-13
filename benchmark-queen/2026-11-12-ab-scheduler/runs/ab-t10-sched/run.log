@@ -1,0 +1,17 @@
+[15:14:02] run ab-t10-sched: build sched, txn, 200 partitions, steps of 40s at: 20000 40000 60000 80000 100000 120000 140000 160000 | TXN_SIZE=10 KV=0 CONS=50 PROCS=4 BATCH=100 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames -txn-wire bin | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: b1-in, b1-out x 200 partitions
+[15:15:07]    20,000: offered 20,000 | workers 2,000 txn/s = 19,999 msg/s | read 19,999 | shed 0 errors 0 aborts 0 | commit p50 1.2 p99 1.6 | e2e p50 17 p99 30 | feed push p50 2.3 p99 3.2 | cores 3.6 / 1.8 / 1.8 | loaders 1.5c  OK 
+[create] done: b2-in, b2-out x 200 partitions
+[15:16:12]    40,000: offered 40,000 | workers 4,000 txn/s = 40,000 msg/s | read 40,001 | shed 0 errors 0 aborts 0 | commit p50 1.5 p99 2.2 | e2e p50 22 p99 39 | feed push p50 2.5 p99 3.7 | cores 4.9 / 2.4 / 2.4 | loaders 2.7c  OK 
+[create] done: b3-in, b3-out x 200 partitions
+[15:17:17]    60,000: offered 60,000 | workers 6,000 txn/s = 60,002 msg/s | read 59,998 | shed 0 errors 0 aborts 0 | commit p50 1.8 p99 2.9 | e2e p50 27 p99 49 | feed push p50 2.8 p99 4.2 | cores 5.7 / 2.8 / 2.8 | loaders 3.7c  OK 
+[create] done: b4-in, b4-out x 200 partitions
+[15:18:22]    80,000: offered 79,999 | workers 8,000 txn/s = 80,001 msg/s | read 80,009 | shed 0 errors 0 aborts 0 | commit p50 2.4 p99 3.8 | e2e p50 34 p99 62 | feed push p50 3.2 p99 5.1 | cores 6.2 / 3.0 / 3.0 | loaders 4.5c  OK 
+[create] done: b5-in, b5-out x 200 partitions
+[15:19:27]   100,000: offered 100,002 | workers 9,999 txn/s = 99,987 msg/s | read 99,985 | shed 0 errors 0 aborts 0 | commit p50 3.2 p99 5.4 | e2e p50 45 p99 84 | feed push p50 3.7 p99 6.5 | cores 6.5 / 3.1 / 3.1 | loaders 5.2c  OK 
+[create] done: b6-in, b6-out x 200 partitions
+[15:20:32]   120,000: offered 119,999 | workers 12,000 txn/s = 120,003 msg/s | read 120,020 | shed 0 errors 0 aborts 0 | commit p50 4.5 p99 7.7 | e2e p50 61 p99 119 | feed push p50 4.7 p99 8.6 | cores 6.8 / 3.1 / 3.1 | loaders 5.8c  OK 
+[create] done: b7-in, b7-out x 200 partitions
+[15:21:37]   140,000: offered 140,005 | workers 13,356 txn/s = 133,563 msg/s | read 133,544 | shed 0 errors 0 aborts 0 | commit p50 6.5 p99 11.6 | e2e p50 811 p99 1950 | feed push p50 6.1 p99 12.2 | cores 7.0 / 3.1 / 3.1 | loaders 6.3c  NOT CARRIED 
+[15:21:37] stopping at 140000
+RUN_DONE

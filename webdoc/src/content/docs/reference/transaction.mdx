@@ -81,6 +81,11 @@ sourceOfTruth:
 # carry each request's client scope (None without a client token) and refuse a name outside it 403
 # scope_denied before any command is built (server/src/scope.rs, b24b53599). Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
+# names gain headers, link frames, reading queues, filtered groups and `link`. real.rs takes a
+# `link` operation and `headers` on push items, timers.rs `headers` on a schedule; txn.rs commits a
+# link its partition already holds as a no-op. This page: the operations, the link and timer
+# tables, the result types and the rollback reasons.
 # sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
 # rewords the 504 a membership change answers; handlers/raft.rs changes a comment on ?timeoutMs.
 # Nothing this page states changes.
@@ -111,7 +116,7 @@ patterns built on it, read [transactions](/writing-applications/transactions/) f
 
 | Field | Type | Meaning |
 |---|---|---|
-| `operations` | array | Acks and pushes, in order. Each element has `type: "ack"` or `type: "push"`. |
+| `operations` | array | Acks, pushes and links, in order. Each element has `type: "ack"`, `type: "push"` or `type: "link"`. |
 | `requiredLeases` | array of strings | Lease ids for the acks that name none. See [how an ack finds its lease](#how-an-ack-finds-its-lease). |
 | `kv` | array | KV operations. Top level, never inside `operations`. |
 | `timers` | array | Timer schedules and cancels. Top level, never inside `operations`. |
@@ -132,6 +137,7 @@ Either a list of `items`, or one item inline (`queue`, `partition`, `payload` on
 | `items[].payload` | yes | Any JSON value. |
 | `items[].transactionId` | no | The dedup key, at most 65,535 bytes. Default: the minted message id. |
 | `items[].traceId` | no | A UUID; an invalid one is ignored. |
+| `items[].headers` | no | The message's [headers](/writing-applications/headers/): an object of strings. |
 
 Two items with the same `(queue, partition, transactionId)` in one call store one message; the
 second result says `duplicate: true`. **An item whose `transactionId` is already in the partition's
@@ -157,6 +163,26 @@ attempt. `dlq` dead-letters it now.
 Set `consumerGroup` on every ack of a message popped for a group. Left out, the ack targets queue
 mode's cursor, the transaction acks nothing the consumer read, and the message is redelivered.
 </Aside>
+
+### Link operation
+
+Puts a message the caller holds into another queue without its payload (see
+[Routing](/writing-applications/routing/)): the target gets the same message, id and
+`transactionId`.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `queue` | yes | The target queue, an ordinary one (a reading queue takes no link but its sources'). |
+| `partition` | no | The target partition, default `Default`. |
+| `from.partitionId` | one of | The message's `partitionId`, as a pop returns it. |
+| `from.queue`, `from.partition` | one of | The message's queue and partition, as a feed entry names them. |
+| `from.offset` | yes | The message's `offset`. |
+| `from.transactionId` | yes | The message's `transactionId`: it must be the one at that offset. |
+| `from.consumerGroup` | no | The group the message was popped with: a scoped credential must be allowed to consume the source with it. Default queue mode. |
+| `headers` | no | Headers of the link's own, read over the source's. |
+
+A link the target partition already holds (the same `transactionId`) is a no-op: the transaction
+commits, and the link's result says `duplicate: true`.
 
 ### How an ack finds its lease
 
@@ -236,6 +262,7 @@ written once per call. A transaction carries at most 64 KV operations naming at 
 | `txn` | schedule | The fired message's `transactionId`. On a cancel, echoed back. |
 | `payload` | schedule | The message payload, base64. |
 | `payloadZstd` | no | `true` when `payload` is zstd-compressed; the broker decompresses it. |
+| `headers` | no | The fired message's [headers](/writing-applications/headers/): an object of strings. |
 
 The broker owns `producerSub`, `messageId`, `deliverAt`, `attempts`, the tenant fields and every
 field starting with `_`: a timer op that carries one is refused with 400. A `(queue, timerKey)` may
@@ -273,6 +300,7 @@ the other `operations`; the SDKs that send it put the results back in the order 
 |---|---|
 | `ack` | `success`, `transactionId`, `error`, `dlq` (true when the ack dead-lettered the message) |
 | `push` | `success`, `transactionId`, `messageId`, `queueName`, and `duplicate: true` for an in-call repeat |
+| `link` | `success`, `transactionId`, `messageId` (the source's), `queueName`, and `duplicate: true` when the partition held the message already |
 | `kv` | `op`, `applied`, `reason` (when not applied), `key`, `value`, `version`; a read has `found` or `rows`/`missing`; a `check` that holds has no `value` |
 | `timer` | `ok`, `status` (`scheduled`, `rescheduled`, `cancelled`, or `absent` with `ok: false`), `queue`, `timerKey`, `txn`, `messageId`, `deliverAt` |
 | `position` | `success` |
@@ -385,6 +413,10 @@ A lost `required` KV operation adds the operation that lost:
 | `timers_server_owned_field` | 400 | A timer op carries `producerSub` or a field starting with `_`. | Remove it. |
 | `timers_too_many_ops`, `timer_horizon_exceeded`, `timers_payload_too_large` | 400 | A timer op is past what `POST /api/v1/timers` takes: more than 256 timer ops, a delay beyond `QUEEN_TIMERS_MAX_HORIZON_S` (90 days), a payload over `QUEEN_TIMERS_MAX_PAYLOAD_BYTES` (1 MiB). | Split the timers, or shorten them. |
 | `kv_*` | 400, 413 | A KV operation fails validation: `kv_bad_request`, `kv_unknown_op`, `kv_bad_namespace`, `kv_bad_key`, `kv_bad_ttl`, `kv_expiry_not_specified`, `kv_bad_expect`, `kv_too_many_ops`, `kv_too_many_keys`, `kv_duplicate_key_in_call`, `kv_tenant_not_an_input`, `kv_get_prefix_not_allowed_in_transaction`; 413 for `kv_key_too_large` and `kv_value_too_large`. | Fix the request. |
+| `source_gone`, `source_mismatch` | 200 | A link's message is no longer kept at its source, or the `transactionId` at that offset is another one. | Push the message instead, or name the right one. |
+| `reading_queue` | 200 | A link into a reading queue, or a push into one. | Push or link to its source. |
+| `scope_denied` | 200 | A link's credential may not consume the source. | Use a credential that reads the source. |
+| `cluster_version` | 200 | A link, or headers, before every node reads catalogue version 8. | Finish the upgrade. |
 | `internal`, `entry_encode_failed` | 200 | A broker fault. | Report it. |
 
 Some failures use the engine's error body `{"error", "code"}` instead, with no `reason`: 413

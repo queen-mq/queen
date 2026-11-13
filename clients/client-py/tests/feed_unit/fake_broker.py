@@ -11,6 +11,15 @@ virtual: ``broker.now_ms`` is the wall clock, which the test moves; a write is
 stamped ``max(now_ms, the last write's time)``, and a caught-up read resolves to
 the last write's time, so the clock moves only with writes, as on the broker.
 Locks expire on the real clock (the Lock handle keeps its deadline on it).
+
+A transaction's ``link`` operations (PLAN_ROUTING.md §7) are served as the
+broker serves them: the target gets the source message, its id, transactionId
+and payload (``kind: "link"`` in the log), a second link of one message into one
+partition is a no-op (``duplicate: true``, the transaction commits), and the
+feed reads a link through: an entry of its target queue with the source's id,
+transactionId and payload, the link's headers over the source's. ``links`` set
+to "cluster_version" refuses them as a cluster before catalogue version 8 does,
+"unknown_op" with the 400 of a broker that has no link operation.
 """
 
 from __future__ import annotations
@@ -48,6 +57,16 @@ class _Q:
         self.name = name
 
 
+class Refused(Exception):
+    """An HTTP refusal, as the client's HTTP layer raises it (``status``, ``body``)."""
+
+    def __init__(self, message: str, status: int, body: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(message)
+        self.status = status
+        self.body = body
+        self.code = None
+
+
 class FakeBroker:
     def __init__(self, start: Optional[int] = None) -> None:
         start = T_START if start is None else start
@@ -70,6 +89,10 @@ class FakeBroker:
         self.ephemeral: Dict[str, List[Dict[str, Any]]] = {}
         self.ephemeral_waiters: List[asyncio.Event] = []
         self.ephemeral_seq = 0
+        # "served", "cluster_version" or "unknown_op" (see the module's note).
+        self.links = "served"
+        # Sources (transactionIds) a link finds gone, as past retention.
+        self.gone: set = set()
 
     # ---- the log ------------------------------------------------------------
 
@@ -104,6 +127,38 @@ class FakeBroker:
             })
             results.append({"type": "push", "status": "queued", "transactionId": it["transactionId"]})
         return results
+
+    def _append_links(self, links: List[Dict[str, Any]], position: int, t: int) -> List[Dict[str, Any]]:
+        results = []
+        for ln in links:
+            pk = f"{ln['queue']}\u0000{ln['partition']}"
+            if pk not in self.pids:
+                self.pids[pk] = f"pid-{len(self.pids) + 1}"
+            offset = self.offsets.get(pk, 0) + 1
+            self.offsets[pk] = offset
+            self.ids.add(f"{pk}\u0000{ln['transactionId']}")
+            self.log.append({
+                "position": position, "kind": "link", "queue": ln["queue"], "partition": ln["partition"],
+                "partitionId": self.pids[pk], "offset": offset, "id": ln["id"],
+                "transactionId": ln["transactionId"], "payload": ln["payload"], "headers": ln.get("headers"),
+                "ts": js_iso(t), "from": ln["from"],
+            })
+            results.append({"type": "link", "success": True, "transactionId": ln["transactionId"]})
+        return results
+
+    def _link_source(self, frm: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The message a link's ``from`` names, by partitionId or by queue and
+        partition. A link names it too: its entry holds the message's id,
+        transactionId and payload (a link to a link points at the message)."""
+        for e in self.log:
+            if frm.get("partitionId") is not None:
+                if e["partitionId"] != frm["partitionId"]:
+                    continue
+            elif e["queue"] != frm.get("queue") or e["partition"] != frm.get("partition"):
+                continue
+            if e["offset"] == frm.get("offset"):
+                return e
+        return None
 
     def push(self, items: Any) -> int:
         """A producer's push: one position for all of ``items`` ({queue, partition, data, transactionId?})."""
@@ -180,7 +235,8 @@ class FakeBroker:
                 continue
             if shard and (not shard_queues or any(r.match(e["queue"]) for r in shard_queues)) and shard_of(e["partition"], shard["count"]) != shard["index"]:
                 continue
-            msg = {"queue": e["queue"], "partition": e["partition"], "transactionId": e["transactionId"], "offset": e["offset"], "position": e["position"], "data": e["payload"]}
+            msg = {"queue": e["queue"], "partition": e["partition"], "transactionId": e["transactionId"], "offset": e["offset"],
+                   "position": e["position"], "data": e["payload"], "headers": e.get("headers")}
             if not all(condition_holds(c, msg) for c in where):
                 continue
             out.append(e)
@@ -204,7 +260,8 @@ class FakeBroker:
         return {
             "applied": self.applied,
             "caughtUp": caught_up,
-            "entries": [dict(e) for e in out],
+            # A link reads as the message it holds: an entry like a push's.
+            "entries": [{**e, "kind": "push"} for e in out],
             "next": nxt,
             "resolvedTs": js_iso(resolved),
         }
@@ -301,28 +358,65 @@ class FakeBroker:
 
     def transaction(self, body: Dict[str, Any]) -> Dict[str, Any]:
         items: List[Dict[str, Any]] = []
+        links: List[Dict[str, Any]] = []
+        # The pushed items and the links, in the order of the operations.
+        writes: List[Any] = []
         for op in body.get("operations") or []:
             if op.get("type") == "push":
                 items.extend(op["items"])
+                writes.extend(("push", it) for it in op["items"])
+            elif op.get("type") == "link":
+                links.append(op)
+                writes.append(("link", op))
         kv = body.get("kv") or []
         injected = self.injected.pop(0) if self.injected else None
         if injected and injected.get("before"):
             injected["before"](self)
         if injected and injected.get("error") and injected.get("when") != "after":
             raise injected["error"]
-        # Duplicates first, as the broker answers them.
+        if links and self.links == "unknown_op":
+            raise Refused("HTTP 400: Bad Request", 400, {
+                "success": False, "reason": "bad_request", "results": [],
+                "error": "transaction supports only push and ack operations, got `link`",
+            })
+        if links and self.links == "cluster_version":
+            return {"success": False, "reason": "cluster_version", "results": [],
+                    "error": "link needs every node on a broker that reads catalogue version 8"}
+        # Duplicates first, as the broker answers them: a pushed one rolls the
+        # transaction back, a link its target partition holds already is a no-op.
         seen = set()
-        for it in items:
-            k = f"{it['queue']}\u0000{it.get('partition') if it.get('partition') is not None else 'Default'}\u0000{it['transactionId']}"
-            if k in self.ids or k in seen:
-                return {"success": False, "reason": "duplicate", "error": "QDUP a pushed message is a duplicate; the transaction rolled back", "results": []}
+        resolved: List[Dict[str, Any]] = []
+        for kind, x in writes:
+            if kind == "push":
+                k = f"{x['queue']}\u0000{x.get('partition') if x.get('partition') is not None else 'Default'}\u0000{x['transactionId']}"
+                if k in self.ids or k in seen:
+                    return {"success": False, "reason": "duplicate", "error": "QDUP a pushed message is a duplicate; the transaction rolled back", "results": []}
+                seen.add(k)
+                continue
+            src = self._link_source(x["from"])
+            if src is None or src["transactionId"] in self.gone:
+                return {"success": False, "reason": "source_gone", "results": [],
+                        "error": f"source_gone: {x['from']} is not retained"}
+            if src["transactionId"] != x["from"]["transactionId"]:
+                return {"success": False, "reason": "source_mismatch", "results": [],
+                        "error": f"source_mismatch: the offset holds transaction {src['transactionId']!r}"}
+            partition = x.get("partition") or "Default"
+            k = f"{x['queue']}\u0000{partition}\u0000{src['transactionId']}"
+            resolved.append({
+                "queue": x["queue"], "partition": partition, "transactionId": src["transactionId"], "id": src["id"],
+                "payload": _copy(src["payload"]), "from": x["from"],
+                # The link's headers over the message's.
+                "headers": {**(src.get("headers") or {}), **(x.get("headers") or {})} or None,
+                "duplicate": k in self.ids or k in seen,
+            })
             seen.add(k)
+        flat = len(items) + len(links)
         if len(kv) > 64:
             return {"success": False, "reason": "bad_request", "error": f"kv_too_many_ops: {len(kv)} ops in one call, the ceiling is 64"}
         for i, op in enumerate(kv):
             def fail(kv_reason: str, row: Optional[Dict[str, Any]], i: int = i) -> Dict[str, Any]:
                 return {
-                    "success": False, "reason": "kv_precondition", "failedIndex": len(items) + i, "kvReason": kv_reason,
+                    "success": False, "reason": "kv_precondition", "failedIndex": flat + i, "kvReason": kv_reason,
                     "version": row["version"] if row else None, "value": row["value"] if row else None,
                     "error": "QKV a required KV precondition failed; the transaction rolled back", "results": [],
                 }
@@ -351,23 +445,39 @@ class FakeBroker:
                 return {"success": False, "reason": "bad_request", "error": "kv_expiry_not_specified"}
         st = self._stamp()
         position, t = st["position"], st["t"]
-        results = self._append_pushes([{**it, "partition": it.get("partition") if it.get("partition") is not None else "Default"} for it in items], position, t)
+        results: List[Dict[str, Any]] = []
+        # What the transaction wrote, in order: its pushed items and the links
+        # that were not no-ops (as items: queue, partition, transactionId).
+        stored: List[Dict[str, Any]] = []
+        links_left = iter(resolved)
+        for kind, x in writes:
+            if kind == "push":
+                it = {**x, "partition": x.get("partition") if x.get("partition") is not None else "Default"}
+                results.extend(self._append_pushes([it], position, t))
+                stored.append(x)
+                continue
+            ln = next(links_left)
+            if ln["duplicate"]:
+                results.append({"type": "link", "success": True, "duplicate": True, "transactionId": ln["transactionId"]})
+                continue
+            results.extend(self._append_links([ln], position, t))
+            stored.append({"queue": ln["queue"], "partition": ln["partition"], "transactionId": ln["transactionId"], "link": ln["from"]})
         written: Dict[str, int] = {}
         for i, op in enumerate(kv):
             if op["op"] == "check":
-                results.append({"index": len(items) + i, "type": "kv", "op": "check", "key": op["key"]})
+                results.append({"index": flat + i, "type": "kv", "op": "check", "key": op["key"]})
                 continue
             k = self._kv_key(op["ns"], op["key"])
             if op["op"] == "delete":
                 self.kv.pop(k, None)
-                results.append({"index": len(items) + i, "type": "kv", "op": "delete", "key": op["key"], "applied": True})
+                results.append({"index": flat + i, "type": "kv", "op": "delete", "key": op["key"], "applied": True})
                 continue
             self.kv_version += 1
             version = self.kv_version
             self.kv[k] = {"value": _copy(op.get("value")), "version": version}
             written[op["key"]] = version
-            results.append({"index": len(items) + i, "type": "kv", "op": op["op"], "key": op["key"], "version": version, "applied": True})
-        self.txns.append({"position": position, "items": items, "kv": kv, "written": written})
+            results.append({"index": flat + i, "type": "kv", "op": op["op"], "key": op["key"], "version": version, "applied": True})
+        self.txns.append({"position": position, "items": stored, "links": resolved, "kv": kv, "written": written})
         self._wake()
         if injected and injected.get("error") and injected.get("when") == "after":
             raise injected["error"]

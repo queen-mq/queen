@@ -1,0 +1,9 @@
+[12:48:48] run b13-spread-sched7: build sched7, push, 1000 partitions, steps of 40s at: 1000000 1500000 2000000 | TXN_SIZE=10 KV=0 CONS=17 PROCS=8 BATCH=100 SPREAD=10 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: b1 x 1000 partitions
+[12:49:56] 1,000,000: offered 999,997 | pushed 999,993 | consumed 1,000,043 | shed 0 errors 0 | push p50 4.4 p99 11.4 | e2e p50 11.6 p99 27.4 | cores 11.3 / 5.5 / 4.0 | loader 9.9c  OK 
+[create] done: b2 x 1000 partitions
+[12:51:03] 1,500,000: offered 1,500,027 | pushed 1,499,877 | consumed 1,499,387 | shed 0 errors 0 | push p50 6.7 p99 79.9 | e2e p50 21.2 p99 143.4 | cores 14.1 / 6.9 / 4.9 | loader 14.2c  OK 
+[create] done: b3 x 1000 partitions
+[12:52:10] 2,000,000: offered 2,000,008 | pushed 1,814,983 | consumed 1,812,745 | shed 2,569,400 errors 0 | push p50 434.2 p99 2392.1 | e2e p50 516.1 p99 2490.4 | cores 17.2 / 7.5 / 4.9 | loader 17.5c  NOT CARRIED 
+[12:52:10] stopping at 2000000
+RUN_DONE

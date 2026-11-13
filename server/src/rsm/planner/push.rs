@@ -35,6 +35,20 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         cmd: &PushCommand,
         known_pid: Option<Pid>,
     ) -> Planned {
+        self.plan_push_inner(ov, cmd, known_pid, true)
+    }
+
+    /// [`Planner::plan_push_known`]; `route`: whether the queue's readers
+    /// take links of what this push appends (`planner::route`). A route's own
+    /// append into a reader passes `false`: the route goes on to that
+    /// reader's readers itself, with the original messages.
+    pub(super) fn plan_push_inner(
+        &self,
+        ov: &mut Overlay,
+        cmd: &PushCommand,
+        known_pid: Option<Pid>,
+        route: bool,
+    ) -> Planned {
         if cmd.items.is_empty() {
             // Nothing to do and nothing to answer beyond an empty verdict list.
             return Ok(Plan::Empty(Outcome::Push(PushOutcome::default())));
@@ -67,9 +81,28 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 // The planner stamps the creation time (D5); the receiver only
                 // minted the id.
                 c.created_at_us = self.now_us;
+                // An implicit creation never makes a reader.
+                c.route = None;
                 c
             }
         };
+        // A reading queue takes only what its sources route to it.
+        let links = super::route::all_links(&cmd.items);
+        if cfg.is_reader() && !links {
+            let from: Vec<&str> = cfg
+                .route()
+                .map(|r| r.sources.iter().map(|s| s.queue.as_str()).collect())
+                .unwrap_or_default();
+            return Err(super::Refusal::client(
+                "reading_queue",
+                format!(
+                    "{} reads {}: push to {}",
+                    crate::rsm::route::shown_name(&cmd.queue),
+                    from.join(", "),
+                    from.first().copied().unwrap_or("its sources")
+                ),
+            ));
+        }
 
         // Resolve the partition. Only an existing partition can hold a
         // duplicate — a fresh one has no dedup rows — so the probe runs only
@@ -217,8 +250,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // Keep the dedup front (PERF-B) a superset of the committed index it
         // fronts: a partition minted here is born seeded, and every planned
         // survivor's hash is recorded at plan time (before it commits). Only for
-        // a queue that actually dedups.
-        if self.front().enabled() && cfg.dedup_window_seconds > 0 {
+        // a queue that actually dedups. Not a partition a group created this
+        // cycle: its id is a placeholder until the entry is numbered, and the
+        // front's entries belong to real ids (its first push after it commits
+        // seeds it from committed state, which is sound).
+        if self.front().enabled() && cfg.dedup_window_seconds > 0 && !super::is_placeholder(pid) {
             if existing_pid.is_none() {
                 self.front().note_created(pid);
             }
@@ -236,6 +272,23 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 floor,
             );
         }
+        // Links into an ordinary queue (a transaction's `link`): it holds them,
+        // and its sources' retention waits for it (route.rs).
+        if links && !cfg.is_reader() {
+            let holders = self.holder_upserts(ov, &cmd.tenant, &cmd.queue, cmd, &survivors)?;
+            if !holders.is_empty() {
+                ov.apply_effects(&holders);
+                effects.extend(holders);
+            }
+        }
+        // The queue's readers take links of what it appended (route.rs).
+        if route && cfg.has_readers() {
+            let messages = self.routed_of(cmd, pid, base, &survivors, true);
+            let routed =
+                self.plan_routes(ov, &cmd.tenant, &cmd.queue, &cmd.partition, &cfg, messages)?;
+            effects.extend(routed);
+        }
+
         // Version 7 writes the verdicts as runs (one for this push's created
         // messages) where that is smaller, and only once every member reads it
         // (D20).

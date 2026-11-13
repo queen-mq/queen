@@ -1,0 +1,15 @@
+[17:55:48] abplan-fix3 start
+[17:55:48] == push on sched3
+fix3-push-sched3 [17:57:25] 2,000,000: offered 1,999,951 | pushed 2,000,014 | consumed 2,000,048 | shed 0 errors 0 | push p50 4.1 p99 14.6 | e2e p50 9.2 p99 27.4 | cores 11.6 / 5.7 / 4.2 | loader 13.3c  OK 
+fix3-push-sched3 [17:58:39] 2,500,000: offered 2,499,957 | pushed 2,500,014 | consumed 2,499,944 | shed 0 errors 0 | push p50 5.6 p99 62.0 | e2e p50 13.2 p99 91.1 | cores 13.9 / 6.7 / 4.8 | loader 16.1c  OK 
+fix3-push-sched3 [17:59:54] 3,000,000: offered 3,000,037 | pushed 2,818,910 | consumed 2,816,940 | shed 2,419,600 errors 0 | push p50 413.7 p99 1507.3 | e2e p50 446.5 p99 1540.1 | cores 15.8 / 8.6 / 5.3 | loader 18.9c  NOT CARRIED 
+fix3-push-sched3 [17:59:54] stopping at 3000000
+[17:59:57] == t10 on sched3
+fix3-t10-sched3 [18:01:24]   240,000: offered 240,008 | workers 23,995 txn/s = 239,953 msg/s | read 239,954 | shed 0 errors 0 aborts 0 | commit p50 3.0 p99 5.6 | e2e p50 42 p99 82 | feed push p50 3.4 p99 5.9 | cores 11.9 / 6.4 / 4.9 | loaders 10.8c  OK 
+[18:01:29] == t10w on sched3
+fix3-t10w-sched3 [18:02:58]   280,000: offered 279,978 | workers 28,004 txn/s = 280,039 msg/s | read 279,979 | shed 0 errors 0 aborts 0 | commit p50 5.2 p99 9.0 | e2e p50 73 p99 143 | feed push p50 4.8 p99 8.3 | cores 12.8 / 7.0 / 5.3 | loaders 12.1c  OK 
+[18:03:01] == t10kv on sched3
+fix3-t10kv-sched3 [18:04:14]   200,000: offered 200,004 | workers 19,995 txn/s = 199,951 msg/s | read 199,954 | shed 0 errors 0 aborts 0 | commit p50 4.7 p99 8.4 | e2e p50 55 p99 115 | feed push p50 3.8 p99 6.8 | cores 12.4 / 6.9 / 5.2 | loaders 9.3c  OK 
+[18:04:17] == t100 on sched3
+fix3-t100-sched3 [18:06:03]   750,000: offered 749,995 | workers 7,500 txn/s = 749,992 msg/s | read 749,925 | shed 0 errors 0 aborts 0 | commit p50 3.8 p99 7.6 | e2e p50 17 p99 46 | feed push p50 3.9 p99 7.9 | cores 10.1 / 5.4 / 4.1 | loaders 10.3c  OK 
+[18:06:06] ABPLAN_FIX3_DONE

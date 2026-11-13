@@ -162,8 +162,9 @@ pub type Waker = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
 /// The knobs, read once when the engine is built.
 #[derive(Clone, Debug)]
 pub(crate) struct Knobs {
-    /// `QUEEN_LANES` (default 8): a checkpoint is one command per (tenant,
-    /// lane), `lane = pid % lanes`, so the lanes plan it in parallel.
+    /// `QUEEN_PLANNER_THREADS` (default 8; `QUEEN_LANES`, its old name, when
+    /// unset): a checkpoint is one command per (tenant, lane), `lane = pid %
+    /// lanes`, so the footprint scheduler plans the lanes' rows in parallel.
     pub lanes: u64,
     /// `QUEEN_CONSUME_CHECKPOINT_MS` (default 5).
     pub ckpt_ms: u64,
@@ -215,7 +216,7 @@ fn env_flag(name: &str) -> bool {
 impl Knobs {
     pub fn from_env() -> Knobs {
         Knobs {
-            lanes: env_u64("QUEEN_LANES", 8).max(1),
+            lanes: env_u64("QUEEN_PLANNER_THREADS", env_u64("QUEEN_LANES", 8)).max(1),
             ckpt_ms: env_u64("QUEEN_CONSUME_CHECKPOINT_MS", 5).max(1),
             fast: env_flag("QUEEN_CONSUME_FAST"),
             eager: std::env::var("QUEEN_CONSUME_CHECKPOINT_EAGER")

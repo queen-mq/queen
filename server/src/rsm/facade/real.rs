@@ -70,8 +70,8 @@ use crate::rsm::planner::timers::{
     list_limit, list_row_json, parse_timer_ops, peek_json, timers_results, TimerOp, TimersCommand,
 };
 use crate::rsm::planner::{
-    bucket_of, AckCommand, AckItem, AckStatus, AckTarget, DlqSnapshot, PopCommand, PushCommand,
-    PushItem, RenewCommand, SubIntent,
+    bucket_of, AckCommand, AckItem, AckStatus, AckTarget, DlqSnapshot, Links, PopCommand,
+    PushCommand, PushItem, RenewCommand, SubIntent,
 };
 use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::replicator::local::{OpenConfig, Waker};
@@ -93,6 +93,7 @@ use super::{
 /// facade's private plumbing (`submit`, the store handle).
 mod kv;
 mod phase2;
+mod route;
 
 /// The single-node node id of raft1 / embedded (D2). Membership and identity
 /// are WP-4.3's; phase 1 is one voter.
@@ -1907,6 +1908,21 @@ fn conflation_echo(out: &mut PopOut, on: bool, conflict: bool) {
     out.body.push('}');
 }
 
+/// `"filtered":true` on every answer of a filtered group's pop, empty ones
+/// included ([`PopOut::filtered`]), after the other keys.
+fn filtered_echo(mut out: PopOut, filtered: bool) -> PopOut {
+    if !filtered || !out.body.ends_with('}') {
+        return out;
+    }
+    out.filtered = true;
+    out.body.pop();
+    if !out.body.ends_with('{') {
+        out.body.push(',');
+    }
+    out.body.push_str("\"filtered\":true}");
+    out
+}
+
 /// A pop's rendered answer, with the autopilot's choice echoed when it made
 /// one (`"autopilot":{"partitions":W,"batch":B}`).
 fn autopilot_echo(
@@ -2205,6 +2221,112 @@ struct TxnOpIn<'a> {
     error: Option<String>,
     #[serde(default, rename = "leaseId")]
     lease_id: Option<String>,
+    /// A push's (or a link's) headers (catalogue version 8).
+    #[serde(default)]
+    headers: Option<serde_json::Value>,
+    /// A `link`'s source: the message as a pop returned it.
+    #[serde(default)]
+    from: Option<LinkFromIn>,
+}
+
+/// Where a `link` operation's message is: its partition id, offset and
+/// transaction id, as a pop returned them. The offset finds it; the
+/// transaction id proves it is the one meant.
+#[derive(Deserialize)]
+struct LinkFromIn {
+    /// The partition's id as a pop returns it; or name it with `queue` and
+    /// `partition` (a feed entry's).
+    #[serde(rename = "partitionId", default)]
+    partition_id: Option<String>,
+    #[serde(default)]
+    queue: Option<String>,
+    #[serde(default)]
+    partition: Option<String>,
+    offset: u64,
+    #[serde(rename = "transactionId")]
+    transaction_id: String,
+    /// The group the caller popped it with: a scoped credential must be
+    /// allowed to consume the source with it (queue mode when absent).
+    #[serde(rename = "consumerGroup", default)]
+    consumer_group: Option<String>,
+}
+
+/// A `link`'s source, resolved: the address the link frame holds, and the
+/// message's id and transaction id, which the link takes.
+struct LinkSource {
+    link: crate::frames::LinkRef,
+    message_id: [u8; 16],
+    txn: String,
+    /// The source's queue and partition names, for the caller's scope.
+    queue: String,
+    partition: String,
+}
+
+/// Resolve a `link` source on the store and the queue log: a partition of
+/// this tenant, an offset still retained, a frame whose transaction id is the
+/// one named. A link to a link points at what that link points at.
+fn resolve_link_source(
+    store: &HeedStore,
+    qlog: &QLogReader,
+    tenant: &str,
+    from: &LinkFromIn,
+) -> Result<LinkSource, String> {
+    let pid: u64 = match (&from.partition_id, &from.queue, &from.partition) {
+        (Some(id), _, _) => id
+            .parse()
+            .map_err(|_| "from.partitionId is not a partition id (a pop's partitionId; or give queue and partition)".to_string())?,
+        (None, Some(q), Some(p)) => store
+            .read(|r| r.pid_of(tenant, q, p))
+            .map_err(|e| format!("link source read: {e}"))?
+            .ok_or_else(|| format!("source_gone: no partition {p} in {q}"))?,
+        _ => return Err("from needs partitionId, or queue and partition".into()),
+    };
+    let part = store
+        .read(|r| r.partition(pid))
+        .map_err(|e| format!("link source read: {e}"))?
+        .filter(|p| p.tenant == tenant)
+        .ok_or_else(|| format!("source_gone: no partition {pid}"))?;
+    if from.offset < part.log_start || (from.offset as i64) > part.last_offset {
+        return Err(format!(
+            "source_gone: offset {} of {} is not retained",
+            from.offset, part.queue
+        ));
+    }
+    let qid = QLogReader::queue_id_of(tenant, &part.queue);
+    let rec = qlog
+        .read_owned(qid, pid, from.offset)
+        .map_err(|e| format!("link source read: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "source_gone: offset {} of {} is not readable",
+                from.offset, part.queue
+            )
+        })?;
+    let frames = unpack_frames_ref(&rec.payload).ok_or("link source: a record does not decode")?;
+    let f = frames
+        .get((from.offset - rec.base_offset) as usize)
+        .ok_or("link source: the offset is not in its record")?;
+    if f.txn != from.transaction_id {
+        return Err(format!(
+            "source_mismatch: offset {} holds transaction {:?}, not {:?}",
+            from.offset, f.txn, from.transaction_id
+        ));
+    }
+    let link = match f.link {
+        Some(l) => l,
+        None => crate::frames::LinkRef {
+            qid,
+            pid,
+            offset: from.offset,
+        },
+    };
+    Ok(LinkSource {
+        link,
+        message_id: f.message_id,
+        txn: f.txn.to_string(),
+        queue: part.queue.clone(),
+        partition: part.partition.clone(),
+    })
 }
 
 impl RaftFacade {
@@ -2327,6 +2449,14 @@ impl RaftFacade {
             Ok(o) => o,
             Err(e) => return Ok(refuse("bad_request", &e.message)),
         };
+        if crate::rsm::planner::timers::any_headers(&timer_ops)
+            && !self.cluster_allows(crate::rsm::effect::VERSION_8)
+        {
+            return Ok(refuse(
+                "cluster_version",
+                "headers need every node on a broker that reads catalogue version 8",
+            ));
+        }
         // The rider gets the checks POST /timers makes (handlers/timers.rs and
         // `Self::timers`): at most 256 ops, names that fit the store with the
         // route's slack (a schedule's partition becomes a key at the fire),
@@ -2500,12 +2630,18 @@ impl RaftFacade {
         // `prebuilt`: the message's id and frame as the client built them (the
         // binary body); the frame is used as it is when nothing has to be added
         // to it, and built here around the client's id otherwise.
+        // `headers`: the message's checked block. `link`: a link frame, which
+        // goes into the log as it is (a link is never encrypted and names no
+        // producer: it stands for a message that already has both).
+        #[allow(clippy::too_many_arguments)]
         let mut add_push = |queue: &str,
                             partition: Option<&str>,
                             payload: &[u8],
                             txn_in: Option<&str>,
                             trace_id: Option<&str>,
                             prebuilt: Option<([u8; 16], bytes::Bytes)>,
+                            headers: Option<&[u8]>,
+                            link: Option<([u8; 16], bytes::Bytes)>,
                             flat: usize,
                             pushes: &mut Vec<TxnPush>|
          -> Result<(), RsmError> {
@@ -2515,7 +2651,10 @@ impl RaftFacade {
                     message: format!("transactionId exceeds the {MAX_TXN_BYTES}-byte limit"),
                 });
             }
-            let mid = prebuilt.as_ref().map_or_else(uuidv7_bytes, |(id, _)| *id);
+            let mid = match (&link, &prebuilt) {
+                (Some((id, _)), _) | (None, Some((id, _))) => *id,
+                (None, None) => uuidv7_bytes(),
+            };
             let mid_str = uuid_bytes_to_string(&mid);
             let txn = txn_in
                 .map(str::to_string)
@@ -2539,8 +2678,9 @@ impl RaftFacade {
                 seen.insert(key, idx);
                 groups.push(queue, &partition, idx);
                 let encrypt = encrypted_queues.contains(queue);
-                match prebuilt {
-                    Some((_, frame)) if !encrypt && ctx.producer_sub.is_none() => frame,
+                match (link, prebuilt) {
+                    (Some((_, frame)), _) => frame,
+                    (None, Some((_, frame))) if !encrypt && ctx.producer_sub.is_none() => frame,
                     _ => {
                         let (payload, encrypted) = self.encode_payload(encrypt, payload, queue);
                         pack_frames(&[FrameIn {
@@ -2552,6 +2692,8 @@ impl RaftFacade {
                             producer_sub: ctx.producer_sub.as_deref(),
                             payload: &payload,
                             encrypted,
+                            headers,
+                            link: None,
                         }])
                         .into()
                     }
@@ -2576,12 +2718,18 @@ impl RaftFacade {
                 "push" => {
                     if let Some(items) = &op.items {
                         for it in items {
+                            let block = match txn_headers(it.headers.as_ref(), self) {
+                                Ok(b) => b,
+                                Err(e) => return Ok(fail("bad_request", &e)),
+                            };
                             add_push(
                                 it.queue.as_ref(),
                                 it.partition.as_deref(),
                                 it.payload.get().as_bytes(),
                                 it.transaction_id.as_deref(),
                                 it.trace_id.as_deref(),
+                                None,
+                                block.as_deref(),
                                 None,
                                 flat,
                                 &mut pushes,
@@ -2595,6 +2743,10 @@ impl RaftFacade {
                                 "a push operation needs queue and payload",
                             ));
                         };
+                        let block = match txn_headers(op.headers.as_ref(), self) {
+                            Ok(b) => b,
+                            Err(e) => return Ok(fail("bad_request", &e)),
+                        };
                         add_push(
                             q,
                             op.partition.as_deref(),
@@ -2602,11 +2754,118 @@ impl RaftFacade {
                             op.transaction_id.as_deref(),
                             op.trace_id.as_deref(),
                             None,
+                            block.as_deref(),
+                            None,
                             flat,
                             &mut pushes,
                         )?;
                         flat += 1;
                     }
+                }
+                "link" => {
+                    if !self.cluster_allows(crate::rsm::effect::VERSION_8) {
+                        return Ok(fail(
+                            "cluster_version",
+                            "link needs every node on a broker that reads catalogue version 8",
+                        ));
+                    }
+                    let (Some(q), Some(from)) = (op.queue.as_deref(), op.from.as_ref()) else {
+                        return Ok(fail(
+                            "bad_request",
+                            "a link operation needs queue and from {partitionId, offset, transactionId}",
+                        ));
+                    };
+                    let Some(ql) = self.qlog_reader.clone() else {
+                        return Ok(fail(
+                            "bad_request",
+                            "link needs the queue log (QUEEN_RAFT_QLOG)",
+                        ));
+                    };
+                    let block = match txn_headers(op.headers.as_ref(), self) {
+                        Ok(b) => b,
+                        Err(e) => return Ok(fail("bad_request", &e)),
+                    };
+                    let store = self.store.clone();
+                    let tenant = ctx.tenant.clone();
+                    let from = LinkFromIn {
+                        partition_id: from.partition_id.clone(),
+                        queue: from.queue.clone(),
+                        partition: from.partition.clone(),
+                        offset: from.offset,
+                        transaction_id: from.transaction_id.clone(),
+                        consumer_group: from.consumer_group.clone(),
+                    };
+                    let from_group = from
+                        .consumer_group
+                        .clone()
+                        .filter(|g| !g.is_empty())
+                        .unwrap_or_else(|| QUEUE_MODE_GROUP.to_string());
+                    let resolved = tokio::task::spawn_blocking(move || {
+                        resolve_link_source(&store, &ql, &tenant, &from)
+                    })
+                    .await
+                    .map_err(|e| RsmError::Internal(format!("link source task: {e}")))?;
+                    let src = match resolved {
+                        Ok(src) => src,
+                        Err(e) => {
+                            let reason = if e.starts_with("source_gone") {
+                                "source_gone"
+                            } else if e.starts_with("source_mismatch") {
+                                "source_mismatch"
+                            } else {
+                                "bad_request"
+                            };
+                            return Ok(fail(reason, &e));
+                        }
+                    };
+                    // A credential that may write the target forwards only what
+                    // it may read at the source.
+                    if super::check_scope(
+                        &ctx,
+                        Ask::Consume {
+                            queue: crate::rsm::route::shown_name(&src.queue),
+                            partition: Some(&src.partition),
+                            group: &from_group,
+                        },
+                    )
+                    .is_err()
+                    {
+                        return Ok(fail(
+                            "scope_denied",
+                            &format!("this credential may not read {}", src.queue),
+                        ));
+                    }
+                    let target_cfg = self.queue_config_of(&ctx.tenant, q).await?;
+                    if target_cfg.as_ref().is_some_and(|c| c.is_reader()) {
+                        return Ok(fail(
+                            "reading_queue",
+                            &format!("{q} reads other queues: link into an ordinary queue"),
+                        ));
+                    }
+                    let frame: bytes::Bytes = pack_frames(&[FrameIn {
+                        message_id: src.message_id,
+                        txn: &src.txn,
+                        trace_id: None,
+                        producer_sub: None,
+                        payload: &[],
+                        encrypted: false,
+                        headers: block.as_deref(),
+                        link: Some(src.link),
+                    }])
+                    .into();
+                    add_push(
+                        q,
+                        op.partition.as_deref(),
+                        &[],
+                        Some(&src.txn),
+                        None,
+                        None,
+                        None,
+                        Some((src.message_id, frame)),
+                        flat,
+                        &mut pushes,
+                    )?;
+                    flat += 1;
                 }
                 "ack" => {
                     let txn = op.transaction_id.clone().unwrap_or_default();
@@ -2647,16 +2906,16 @@ impl RaftFacade {
                 "" => {
                     return Ok(refuse(
                         "bad_request",
-                        "every transaction operation needs a `type` of push or ack",
+                        "every transaction operation needs a `type` of push, link or ack",
                     ))
                 }
                 other => {
                     return Ok(refuse(
                         "bad_request",
                         &format!(
-                            "transaction supports only push and ack operations, got `{other}`; \
+                        "transaction supports only push, link and ack operations, got `{other}`; \
                              kv and timer operations go in the TOP LEVEL `kv` / `timers` arrays"
-                        ),
+                    ),
                     ))
                 }
             }
@@ -2675,6 +2934,8 @@ impl RaftFacade {
                     Some(f.txn),
                     None,
                     Some((f.id, blob.slice(f.at.clone()))),
+                    f.headers,
+                    None,
                     flat,
                     &mut pushes,
                 )?;
@@ -2708,20 +2969,25 @@ impl RaftFacade {
         let mut push_cmds: Vec<PushCommand> = Vec::with_capacity(groups.len());
         let mut push_members: Vec<Vec<usize>> = Vec::with_capacity(groups.len());
         for (ordinal, g) in groups.iter().enumerate() {
+            let items: Vec<PushItem> = g
+                .members
+                .iter()
+                .map(|&i| PushItem {
+                    hash: pushes[i].hash,
+                    frame: pushes[i].frame.clone(),
+                })
+                .collect();
+            // Read here, where the frames were just built, not on the cycle
+            // thread.
+            let links = Links::of(&items);
             push_cmds.push(PushCommand {
                 request_id: derived_request_id(ctx.request_id, ordinal as u32),
                 tenant: ctx.tenant.clone(),
                 queue: g.queue.clone(),
                 partition: g.partition.clone(),
-                items: g
-                    .members
-                    .iter()
-                    .map(|&i| PushItem {
-                        hash: pushes[i].hash,
-                        frame: pushes[i].frame.clone(),
-                    })
-                    .collect(),
+                items,
                 create_cfg: default_queue_config(&g.queue),
+                links,
             });
             push_members.push(g.members.clone());
         }
@@ -2896,14 +3162,21 @@ impl RaftFacade {
                     continue;
                 }
                 verdict_mid[i] = Some(pushes[i].message_id.clone());
-                results[pushes[i].flat] = serde_json::json!({
+                // A committed bundle's only duplicate is a link the partition
+                // already held: done, as asked.
+                let link = crate::frames::all_links(&pushes[i].frame);
+                let mut r = serde_json::json!({
                     "index": pushes[i].flat,
-                    "type": "push",
-                    "success": created,
+                    "type": if link { "link" } else { "push" },
+                    "success": created || link,
                     "transactionId": pushes[i].txn,
                     "messageId": pushes[i].message_id,
                     "queueName": pushes[i].queue,
                 });
+                if link && !created {
+                    r["duplicate"] = serde_json::Value::Bool(true);
+                }
+                results[pushes[i].flat] = r;
             }
         }
         for p in pushes.iter().filter(|_| !short) {
@@ -3078,6 +3351,8 @@ struct ClientFrame<'a> {
     id: [u8; 16],
     txn: &'a str,
     payload: &'a [u8],
+    /// The frame's headers block, when it carries one (flag 8).
+    headers: Option<&'a [u8]>,
     /// Where the whole frame lies in its group's bytes.
     at: std::ops::Range<usize>,
 }
@@ -3189,7 +3464,9 @@ fn client_frames(raw: &[u8], count: usize) -> Result<Vec<ClientFrame<'_>>, Strin
         let start = p;
         let n = wire_u32(raw, &mut p)?;
         let b = wire_take(raw, &mut p, n)?;
-        if b.len() < 19 || b[0] != 0 {
+        // No flag but the headers one (catalogue version 8): a client never
+        // sends a trace id, a producer, an encrypted payload or a link.
+        if b.len() < 19 || (b[0] & !FRAME_FLAG_HEADERS) != 0 {
             return Err("a frame is malformed or carries flags".into());
         }
         let id: [u8; 16] = b[1..17].try_into().expect("16 bytes");
@@ -3202,7 +3479,21 @@ fn client_frames(raw: &[u8], count: usize) -> Result<Vec<ClientFrame<'_>>, Strin
         if txn.is_empty() || txn.len() > MAX_TXN_BYTES {
             return Err("a transactionId is empty or exceeds the limit".into());
         }
-        let payload = &b[19 + tl..];
+        let mut at = 19 + tl;
+        let mut headers = None;
+        if b[0] & FRAME_FLAG_HEADERS != 0 {
+            let hl = b
+                .get(at..at + 2)
+                .map(|h| u16::from_le_bytes([h[0], h[1]]) as usize)
+                .ok_or_else(|| "truncated".to_string())?;
+            let block = b
+                .get(at + 2..at + 2 + hl)
+                .ok_or_else(|| "truncated".to_string())?;
+            check_header_block(block)?;
+            headers = Some(block);
+            at += 2 + hl;
+        }
+        let payload = &b[at..];
         if !is_json(payload) {
             return Err("a payload is not one JSON document".into());
         }
@@ -3210,6 +3501,7 @@ fn client_frames(raw: &[u8], count: usize) -> Result<Vec<ClientFrame<'_>>, Strin
             id,
             txn,
             payload,
+            headers,
             at: start..p,
         });
     }
@@ -3217,6 +3509,56 @@ fn client_frames(raw: &[u8], count: usize) -> Result<Vec<ClientFrame<'_>>, Strin
         return Err("a group holds more bytes than its frames".into());
     }
     Ok(frames)
+}
+
+/// A transaction push's headers, checked: `Ok(None)` for none.
+fn txn_headers(v: Option<&serde_json::Value>, f: &RaftFacade) -> Result<Option<Vec<u8>>, String> {
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(h) => {
+            let block = crate::frames::check_headers(h)?;
+            if block.is_empty() {
+                Ok(None)
+            } else if !f.cluster_allows(crate::rsm::effect::VERSION_8) {
+                Err("headers need every node on a broker that reads catalogue version 8".into())
+            } else {
+                Ok(Some(block))
+            }
+        }
+    }
+}
+
+/// The answer to headers, a reading queue, a filtered group or a `link`
+/// before every member reads catalogue version 8.
+pub(crate) fn headers_need_version_8() -> RsmError {
+    RsmError::Rejected {
+        code: "cluster_version".into(),
+        message: "headers, reading queues, filtered groups and link need every node on a broker that reads catalogue version 8; upgrade the cluster first".into(),
+    }
+}
+
+/// The headers flag of a stored frame (`crate::frames`), the one flag a
+/// client's frame may carry.
+const FRAME_FLAG_HEADERS: u8 = 8;
+
+/// A client's headers block, checked as a JSON push's headers are: it decodes,
+/// in name order, with names a client may set, within the limits.
+fn check_header_block(block: &[u8]) -> Result<(), String> {
+    let pairs = crate::frames::decode_headers(block)
+        .ok_or_else(|| "a headers block is malformed".to_string())?;
+    let mut obj = serde_json::Map::new();
+    for (k, v) in &pairs {
+        obj.insert(
+            (*k).to_string(),
+            serde_json::Value::String((*v).to_string()),
+        );
+    }
+    let again = crate::frames::check_headers(&serde_json::Value::Object(obj))
+        .map_err(|e| format!("headers: {e}"))?;
+    if again.as_slice() != block {
+        return Err("a headers block is not in name order".into());
+    }
+    Ok(())
 }
 
 // `pub(crate)` for the W7 fuzz entry point (`crate::fuzzing::push_body`).
@@ -3248,6 +3590,9 @@ pub(crate) struct PushItemIn<'a> {
         rename = "traceId"
     )]
     pub(crate) trace_id: Option<std::borrow::Cow<'a, str>>,
+    /// `{name: value}` strings (catalogue version 8, `crate::frames`).
+    #[serde(default)]
+    pub(crate) headers: Option<serde_json::Value>,
 }
 
 /// One input item, receiver-resolved: its original index, minted id, txn, queue,
@@ -3289,6 +3634,8 @@ pub(crate) struct PushInput<'a> {
     pub(crate) txn: Option<&'a str>,
     /// The item as a frame the client already built ([`RaftFacade::push_binary`]).
     pub(crate) prebuilt: Option<Prebuilt<'a>>,
+    /// The message's headers block, checked (`crate::frames::check_headers`).
+    pub(crate) headers: Option<std::borrow::Cow<'a, [u8]>>,
 }
 
 /// A message the client framed itself: its id, its transaction id and the
@@ -3321,12 +3668,35 @@ struct PushVerdictOut {
     status: &'static str,
     offset: Option<u64>,
     message_id: Option<String>,
+    /// Why an item is `error`, when the planner said (a push into a reading
+    /// queue, a name too long): rendered as the item's `error`.
+    error: Option<String>,
 }
 
 impl RaftFacade {
     /// Resolve the replicated queue encryption policy. The read is kept off the
     /// async runtime because an
     /// LMDB page fault is blocking I/O (I15).
+    /// One queue's committed config, `None` when the queue does not exist.
+    pub(crate) async fn queue_config_of(
+        &self,
+        tenant: &str,
+        queue: &str,
+    ) -> Result<Option<crate::rsm::effect::QueueConfig>, RsmError> {
+        let store = self.store.clone();
+        let (tenant, queue) = (tenant.to_string(), queue.to_string());
+        tokio::task::spawn_blocking(move || store.read(|r| r.queue(&tenant, &queue)))
+            .await
+            .map_err(|e| RsmError::Internal(format!("queue config read task: {e}")))?
+            .map_err(|e| {
+                if e.retryable() {
+                    RsmError::Retry { leader_hint: None }
+                } else {
+                    RsmError::Internal(format!("queue config read: {e}"))
+                }
+            })
+    }
+
     async fn encrypted_queues(
         &self,
         tenant: &str,
@@ -3411,6 +3781,9 @@ impl RaftFacade {
                     producer_sub: frame.producer_sub,
                     payload: &payload,
                     encrypted,
+                    // Headers are never encrypted: they go as they came.
+                    headers: frame.headers,
+                    link: None,
                 }])
             };
             schedule.frame = packed;
@@ -3467,15 +3840,37 @@ impl RaftFacade {
                 ),
             });
         }
+        let mut blocks: Vec<Option<Vec<u8>>> = Vec::with_capacity(body.items.len());
+        for (i, it) in body.items.iter().enumerate() {
+            blocks.push(match &it.headers {
+                None | Some(serde_json::Value::Null) => None,
+                Some(h) => {
+                    let block =
+                        crate::frames::check_headers(h).map_err(|e| RsmError::Rejected {
+                            code: "bad_body".into(),
+                            message: format!("bad push body: headers of item {i}: {e}"),
+                        })?;
+                    if block.is_empty() {
+                        None
+                    } else if !self.cluster_allows(crate::rsm::effect::VERSION_8) {
+                        return Err(headers_need_version_8());
+                    } else {
+                        Some(block)
+                    }
+                }
+            });
+        }
         let inputs: Vec<PushInput<'_>> = body
             .items
             .iter()
-            .map(|it| PushInput {
+            .zip(&blocks)
+            .map(|(it, block)| PushInput {
                 queue: it.queue.as_ref(),
                 partition: it.partition.as_deref(),
                 payload: it.payload.get().as_bytes(),
                 txn: it.transaction_id.as_deref(),
                 prebuilt: None,
+                headers: block.as_deref().map(std::borrow::Cow::Borrowed),
             })
             .collect();
         let (resolved, out) = self.push_inputs(&ctx, &inputs, t_prep, false, None).await?;
@@ -3609,6 +4004,7 @@ impl RaftFacade {
                     payload,
                     txn,
                     prebuilt: None,
+                    headers: None,
                 });
             }
         }
@@ -3698,11 +4094,15 @@ impl RaftFacade {
         for (g, blob) in groups.iter().zip(&blobs) {
             for f in client_frames(blob, g.count).map_err(|m| bad(&m))? {
                 unique &= txns.insert(f.txn);
+                if f.headers.is_some() && !self.cluster_allows(crate::rsm::effect::VERSION_8) {
+                    return Err(headers_need_version_8());
+                }
                 inputs.push(PushInput {
                     queue: g.queue,
                     partition: Some(g.partition),
                     payload: f.payload,
                     txn: None,
+                    headers: f.headers.map(std::borrow::Cow::Borrowed),
                     prebuilt: Some(Prebuilt {
                         id: f.id,
                         txn: f.txn,
@@ -3815,6 +4215,13 @@ impl RaftFacade {
                 payload: &it.payload,
                 txn: it.txn.as_deref(),
                 prebuilt: None,
+                headers: (!it.headers.is_empty()
+                    && self.cluster_allows(crate::rsm::effect::VERSION_8))
+                .then(|| {
+                    std::borrow::Cow::Owned(crate::frames::encode_headers(
+                        it.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+                    ))
+                }),
             })
             .collect();
         let (_, out) = self.push_inputs(&ctx, &inputs, t_prep, false, None).await?;
@@ -3976,6 +4383,8 @@ impl RaftFacade {
                         producer_sub: ctx.producer_sub.as_deref(),
                         payload,
                         encrypted,
+                        headers: it.headers.as_deref(),
+                        link: None,
                     }])
                     .into(),
                 }
@@ -4040,6 +4449,8 @@ impl RaftFacade {
                 crate::rsm::qlog::codec::precompress(raw);
             }
         }
+        // Read here, where the frames were just built, not on the cycle thread.
+        let links = Links::of(&items);
         PushCommand {
             request_id: derived_request_id(ctx.request_id, ordinal as u32),
             tenant: ctx.tenant.clone(),
@@ -4047,6 +4458,7 @@ impl RaftFacade {
             partition: g.partition.clone(),
             items,
             create_cfg: default_queue_config(&g.queue),
+            links,
         }
     }
 
@@ -4328,18 +4740,25 @@ async fn collect_push(
                     }
                 };
                 for (k, &flat) in members.iter().enumerate() {
-                    let (status, offset) = match verdicts.get(k) {
-                        Some(PushVerdict::Created { offset, .. }) => ("queued", Some(*offset)),
+                    let (status, offset, error) = match verdicts.get(k) {
+                        Some(PushVerdict::Created { offset, .. }) => {
+                            ("queued", Some(*offset), None)
+                        }
                         Some(PushVerdict::Duplicate { pid, offset }) => {
                             duplicate_ids.push((flat, *pid, *offset));
-                            ("duplicate", Some(*offset))
+                            ("duplicate", Some(*offset), None)
                         }
-                        Some(PushVerdict::Refused { .. }) | None => ("error", None),
+                        // A group of a multi-push refused on its own says why.
+                        Some(PushVerdict::Refused { message, .. }) => {
+                            ("error", None, Some(message.clone()))
+                        }
+                        None => ("error", None, None),
                     };
                     out[flat] = Some(PushVerdictOut {
                         status,
                         offset,
                         message_id: None,
+                        error,
                     });
                 }
             }
@@ -4360,12 +4779,13 @@ async fn collect_push(
                 );
                 return Err(RsmError::Retry { leader_hint: None });
             }
-            Reply::Refused(_) => {
+            Reply::Refused(refusal) => {
                 for &flat in &members {
                     out[flat] = Some(PushVerdictOut {
                         status: "error",
                         offset: None,
                         message_id: None,
+                        error: Some(format!("{}: {}", refusal.code, refusal.message)),
                     });
                 }
             }
@@ -4423,16 +4843,19 @@ async fn collect_push(
                     status: "error",
                     offset: None,
                     message_id: Some(lead_id),
+                    error: None,
                 },
                 Some(l) => PushVerdictOut {
                     status: "duplicate",
                     offset: l.offset,
                     message_id: Some(lead_id),
+                    error: None,
                 },
                 None => PushVerdictOut {
                     status: "error",
                     offset: None,
                     message_id: None,
+                    error: None,
                 },
             });
         }
@@ -4460,6 +4883,7 @@ async fn collect_push(
                 status: "error",
                 offset: None,
                 message_id: None,
+                error: None,
             })
         })
         .collect();
@@ -4489,6 +4913,11 @@ fn render_push(resolved: &[PushResolved], verdicts: &[PushVerdictOut]) -> String
         if let Some(off) = v.offset {
             out.push_str(",\"offset\":");
             out.push_str(&off.to_string());
+        }
+        if let Some(e) = &v.error {
+            out.push_str(",\"error\":\"");
+            crate::util::json_escape_into(&mut out, e);
+            out.push('"');
         }
         out.push('}');
     }
@@ -4914,6 +5343,9 @@ impl RaftFacade {
         let worker = worker.to_string();
         let deadline = ctx.deadline;
         let frames = ctx.pop_frames;
+        // From catalogue version 8 a stored frame may be a link or carry
+        // headers, which the stored-records answer does not hand out.
+        let route_frames = self.cluster_allows(crate::rsm::effect::VERSION_8);
 
         let rendered = tokio::task::spawn_blocking(move || {
             // PERF-1: pop payload read latency — the blocking segment render.
@@ -4933,6 +5365,7 @@ impl RaftFacade {
                 &claims,
                 deadline,
                 frames,
+                route_frames,
             );
             if let Some(r0) = r0 {
                 crate::rsm::timing::metrics()
@@ -4975,6 +5408,7 @@ fn render_pop_blocking(
     claims: &[PopClaim],
     deadline: super::Deadline,
     frames: bool,
+    route_frames: bool,
 ) -> Result<PopOut, String> {
     // Resolve every claimed pid's partition row + sealed files in one read txn.
     //
@@ -5013,6 +5447,7 @@ fn render_pop_blocking(
             if let Some(out) = render_pop_frames(
                 ql,
                 encryption.is_enabled(),
+                route_frames,
                 tenant,
                 top_queue,
                 group,
@@ -5026,6 +5461,7 @@ fn render_pop_blocking(
         }
     }
     render_pop_body(
+        store,
         qlog_reader,
         reader,
         encryption,
@@ -5082,6 +5518,7 @@ fn render_part_infos(
 /// Render the pop wire body from the resolved partition infos.
 #[allow(clippy::too_many_arguments)]
 fn render_pop_body(
+    store: &HeedStore,
     qlog_reader: Option<&QLogReader>,
     reader: &segments::Reader,
     encryption: &crate::encryption::Encryption,
@@ -5109,6 +5546,10 @@ fn render_pop_body(
         })
         .unwrap_or(("", String::new()));
 
+    // A filtered group's pop reads its hidden queue: the client sees the
+    // queue it named.
+    let top_queue = crate::rsm::route::shown_name(top_queue);
+    let mut retained = crate::rsm::route::link::retained_from(store);
     let mut out = String::with_capacity(256 + top_queue.len());
     out.push_str("{\"success\":true,\"queue\":\"");
     crate::util::json_escape_into(&mut out, top_queue);
@@ -5254,11 +5695,22 @@ fn render_pop_body(
                 }
             };
             let seg_created = iso_from_us(created_at_us);
+            // A reading queue's links, read through to their messages.
+            let blob = match qlog_reader {
+                Some(ql) => crate::rsm::route::link::resolve(ql, blob, &mut retained),
+                None => blob,
+            };
             let frames = unpack_frames_ref(&blob);
             if let Some(frames) = frames {
                 for (i, fr) in frames.iter().enumerate() {
                     let msg_off = base + i as u64;
                     if msg_off < off || msg_off < claim.start_offset || msg_off > claim.end_offset {
+                        continue;
+                    }
+                    // A link whose message its source no longer keeps: gone,
+                    // as a message past its TTL. The next ack (or the
+                    // reader's own retention) moves the cursor past it.
+                    if fr.is_link() {
                         continue;
                     }
                     if count > 0 && !auto_ack && out.len() >= backstop {
@@ -5300,6 +5752,10 @@ fn render_pop_body(
                             out.push('"');
                         }
                         None => out.push_str("null"),
+                    }
+                    if let Some(h) = fr.headers {
+                        out.push_str(",\"headers\":");
+                        crate::frames::headers_json_into(&mut out, h);
                     }
                     out.push_str(",\"createdAt\":\"");
                     out.push_str(&seg_created);
@@ -5360,6 +5816,7 @@ fn render_pop_body(
         empty: count == 0,
         conflation: false,
         conflation_conflict: false,
+        filtered: false,
         frames: None,
     })
 }
@@ -5389,6 +5846,7 @@ fn render_pop_body(
 fn render_pop_frames(
     ql: &QLogReader,
     check_encrypted: bool,
+    route_frames: bool,
     tenant: &str,
     top_queue: &str,
     group: &str,
@@ -5443,7 +5901,16 @@ fn render_pop_frames(
                     ))
                 }
             };
-            if check_encrypted && holds_encrypted(&rec) {
+            let mask = if check_encrypted {
+                crate::frames::FLAG_ENCRYPTED
+            } else {
+                0
+            } | if route_frames {
+                crate::frames::FLAG_LINK | crate::frames::FLAG_HEADERS
+            } else {
+                0
+            };
+            if mask != 0 && stored_holds(&rec, mask) {
                 return Ok(None);
             }
             out.extend_from_slice(&rec.base_offset.to_le_bytes());
@@ -5497,19 +5964,34 @@ fn render_pop_frames(
         empty: count == 0,
         conflation: false,
         conflation_conflict: false,
+        filtered: false,
         frames: Some(out),
     }))
 }
 
-/// Whether a stored record holds a message the broker encrypted (the frame's
-/// own flag, which the JSON render decrypts by). A payload that does not
-/// decompress counts as one: the JSON render deals with it.
-fn holds_encrypted(rec: &crate::rsm::qlog::StoredRecord) -> bool {
+/// Whether a stored record holds a frame with a flag of `mask` (encrypted,
+/// headers, a link: what only the JSON render reads).
+///
+/// A compressed record is not opened for a link or headers: its mark says
+/// whether it holds one ([`crate::rsm::qlog::codec::mark_of`]; no mark, none).
+/// Only a flag the mark does not answer for (an encrypted message, asked for
+/// when the broker has a key) is read from the frames, and then a payload
+/// that does not decompress counts as holding it: the JSON render deals with
+/// it.
+pub(crate) fn stored_holds(rec: &crate::rsm::qlog::StoredRecord, mask: u8) -> bool {
+    use crate::rsm::qlog::codec;
     if !rec.zstd {
-        return crate::frames::any_encrypted(&rec.payload);
+        return crate::frames::any_flag(&rec.payload, mask);
     }
-    match crate::rsm::qlog::codec::decompress(&rec.payload) {
-        Ok(raw) => crate::frames::any_encrypted(&raw),
+    if codec::mark_of(&rec.payload).is_some_and(|flags| flags & mask != 0) {
+        return true;
+    }
+    let rest = mask & !codec::MARKED_FLAGS;
+    if rest == 0 {
+        return false;
+    }
+    match codec::decompress(&rec.payload) {
+        Ok(raw) => crate::frames::any_flag(&raw, rest),
         Err(_) => true,
     }
 }
@@ -6000,8 +6482,10 @@ fn resolve_ack_targets(
                     continue;
                 }
                 if let Some(s) = scope {
+                    // A filtered group's partition is its hidden queue's: the
+                    // credential is checked against the queue it filters.
                     let ask = Ask::Consume {
-                        queue: &part.queue,
+                        queue: crate::rsm::route::shown_name(&part.queue),
                         partition: Some(&part.partition),
                         group,
                     };
@@ -6064,6 +6548,7 @@ fn resolve_ack_targets(
                     message_id: None,
                     txn: f.txn.clone(),
                     payload: Vec::new(),
+                    headers: Vec::new(),
                 });
                 let item = targets[ti].items.len();
                 targets[ti].items.push(AckItem {
@@ -6162,6 +6647,13 @@ fn read_dlq_snapshot(
         let Some((base, count, blob)) = record else {
             return Ok(None);
         };
+        // A dead letter outlives its source (effect.rs, `DlqInsert`): a
+        // reading queue's link is read through and the message itself filed.
+        // One whose message is gone files the link's id with no payload.
+        let blob = match qlog_reader {
+            Some(ql) => crate::rsm::route::link::resolve(ql, blob, &mut |_| Some(0)),
+            None => blob,
+        };
         let frames = unpack_frames_ref(&blob)
             .ok_or_else(|| format!("invalid packed frames at pid {} offset {base}", work.pid))?;
         for (i, frame) in frames.iter().enumerate() {
@@ -6170,6 +6662,18 @@ fn read_dlq_snapshot(
                 continue;
             }
             if txn_hash128(frame.txn) == work.hash && frame.txn == work.txn {
+                let headers = frame.headers.map(<[u8]>::to_vec).unwrap_or_default();
+                if frame.is_link() {
+                    return Ok(Some((
+                        DlqSnapshot {
+                            message_id: Some(frame.message_id),
+                            txn: frame.txn.to_string(),
+                            payload: Vec::new(),
+                            headers,
+                        },
+                        message_offset,
+                    )));
+                }
                 let payload = if frame.encrypted {
                     encryption
                         .decrypt_payload_bytes(frame.payload)
@@ -6182,6 +6686,7 @@ fn read_dlq_snapshot(
                         message_id: Some(frame.message_id),
                         txn: frame.txn.to_string(),
                         payload,
+                        headers,
                     },
                     message_offset,
                 )));
@@ -6439,6 +6944,11 @@ impl RaftFacade {
     async fn timers_apply_impl(&self, ctx: ReqCtx, req: TimersReq) -> Result<TimersOut, RsmError> {
         let mut ops = parse_timer_ops(&req.ops, req.producer_sub.as_deref())
             .map_err(|e| timers_bad_request(e.message))?;
+        if crate::rsm::planner::timers::any_headers(&ops)
+            && !self.cluster_allows(crate::rsm::effect::VERSION_8)
+        {
+            return Err(headers_need_version_8());
+        }
         if ops.is_empty() {
             return Ok(TimersOut {
                 results: Vec::new(),
@@ -6946,37 +7456,49 @@ impl Rsm for RaftFacade {
     }
 
     async fn pop_wildcard(&self, ctx: ReqCtx, req: PopReq) -> Result<PopOut, RsmError> {
-        self.pop_run(
-            &ctx,
-            req.queue,
-            None,
-            String::new(),
-            String::new(),
-            req.group,
-            req.batch,
-            req.auto_ack,
-            req.wait,
-            true,
-            req.options,
-        )
-        .await
+        let queue = self
+            .pop_target(&ctx, req.queue, req.group.as_deref(), &req.options)
+            .await?;
+        let filtered = crate::rsm::route::is_hidden(&queue);
+        let out = self
+            .pop_run(
+                &ctx,
+                queue,
+                None,
+                String::new(),
+                String::new(),
+                req.group,
+                req.batch,
+                req.auto_ack,
+                req.wait,
+                true,
+                req.options,
+            )
+            .await;
+        out.map(|o| filtered_echo(o, filtered))
     }
 
     async fn pop_pinned(&self, ctx: ReqCtx, req: PopPinnedReq) -> Result<PopOut, RsmError> {
-        self.pop_run(
-            &ctx,
-            req.queue,
-            Some(req.partition),
-            String::new(),
-            String::new(),
-            req.group,
-            req.batch,
-            req.auto_ack,
-            req.wait,
-            false,
-            req.options,
-        )
-        .await
+        let queue = self
+            .pop_target(&ctx, req.queue, req.group.as_deref(), &req.options)
+            .await?;
+        let filtered = crate::rsm::route::is_hidden(&queue);
+        let out = self
+            .pop_run(
+                &ctx,
+                queue,
+                Some(req.partition),
+                String::new(),
+                String::new(),
+                req.group,
+                req.batch,
+                req.auto_ack,
+                req.wait,
+                false,
+                req.options,
+            )
+            .await;
+        out.map(|o| filtered_echo(o, filtered))
     }
 
     async fn pop_discover(&self, ctx: ReqCtx, req: PopDiscoverReq) -> Result<PopOut, RsmError> {

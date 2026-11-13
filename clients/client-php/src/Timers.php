@@ -56,7 +56,7 @@ class Timers
      * @param int $delayMs milliseconds from now; negative is legal and fires on
      *   the first cycle.
      * @param mixed $payload JSON-serializable; delivered as the message body.
-     * @param array $opts txn, partition.
+     * @param array $opts txn, partition, headers (the delivered message's).
      * @return array {ok, status, queue, timerKey, txn, messageId, deliverAt} —
      *   or {ok:false, status:'too_late'} when the timer is already claimed and
      *   about to be delivered.

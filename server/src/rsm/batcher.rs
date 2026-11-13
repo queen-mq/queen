@@ -100,8 +100,8 @@ pub use crate::rsm::planner::txn::{TxnCommand, TxnOutcome};
 use crate::rsm::planner::Refusal;
 use crate::rsm::planner::{
     AckCommand, AckPositionalCommand, CommandKind, DlqHeadCommand, EffectsCommand, KvCommand,
-    Lookup, NackCommand, Overlay, Plan, PlanConfig, Planned, Planner, PopCommand, PushCommand,
-    RenewCommand,
+    Links, Lookup, NackCommand, Overlay, Plan, PlanConfig, Planned, Planner, PopCommand,
+    PushCommand, RenewCommand,
 };
 use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::replicator::{AppliedAt, NodeId, ProposeError, Replicator, Role};
@@ -109,8 +109,12 @@ use crate::rsm::segments::Reader;
 use crate::rsm::state::Committed;
 use crate::rsm::store::{Reads, Store, TypedReads};
 
-#[path = "batcher_lanes.rs"]
-mod lanes;
+#[path = "batcher_scheduler.rs"]
+mod scheduler;
+#[cfg(test)]
+pub(crate) use scheduler::{
+    bins_planned, fall_back_at, spread_planned, take_planned_order, Forced,
+};
 
 /// The driver while its cluster is a standby ([`crate::rsm::link`]).
 #[path = "batcher_link.rs"]
@@ -274,10 +278,11 @@ pub struct BatcherConfig {
     /// (`queen_raft_keep_overlay_total{outcome="mismatch"}`) and the rebuild is
     /// what plans. A diagnostic: it costs the rebuild it exists to save.
     pub keep_overlay_verify: bool,
-    /// `QUEEN_LANES` (default 8): how many lane threads plan a cycle's
-    /// commands in parallel ([`lanes`]). 1 is the single planner, exactly as
-    /// before lanes.
-    pub lanes: u64,
+    /// `QUEEN_PLANNER_THREADS` (default 8; `QUEEN_LANES`, its old name, is
+    /// read when it is unset): how many threads plan a cycle's commands, the
+    /// cycle's own included ([`scheduler`], the footprint scheduler). 1 is the
+    /// single planner.
+    pub planner_threads: u64,
     /// `QUEEN_RAFT_CLOCK` (default `monotonic`): within a term the RSM clock
     /// runs on the leader's monotonic clock from where the term began
     /// ([`RunState::plan_wall`]); `wall` stamps the wall clock every cycle, as
@@ -286,7 +291,7 @@ pub struct BatcherConfig {
     /// `QUEEN_RAFT_RETENTION_SCAN` (default on in production): the retention
     /// walk runs on a background thread ([`crate::rsm::retention_scan`]) and
     /// the planner only judges what it proposes. `None` keeps the walk on the
-    /// planning thread, as do lanes (`QUEEN_LANES` > 1).
+    /// planning thread.
     pub retention_scan: Option<crate::rsm::retention_scan::ScanConfig>,
     /// `QUEEN_RAFT_CLUSTER_VERSION_MS` (default 1000 on real nodes; `0` = off,
     /// the programmatic default): how often the leader compares the cluster
@@ -326,7 +331,7 @@ impl Default for BatcherConfig {
             maintenance: crate::rsm::maintenance::Config::default(),
             keep_overlay: true,
             keep_overlay_verify: false,
-            lanes: 8,
+            planner_threads: 8,
             monotonic_clock: true,
             retention_scan: None,
             cluster_version_every_ms: 0,
@@ -529,10 +534,11 @@ impl BatcherConfig {
                 streams_walk: Default::default(),
             },
             keep_overlay: flag("QUEEN_RAFT_KEEP_OVERLAY", d.keep_overlay),
-            lanes: std::env::var("QUEEN_LANES")
+            planner_threads: std::env::var("QUEEN_PLANNER_THREADS")
+                .or_else(|_| std::env::var("QUEEN_LANES"))
                 .ok()
                 .and_then(|v| v.trim().parse::<u64>().ok())
-                .unwrap_or(d.lanes)
+                .unwrap_or(d.planner_threads)
                 .clamp(1, 64),
             monotonic_clock: std::env::var("QUEEN_RAFT_CLOCK")
                 .map(|v| !v.trim().eq_ignore_ascii_case("wall"))
@@ -702,6 +708,19 @@ impl Command {
             self,
             Command::Ack(_) | Command::AckPositional(_) | Command::Nack(_) | Command::DlqHead(_)
         )
+    }
+
+    /// Set [`PushCommand::links`] on every push this command carries, read
+    /// from its frames: for a command decoded off the wire (a follower's), on
+    /// the thread that just decoded them, not on the cycle thread.
+    pub(crate) fn learn_links(&mut self) {
+        let learn = |p: &mut PushCommand| p.links = Links::of(&p.items);
+        match self {
+            Command::Push(p) => learn(p),
+            Command::MultiPush(m) => m.pushes.iter_mut().for_each(learn),
+            Command::Transaction(t) => t.pushes.iter_mut().for_each(learn),
+            _ => {}
+        }
     }
 
     /// Whether §11.8 must refuse this command while a node is above the disk
@@ -1396,22 +1415,64 @@ pub(crate) struct PlannerState {
     epoch: u64,
     cycles: u64,
     pub(crate) stats: KeepStats,
-    /// The lanes (`QUEEN_LANES` > 1), made on the first cycle that uses them.
-    lanes: Option<Box<lanes::LanesState>>,
+    /// The footprint scheduler's planning threads, made on the first cycle
+    /// that plans on more than one.
+    sched: Option<Box<scheduler::Sched>>,
+    /// How the scheduler planned the cycles so far, for the tests.
+    pub(crate) planned: PlannedCounts,
+    /// Where each partition's in-flight state lives, by its name
+    /// ([`crate::rsm::planner::homes`]): made on the first cycle that plans on
+    /// more than one thread, and kept for the life of the process (a pid's
+    /// shard never changes).
+    homes: Option<Arc<crate::rsm::planner::homes::Homes>>,
+}
+
+/// Cycles by how the footprint scheduler planned them
+/// ([`scheduler::Mode`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PlannedCounts {
+    pub(crate) parallel: u64,
+    pub(crate) serial: u64,
+    pub(crate) fallback: u64,
+}
+
+/// O18: one command's planning time, its kind's counter and the slow log.
+fn record_command(cmd: &Command, dur: Duration, slow_ms: u64, batch_len: u64) {
+    let kind = cmd.kind();
+    let slow = slow_ms > 0 && dur.as_millis() as u64 >= slow_ms;
+    let tm = crate::rsm::timing::metrics();
+    tm.kinds.record(kind, dur, slow);
+    if slow {
+        tm.slow_commands
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tenant, queue) = cmd.label();
+        tracing::warn!(
+            target: "rsm",
+            kind = kind.name(),
+            tenant,
+            queue,
+            duration_ms = dur.as_millis() as u64,
+            batch = batch_len,
+            "O18 slow command",
+        );
+    }
 }
 
 /// Plan one cycle inside ONE store read transaction (I15: on the planner
 /// thread). `folded` are the in-flight entries, in index order, with the index
 /// each occupies; `batch` are the drained commands, in order; `state` is what
-/// the planner thread keeps between cycles (KEEP_OVERLAY).
+/// the planner thread keeps between cycles (KEEP_OVERLAY). With `threads` > 1
+/// the commands are planned by the footprint scheduler ([`scheduler`]): in
+/// groups, on that many threads, into the same one entry.
 // The cycle inputs are the scalars/handles the driver has already gathered;
 // bundling them into a struct buys nothing at the single call site.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn plan_cycle_blocking<S: Store>(
-    store: &S,
-    front: &DedupFront,
+pub(crate) fn plan_cycle_blocking<S: Store + 'static>(
+    store: &Arc<S>,
+    front: &Arc<DedupFront>,
     state: &mut PlannerState,
     keep: KeepCfg,
+    threads: usize,
     reader: Option<Reader>,
     qlog_reader: Option<QLogReader>,
     folded: Vec<(u64, Arc<Entry>)>,
@@ -1439,8 +1500,31 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
     // back, so an error part-way (a store read refused, a panic) leaves
     // nothing half-advanced for the next one — it rebuilds.
     let prior = state.overlay.take();
+    // With planning threads, a partition's in-flight state lives in the shard
+    // of its name, which one thread owns. An overlay kept by a cycle that
+    // planned the other way is laid out the other way: it is rebuilt.
+    let homes = (threads > 1).then(|| {
+        state
+            .homes
+            .get_or_insert_with(crate::rsm::planner::homes::Homes::new)
+            .clone()
+    });
+    let prior = prior.filter(|k| k.overlay().homes().is_some() == homes.is_some());
+    // The footprint scheduler's planning threads, taken out for the cycle too:
+    // the landing below and the commands' groups run on them.
+    let sched: Option<Box<scheduler::Sched>> = if threads > 1 {
+        Some(
+            state
+                .sched
+                .take()
+                .filter(|s| s.threads() == threads)
+                .unwrap_or_else(|| Box::new(scheduler::Sched::new(threads))),
+        )
+    } else {
+        None
+    };
 
-    store.read(|r| {
+    let out = store.read(|r| {
         let store_applied = r.applied_index()?;
         let base_pid = r.next_pid()?;
         let base_kv = r.kv_version_next()?;
@@ -1460,7 +1544,39 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
                 c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         };
-        let mut kept = match prior.map(|k| k.advance(&folded, store_applied, base_pid, base_kv)) {
+        // A landing takes the partition state of the landed entries out of
+        // the overlay. With planning threads each home does its own shards,
+        // as the first thing it does this cycle (`scheduler::land_later`): the
+        // thread that owns the rows touches them, and nothing reads that state
+        // before. A verified cycle compares the overlay at once, so it lands
+        // here.
+        let mut landing: Option<scheduler::PendingLanding> = None;
+        let verify = keep.enabled && keep.verify;
+        let advanced = prior.map(|k| match sched.as_deref() {
+            Some(_) if !verify => k.advance_with(
+                &folded,
+                store_applied,
+                base_pid,
+                base_kv,
+                &mut |_ov, gone| {
+                    landing = Some(scheduler::land_later(gone));
+                    Ok(())
+                },
+            ),
+            Some(_) => k.advance_with(
+                &folded,
+                store_applied,
+                base_pid,
+                base_kv,
+                &mut |ov, gone| scheduler::land(ov, gone),
+            ),
+            None => k.advance(&folded, store_applied, base_pid, base_kv),
+        });
+        if !matches!(advanced, Some(Ok(_))) {
+            // The kept overlay is gone (rebuilt below): its shards with it.
+            landing = None;
+        }
+        let mut kept = match advanced {
             Some(Ok(k)) => {
                 state.stats.kept += 1;
                 bump(&tm.keep_advanced);
@@ -1470,16 +1586,22 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
                 state.stats.fallbacks += 1;
                 bump(&tm.keep_fallback);
                 tracing::debug!(target: "rsm", why, "KEEP_OVERLAY: the kept overlay is rebuilt");
-                KeptOverlay::rebuild(&folded, store_applied, base_pid, base_kv)
+                KeptOverlay::rebuild_homed(homes.clone(), &folded, store_applied, base_pid, base_kv)
             }
             None => {
                 state.stats.rebuilt += 1;
                 bump(&tm.keep_rebuilt);
-                KeptOverlay::rebuild(&folded, store_applied, base_pid, base_kv)
+                KeptOverlay::rebuild_homed(homes.clone(), &folded, store_applied, base_pid, base_kv)
             }
         };
         if keep.enabled && keep.verify {
-            let reference = KeptOverlay::rebuild(&folded, store_applied, base_pid, base_kv);
+            let reference = KeptOverlay::rebuild_homed(
+                homes.clone(),
+                &folded,
+                store_applied,
+                base_pid,
+                base_kv,
+            );
             if let Some(what) = kept.diff(&reference) {
                 state
                     .stats
@@ -1495,14 +1617,14 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
         // fold of the entry and nothing else (`poisoned` otherwise: not kept).
         let cycle_tag = kept.begin_cycle();
         let mut poisoned = false;
-        let ov = kept.overlay_mut();
-        let now_us = ov
+        let now_us = kept
+            .overlay()
             .plan_now(&committed, wall_us)
             // A store error under the clock read: fail the whole cycle
             // retryably (I14).
             .map_err(|_| crate::rsm::store::StoreError::Io("clock read".into()))?;
-        ov.mark_cycle_start();
-        let cycle_folds0 = ov.folds();
+        kept.overlay_mut().mark_cycle_start();
+        let cycle_folds0 = kept.overlay().folds();
         // D20: every gate of the cycle answers from the version the entry is
         // checked against below.
         let cfg = PlanConfig {
@@ -1515,94 +1637,64 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
         // the `.seg` files (same committed bound, same O(claimed) walk). `None`
         // leaves the segment path untouched.
         planner.set_qlog_reader(qlog_reader.clone());
+        planner.set_base_pid(base_pid);
 
-        let mut entry =
-            Entry::with_capacity(now_us, ov.cycle_pid_base(), ov.cycle_kv_base(), batch.len());
-        let mut slots: Vec<Slot> = Vec::with_capacity(batch.len());
-        // Ids already logged into THIS entry, so a same-cycle retry becomes a
-        // second waiter rather than a second command (§5.4; `Entry::validate`
-        // forbids two commands sharing an id).
-        let mut seen: HashMap<RequestId, ()> = HashMap::new();
-        let batch_len = batch.len() as u64;
+        let mut entry = Entry::with_capacity(
+            now_us,
+            kept.overlay().cycle_pid_base(),
+            kept.overlay().cycle_kv_base(),
+            batch.len(),
+        );
         let start = Instant::now();
         let loop_cpu0 = crate::rsm::timing::thread_cpu_ns();
         let budget = Duration::from_millis(cfg.plan_budget_ms);
-        let mut cut = false;
-
-        for cmd in batch {
-            if cut {
-                slots.push(Slot::Deferred(Box::new(cmd)));
-                continue;
-            }
-            let id = cmd.request_id();
-            if seen.contains_key(&id) {
-                slots.push(Slot::SameCycle(id));
-                cut = start.elapsed() > budget;
-                continue;
-            }
-            // O18: per-command planning time, per-kind counter and the slow log.
-            // The clock read is gated on the knob (`stamp` is `None` when metrics
-            // are off), so the ablation prices the whole per-command O18 leg —
-            // the two clock reads and the record — not just the histogram write.
-            let cmd_started = crate::rsm::timing::stamp();
-            let (folds0, effects0) = (ov.folds(), entry.effects.len());
-            let slot = match planner.lookup_request_id(ov, &id) {
-                Err(refusal) => Slot::Immediate(Reply::Refused(refusal)),
-                Ok(Lookup::Committed(outcome)) => {
-                    Slot::Immediate(Reply::Done { outcome, at: None })
-                }
-                Ok(Lookup::InFlight(outcome)) => Slot::InFlightHit {
-                    request_id: id,
-                    outcome,
-                },
-                Ok(Lookup::Miss) => match cmd.plan(&planner, ov) {
-                    Ok(Plan::Logged { effects, outcome }) => {
-                        match entry.add_command(id, outcome, effects) {
-                            Ok(()) => {
-                                seen.insert(id, ());
-                                Slot::Logged(id)
-                            }
-                            Err(e) => Slot::Immediate(Reply::Refused(Refusal::retry(
-                                "internal",
-                                format!("entry build: {e:?}"),
-                            ))),
-                        }
-                    }
-                    Ok(Plan::Empty(outcome)) => Slot::Empty(outcome),
-                    Ok(Plan::Refused(refusal)) => Slot::Immediate(Reply::Refused(refusal)),
-                    Err(refusal) => Slot::Immediate(Reply::Refused(refusal)),
-                },
+        let slots = if let Some(sched) = sched.as_deref() {
+            let cx = scheduler::Cx {
+                now_us,
+                cfg: &cfg,
+                reader: &reader,
+                qlog_reader: &qlog_reader,
+                started: start,
+                budget,
+                base_pid,
             };
-            // A command folds exactly what it logs: a refused or empty one
-            // folds nothing (a refused transaction restores the overlay). One
-            // that folded and was not logged left effects in the overlay that
-            // no entry carries; the old path dropped them with the cycle's
-            // overlay, a kept one would carry them on — so it is not kept.
-            poisoned |= ov.folds() - folds0 != (entry.effects.len() - effects0) as u64;
-            slots.push(slot);
-            if let Some(cmd_started) = cmd_started {
-                let dur = cmd_started.elapsed();
-                let kind = cmd.kind();
-                let slow = cfg.slow_command_ms > 0 && dur.as_millis() as u64 >= cfg.slow_command_ms;
-                let tm = crate::rsm::timing::metrics();
-                tm.kinds.record(kind, dur, slow);
-                if slow {
-                    tm.slow_commands
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let (tenant, queue) = cmd.label();
-                    tracing::warn!(
-                        target: "rsm",
-                        kind = kind.name(),
-                        tenant,
-                        queue,
-                        duration_ms = dur.as_millis() as u64,
-                        batch = batch_len,
-                        "O18 slow command",
-                    );
-                }
+            let landed_late = |why: &'static str| {
+                crate::rsm::store::StoreError::Io(format!("kept overlay landing: {why}"))
+            };
+            let (slots, mode) = scheduler::plan_commands(
+                sched,
+                store,
+                front,
+                &planner,
+                r,
+                &mut kept,
+                &mut entry,
+                batch,
+                &cx,
+                &mut poisoned,
+                &mut landing,
+            )
+            .map_err(landed_late)?;
+            if let Some(p) = landing.take() {
+                p.here(kept.overlay_mut()).map_err(landed_late)?;
             }
-            cut = start.elapsed() > budget;
-        }
+            match mode {
+                scheduler::Mode::Parallel => state.planned.parallel += 1,
+                scheduler::Mode::Serial => state.planned.serial += 1,
+                scheduler::Mode::Fallback => state.planned.fallback += 1,
+            }
+            slots
+        } else {
+            plan_commands_serial(
+                &planner,
+                kept.overlay_mut(),
+                &mut entry,
+                batch,
+                &cfg,
+                start,
+                budget,
+            )
+        };
         if crate::rsm::timing::enabled() {
             let tm = crate::rsm::timing::metrics();
             tm.plan.record_dur(start.elapsed());
@@ -1615,11 +1707,13 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
                     .count() as u64,
             );
         }
+        let ov = kept.overlay_mut();
 
         // WP-2.3 timer fire: after the commands (a cancel or a reschedule
         // drained this cycle wins), before the KV sweep and the expiry step.
         // The two leader steps touch disjoint state (timers and the messages
         // they push; KV rows), so their relative order is immaterial.
+        let t_tail = Instant::now();
         let fired = fire.is_some();
         let (folds0, effects0) = (ov.folds(), entry.effects.len());
         let fire_more = match fire.as_ref() {
@@ -1736,6 +1830,7 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
                 expire_more = past >= limit;
             }
         }
+        scheduler::note_tail(t_tail);
         // The cycle as a whole: its overlay holds the fold of its entry, and
         // nothing else (the per-step checks above make this the sum of them).
         poisoned |= ov.folds() - cycle_folds0 != entry.effects.len() as u64;
@@ -1779,7 +1874,83 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
             cluster_version,
             link: None,
         })
-    })
+    });
+    state.sched = sched;
+    out
+}
+
+/// The single planner's command loop: every command in batch order against
+/// one overlay, logged into `entry` as it goes. Request ids are looked up as
+/// each command comes; a same-cycle retry of a logged id waits on this entry.
+fn plan_commands_serial<R: Reads + ?Sized>(
+    planner: &Planner<'_, R>,
+    ov: &mut Overlay,
+    entry: &mut Entry,
+    batch: Vec<Command>,
+    cfg: &PlanConfig,
+    start: Instant,
+    budget: Duration,
+) -> Vec<Slot> {
+    let mut slots: Vec<Slot> = Vec::with_capacity(batch.len());
+    // Ids already logged into THIS entry, so a same-cycle retry becomes a
+    // second waiter rather than a second command (§5.4; `Entry::validate`
+    // forbids two commands sharing an id).
+    let mut seen: HashMap<RequestId, ()> = HashMap::new();
+    let batch_len = batch.len() as u64;
+    let mut cut = false;
+    for cmd in batch {
+        if cut {
+            slots.push(Slot::Deferred(Box::new(cmd)));
+            continue;
+        }
+        let id = cmd.request_id();
+        if seen.contains_key(&id) {
+            slots.push(Slot::SameCycle(id));
+            cut = start.elapsed() > budget;
+            continue;
+        }
+        // O18: per-command planning time, per-kind counter and the slow log.
+        // The clock read is gated on the knob (`stamp` is `None` when metrics
+        // are off), so the ablation prices the whole per-command O18 leg —
+        // the two clock reads and the record — not just the histogram write.
+        let cmd_started = crate::rsm::timing::stamp();
+        let slot = match planner.lookup_request_id(ov, &id) {
+            Err(refusal) => Slot::Immediate(Reply::Refused(refusal)),
+            Ok(Lookup::Committed(outcome)) => Slot::Immediate(Reply::Done { outcome, at: None }),
+            Ok(Lookup::InFlight(outcome)) => Slot::InFlightHit {
+                request_id: id,
+                outcome,
+            },
+            Ok(Lookup::Miss) => match cmd.plan(planner, ov) {
+                Ok(Plan::Logged { effects, outcome }) => {
+                    match entry.add_command(id, outcome, effects) {
+                        Ok(()) => {
+                            seen.insert(id, ());
+                            Slot::Logged(id)
+                        }
+                        Err(e) => Slot::Immediate(Reply::Refused(Refusal::retry(
+                            "internal",
+                            format!("entry build: {e:?}"),
+                        ))),
+                    }
+                }
+                Ok(Plan::Empty(outcome)) => Slot::Empty(outcome),
+                Ok(Plan::Refused(refusal)) => Slot::Immediate(Reply::Refused(refusal)),
+                Err(refusal) => Slot::Immediate(Reply::Refused(refusal)),
+            },
+        };
+        // A command folds exactly what it logs: a refused or empty one
+        // folds nothing (a refused transaction restores the overlay). One
+        // that folded and was not logged left effects in the overlay that
+        // no entry carries, which the cycle's check of every fold against
+        // its entry finds: the overlay is then not kept.
+        slots.push(slot);
+        if let Some(cmd_started) = cmd_started {
+            record_command(&cmd, cmd_started.elapsed(), cfg.slow_command_ms, batch_len);
+        }
+        cut = start.elapsed() > budget;
+    }
+    slots
 }
 
 // ---------------------------------------------------------------------------
@@ -2445,8 +2616,15 @@ impl PlannerThread {
             .spawn(move || {
                 raise_planning_thread_priority();
                 let mut state = PlannerState::default();
+                // The wait between two jobs: how long the planner thread sat
+                // idle for the driver's next batch.
+                let mut done_at: Option<Instant> = None;
                 while let Ok(job) = rx.recv() {
+                    if let Some(t) = done_at {
+                        scheduler::note_idle(t.elapsed().as_micros() as u64);
+                    }
                     job(&mut state);
+                    done_at = Some(Instant::now());
                 }
             })
             .expect("spawn the queen-planner thread");
@@ -3139,61 +3317,33 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             reset_every: KEEP_RESET_EVERY,
         };
 
-        let lanes_n = self.cfg.lanes;
+        let threads = self.cfg.planner_threads as usize;
         let epoch0 = self.plan_epoch;
         let hold0 = self.holding_until.is_some();
         let rx = self.planner_thread.run(move |state| {
             let w0 = Instant::now();
             let c0 = crate::rsm::timing::thread_cpu_ns();
-            let r = if lanes_n > 1 {
-                let ls = state
-                    .lanes
-                    .get_or_insert_with(|| Box::new(lanes::LanesState::new(lanes_n)));
-                lanes::plan_cycle_lanes(
-                    &store,
-                    &front,
-                    ls,
-                    keep,
-                    reader,
-                    qlog_reader,
-                    folded,
-                    commands,
-                    cfg,
-                    wall_us,
-                    expire_window_us,
-                    kv_sweep_limit,
-                    fire_cfg,
-                    maintenance_cfg,
-                    scan,
-                )
-            } else {
-                plan_cycle_blocking(
-                    &*store,
-                    &front,
-                    state,
-                    keep,
-                    reader,
-                    qlog_reader,
-                    folded,
-                    commands,
-                    cfg,
-                    wall_us,
-                    expire_window_us,
-                    kv_sweep_limit,
-                    fire_cfg,
-                    maintenance_cfg,
-                    scan,
-                )
-            };
+            let r = plan_cycle_blocking(
+                &store,
+                &front,
+                state,
+                keep,
+                threads,
+                reader,
+                qlog_reader,
+                folded,
+                commands,
+                cfg,
+                wall_us,
+                expire_window_us,
+                kv_sweep_limit,
+                fire_cfg,
+                maintenance_cfg,
+                scan,
+            );
+            scheduler::note_cycle(w0);
             if crate::rsm::timing::enabled() {
                 let tm = crate::rsm::timing::metrics();
-                // The single planner records its command loop as `plan`; with
-                // lanes the whole cycle is the planning (router, lanes,
-                // control, merge), and it went unrecorded: the histogram read
-                // zero on every lanes node.
-                if lanes_n > 1 {
-                    tm.plan.record_dur(w0.elapsed());
-                }
                 tm.plan_whole_wall.record_dur(w0.elapsed());
                 tm.plan_whole_cpu
                     .record(crate::rsm::timing::thread_cpu_ns().saturating_sub(c0));
@@ -4686,6 +4836,7 @@ mod perf_j_tests {
             retention_sink_hold: String::new(),
             retention_sink_hold_max_seconds: 0,
             created_at_us: 0,
+            route: None,
         }
     }
 
@@ -4698,6 +4849,7 @@ mod perf_j_tests {
             partition: part.into(),
             items: Vec::new(),
             create_cfg: qc(),
+            links: Default::default(),
         });
         Submission::new(cmd).0
     }
