@@ -14,7 +14,7 @@
 // so `getIndexedEntries()` has never returned it and the corpus carried 118 of
 // the site's 119 URLs, missing the page that says what the product is. See
 // `src/pages/index.md.ts`, which owns that copy and serves it at `/index.md`.
-import { getIndexedEntries, getVersions } from "@cloudflare/nimbus-docs";
+import { getIndexedEntries, getVersions } from "@cloudflare/nimbus-docs/runtime";
 import { config } from "virtual:nimbus/config";
 import { renderEntryMarkdown } from "@/lib/markdown-partials";
 // Explicit `.ts`: the bare specifier `./index.md` is ambiguous next to a route
@@ -55,7 +55,7 @@ export async function GET() {
     lines.push(`# ${item.title}`, "");
     if (item.description) lines.push(`> ${item.description}`, "");
     lines.push(
-      `Source: ${abs(item.url)} · Markdown: ${abs(item.markdownUrl)}`,
+      `Source: ${abs(item.url)} · Markdown: ${abs(item.markdownUrl ?? item.url)}`,
       "",
       await renderEntryMarkdown(item.entry),
       "",

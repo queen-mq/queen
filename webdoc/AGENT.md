@@ -48,7 +48,8 @@ Rules:
 
 - **Components must be PascalCase and registered in `src/components.ts`.** A pre-build validator catches typos with a "did you mean" hint.
 - **Partials use `<Render file="..." />`.** Don't import `.mdx` directly. Shared content lives in `src/content/partials/<slug>.mdx`.
-- **Icons use `astro-icon` + Phosphor.** `<Icon name="ph:<glyph>" class="w-4 h-4" />` from `astro-icon/components`. Glyphs: [phosphoricons.com](https://phosphoricons.com).
+- **Icons use Nimbus + Phosphor.** `<Icon name="ph:<glyph>" class="w-4 h-4" />` from `@cloudflare/nimbus-docs/components/Icon.astro` (default import). Glyphs: [phosphoricons.com](https://phosphoricons.com).
+- **Page helpers use `@cloudflare/nimbus-docs/runtime`.** Keep the package root import in `astro.config.ts` so build-only dependencies stay out of page bundles.
 - **Don't remove `<AgentDirective />` from `BaseLayout.astro`.** It points agents at `/llms.txt`.
 
 ## Adding things

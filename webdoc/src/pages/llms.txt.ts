@@ -10,7 +10,7 @@
 //
 // `/<section>/llms.txt` still ships from `pages/[section]/llms.txt.ts` for
 // agents that want to drill into one area, and is linked from each heading.
-import { getIndexedTopLevel } from "@cloudflare/nimbus-docs";
+import { getIndexedTopLevel } from "@cloudflare/nimbus-docs/runtime";
 import { config } from "virtual:nimbus/config";
 import { HOME_HEADLINE, HOME_SUMMARY } from "./index.md.ts";
 // `buildBrief` is imported to measure the summary, not to inline it: the size
@@ -85,7 +85,7 @@ export async function GET() {
 
   for (const leaf of leaves) {
     const description = leaf.description ? ` — ${leaf.description}` : "";
-    lines.push(`- [${leaf.title}](${abs(leaf.markdownUrl)})${description}`);
+    lines.push(`- [${leaf.title}](${abs(leaf.markdownUrl ?? leaf.url)})${description}`);
   }
 
   // Sections in sidebar order where the sidebar names them, so the index reads
@@ -113,7 +113,7 @@ export async function GET() {
     );
     for (const item of group.members) {
       const description = item.description ? ` — ${item.description}` : "";
-      lines.push(`- [${item.title}](${abs(item.markdownUrl)})${description}`);
+      lines.push(`- [${item.title}](${abs(item.markdownUrl ?? item.url)})${description}`);
     }
   }
 

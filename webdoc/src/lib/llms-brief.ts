@@ -37,7 +37,7 @@
  * "not stated", because they were one page away.
  */
 
-import { getIndexedEntries } from "@cloudflare/nimbus-docs";
+import { getIndexedEntries } from "@cloudflare/nimbus-docs/runtime";
 import { config } from "virtual:nimbus/config";
 
 // The size budget that keeps this document fetchable is not declared here. It
