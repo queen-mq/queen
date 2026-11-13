@@ -9,6 +9,12 @@
 //! /raft/v1/membership`, [`super::network`]) and relays the answer; with no
 //! leader known it answers `NotLeader`, which the client retries.
 //!
+//! Once checked, a change runs to its end on a task of its own, whatever
+//! becomes of the request that asked for it ([`change_on_leader`]): openraft
+//! makes a change in two steps (a joint configuration, then the uniform one)
+//! and takes the second in the future that asked for the first, so a change
+//! run inside the request stopped between them when the request went away.
+//!
 //! # The checks, all before anything is written
 //!
 //! - **One change at a time.** A change still running on this leader, a joint
@@ -87,7 +93,9 @@ pub type QuiesceHook = std::sync::Arc<
 >;
 
 pub(crate) struct AdminCtx {
-    lock: tokio::sync::Mutex<()>,
+    /// One change at a time on this leader: held by the change's own task
+    /// until the change ends ([`change_on_leader`]).
+    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     /// See [`QuiesceHook`].
     pub(crate) quiesce: std::sync::OnceLock<QuiesceHook>,
     /// See [`promote_max_lag_from_env`].
@@ -118,7 +126,7 @@ pub(crate) struct KindsCheck {
 impl AdminCtx {
     pub(crate) fn new(promote_max_lag: u64, live_within: Duration) -> AdminCtx {
         AdminCtx {
-            lock: tokio::sync::Mutex::new(()),
+            lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             quiesce: std::sync::OnceLock::new(),
             promote_max_lag,
             live_within,
@@ -677,7 +685,8 @@ fn plan(m: &Metrics, ctx: &AdminCtx, change: &MembershipChange) -> Result<Plan, 
 /// Run `change` on this node, which must lead: the checks, then openraft's
 /// (joint) membership change, conditional on the membership the checks saw.
 /// Returns once the change committed (or there was nothing to do), with the
-/// membership as it then is.
+/// membership as it then is; `Timeout` once `deadline` passed, while the
+/// change goes on to its end on its own task.
 pub(crate) async fn change_on_leader<S: Store + 'static>(
     raft: &RaftHandle<S>,
     members: &MembersState,
@@ -686,7 +695,7 @@ pub(crate) async fn change_on_leader<S: Store + 'static>(
     deadline: Instant,
 ) -> Result<MembershipStatus, ReplError> {
     use openraft::async_runtime::WatchReceiver;
-    let _one = ctx.lock.try_lock().map_err(|_| {
+    let one = ctx.lock.clone().try_lock_owned().map_err(|_| {
         ReplError::refused(
             "in_flight",
             "another membership change is running on this leader; retry once it answers",
@@ -734,57 +743,68 @@ pub(crate) async fn change_on_leader<S: Store + 'static>(
         }
         None => None,
     };
-    let res = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        raft.change_membership_if(
-            changes,
-            retain,
-            [Precondition::LastMembershipLogId {
-                last_membership_log_id: observed,
-            }],
-        ),
-    )
-    .await;
-    let resp = match res {
-        Err(_elapsed) => {
-            tracing::warn!(target: "rsm", change = %what, "raft: membership change: the deadline passed; it may still complete");
-            // It may still append its final config: keep the planner paused
-            // until the membership is uniform and committed again (or this
-            // node stops leading; two minutes at most).
-            if let Some(g) = paused {
-                let raft = raft.clone();
-                tokio::spawn(async move {
-                    let end = Instant::now() + Duration::from_secs(120);
-                    loop {
-                        let m = raft.metrics().borrow_watched().clone();
-                        let joint = m.membership_config.membership().get_joint_config().len() > 1;
-                        let committed = *m.membership_config.log_id() <= m.local_committed;
-                        if m.state != ServerState::Leader
-                            || (!joint && committed)
-                            || Instant::now() >= end
-                        {
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                    }
-                    drop(g);
-                });
+    // The change runs on a task of its own, which holds the one-change lock
+    // and the planner's pause until openraft has taken both its steps, and
+    // says how the change ended. openraft takes the second step (from the
+    // joint configuration to the uniform one) in the future that asked for
+    // the first: run inside the request, a change whose caller went away (its
+    // deadline passed, the operator's connection closed, the follower that
+    // forwarded it stopped, as a learner restarting to load its snapshot
+    // does) stopped between the two. The group stayed joint and refused every
+    // later change `in_flight`, and after a deadline the planner stayed paused
+    // for two minutes waiting for the uniform configuration, every write on
+    // this leader with it (a local smoke, 2026-11-13). The request only waits
+    // for the task, up to its deadline.
+    let mut task = {
+        let raft = raft.clone();
+        let what = what.clone();
+        tokio::spawn(async move {
+            let _one = one;
+            let _paused = paused;
+            let res = raft
+                .change_membership_if(
+                    changes,
+                    retain,
+                    [Precondition::LastMembershipLogId {
+                        last_membership_log_id: observed,
+                    }],
+                )
+                .await
+                .map_err(map_write_error);
+            match &res {
+                Ok(resp) => tracing::warn!(
+                    target: "rsm",
+                    change = %what,
+                    index = rsm_index(resp.log_id.index),
+                    "raft: membership change committed",
+                ),
+                Err(err) => tracing::warn!(
+                    target: "rsm",
+                    change = %what,
+                    error = %err,
+                    "raft: membership change refused",
+                ),
             }
+            res.map(|_| ())
+        })
+    };
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut task).await {
+        Err(_elapsed) => {
+            tracing::warn!(
+                target: "rsm",
+                change = %what,
+                "raft: membership change: the deadline passed; the change goes on, and says how it ended when it does",
+            );
             return Err(ReplError::Timeout);
         }
-        Ok(Ok(resp)) => resp,
-        Ok(Err(e)) => {
-            let err = map_write_error(e);
-            tracing::warn!(target: "rsm", change = %what, error = %err, "raft: membership change refused");
-            return Err(err);
+        Ok(Err(stopped)) => {
+            return Err(ReplError::Fatal(format!(
+                "the membership change's task stopped: {stopped}"
+            )))
         }
-    };
-    tracing::warn!(
-        target: "rsm",
-        change = %what,
-        index = rsm_index(resp.log_id.index),
-        "raft: membership change committed",
-    );
+        Ok(Ok(Err(err))) => return Err(err),
+        Ok(Ok(Ok(()))) => {}
+    }
     let m = raft.metrics().borrow_watched().clone();
     Ok(status(&m, members, ctx))
 }

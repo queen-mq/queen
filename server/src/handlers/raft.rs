@@ -806,8 +806,9 @@ pub(crate) async fn handle_metrics(
 // | `PUT .../voters` | `{"voters":[..],"force"?}` | same |
 // | `DELETE .../members/:id` | — | same |
 //
-// `?timeoutMs=` bounds a change (default 30 s): past it the answer is `504
-// timeout` and the change may still complete. A refused change is `409` (or
+// `?timeoutMs=` bounds the wait for a change (default 30 s): past it the
+// answer is `504 timeout`, and the change goes on to its end on the leader
+// (raft/admin.rs, change_on_leader). A refused change is `409` (or
 // `400` for a malformed one) with a stable `code`: `in_flight`, `no_quorum`,
 // `last_voter`, `learner_behind`, `already_voter`, `address_mismatch`,
 // `membership_changed`, `leader_changed`, `not_a_learner`, `not_a_member`,

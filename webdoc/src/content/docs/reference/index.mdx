@@ -77,6 +77,9 @@ digest: >-
 # outside it 403 scope_denied before any command is built (server/src/scope.rs, b24b53599); proxy
 # cp.rs the scoped-key policy, rotation and block-list calls (9c7c0d515). Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
+# rewords the 504 a membership change answers; handlers/raft.rs changes a comment on ?timeoutMs.
+# Nothing this page states changes.
 ---
 
 This section is the contract written down: what every route takes and answers, what each status

@@ -131,6 +131,9 @@ sourceOfTruth:
 # facade/real/phase2.rs carry each request's client scope (None without a client token) and refuse a
 # name outside it 403 scope_denied before any command is built (server/src/scope.rs, b24b53599).
 # This page: the client token rows under Proxy and connectors.
+# sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
+# rewords the 504 a membership change answers; handlers/raft.rs changes a comment on ?timeoutMs.
+# Nothing this page states changes.
 ---
 
 Most of QueenMQ's limits exist to keep one request from costing everyone else: a body cap, a ceiling

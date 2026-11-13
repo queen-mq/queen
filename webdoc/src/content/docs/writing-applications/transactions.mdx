@@ -51,6 +51,9 @@ verifiedBy:
 # carry each request's client scope (None without a client token) and refuse a name outside it 403
 # scope_denied before any command is built (server/src/scope.rs, b24b53599). Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
+# rewords the 504 a membership change answers; handlers/raft.rs changes a comment on ?timeoutMs.
+# Nothing this page states changes.
 ---
 
 The ack, the order's new state, the next event and tomorrow's reminder commit as one log entry, or none of them does. That one call replaces the outbox table, the idempotency table and the cron job.

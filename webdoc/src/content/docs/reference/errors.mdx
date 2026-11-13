@@ -112,6 +112,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-06 (JS push across partitions, buffer per queue): TransactionBuilder.js lets a pushed item name its own partition. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-07 (the feed through the proxy): a feed read that asks (x-queen-feed-relay) is
 # relayed by the leader instead of answered 421. This page: the feed_on_leader row says so.
+# sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
+# rewords the 504 a membership change answers; handlers/raft.rs changes a comment on ?timeoutMs.
+# This page: the 504 sentence under Raft membership codes says so.
 ---
 
 When QueenMQ refuses a call it answers a status code and a JSON body with a stable code, and the code
@@ -293,7 +296,8 @@ every route answers 404 `not_found`; a wrong token answers 401 `unauthorized`, a
 `bad_request`, `not_a_learner` and `not_a_member`; 409 for `in_flight`, `no_quorum`, `last_voter`,
 `learner_behind`, `already_voter`, `address_mismatch`, `membership_changed` and `leader_changed`;
 503 for `leader_unreachable`; and 504 `timeout` when the deadline (`?timeoutMs=`, default 30 s)
-passed, in which case the change may still complete, so read the membership before repeating it. A
+passed, in which case the leader goes on with the change and refuses another (`in_flight`) until it
+ends, so read the membership before repeating it. A
 request that carries a tenant answers 403 `forbidden`: the membership belongs to the whole cluster.
 See [cluster](/manage/docker/).
 

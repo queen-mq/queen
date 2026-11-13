@@ -1953,6 +1953,109 @@ async fn a_new_node_joins_as_a_learner_catches_up_and_is_promoted() {
     }
 }
 
+/// A change whose caller is gone between openraft's two steps still finishes.
+/// openraft takes the second step (from the joint configuration to the
+/// uniform one) in the future that asked for the change; run inside the
+/// request, a caller that went away (the deadline passed, the operator's
+/// connection closed, the follower that forwarded the change stopped: a
+/// learner restarting to load its snapshot, in a local smoke of 2026-11-13)
+/// left the group joint, refusing every later change `in_flight`. Here the
+/// promotion is asked with its deadline already passed: the change gets one
+/// poll (openraft hands the joint entry to its core), and its caller is
+/// answered `timeout`. The group must still end uniform with node 2 a voter,
+/// take the next change, and commit with both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_change_whose_caller_is_gone_between_its_two_steps_still_finishes() {
+    let _one = serial().await;
+    log_init();
+    const N: u64 = 60;
+    let entries = workload(SEED, 2 * N);
+    let dirs: Vec<PathBuf> = (0..2).map(|_| scratch("caller-gone")).collect();
+    let ports = free_ports(2);
+    // Node 1 founds a cluster of its own; node 2 starts empty and joins it.
+    let mut nodes = tokio::task::block_in_place(|| {
+        open_all_in(&dirs[..1], &[test_opts()], |id| {
+            cluster_config(&ports[..1], id)
+        })
+    });
+    propose_all(nodes[0].as_ref().unwrap(), &entries[..N as usize]).await;
+    let joiner = RaftOpts {
+        join: true,
+        ..test_opts()
+    };
+    let (d2, c2) = (dirs[1].clone(), cluster_config(&ports, 2));
+    nodes.push(Some(tokio::task::block_in_place(move || {
+        open_node_in(&d2, 2, c2, joiner)
+    })));
+    let leader = nodes[0].as_ref().unwrap();
+    let st = change(
+        leader,
+        MembershipChange::AddLearner {
+            node: 2,
+            raft: node_addr(&ports, 2),
+            http: "127.0.0.1:1".into(),
+        },
+    )
+    .await
+    .expect("add the learner");
+    assert!(st.learners.contains(&2), "{st:?}");
+
+    // The promotion, its deadline passed before it is asked: refused until
+    // the learner has caught up, then accepted and answered `timeout`.
+    let promote = MembershipChange::Promote {
+        nodes: vec![2],
+        force: false,
+    };
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+        match leader.admin_change(promote.clone(), Instant::now()).await {
+            Err(ReplError::Timeout) => break,
+            Err(ReplError::Refused { code, .. }) if code == "learner_behind" => {
+                assert!(Instant::now() < end, "the learner never caught up");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            other => panic!("expected the promotion to answer timeout, got {other:?}"),
+        }
+    }
+
+    // It finishes all the same: uniform, node 2 a voter.
+    let end = Instant::now() + Duration::from_secs(20);
+    let st = loop {
+        let st = leader.membership_status(deadline()).await;
+        if st.joint.is_none() && !st.change_in_flight && st.voters == vec![1, 2] {
+            break st;
+        }
+        assert!(
+            Instant::now() < end,
+            "the change never left its joint configuration: {st:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(st.learners.is_empty(), "{st:?}");
+    // The next change is taken (once the change's own task has let go of
+    // the one-change lock, a moment after its last entry committed).
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        match change(leader, promote.clone()).await {
+            Ok(st) => {
+                assert_eq!(st.voters, vec![1, 2], "{st:?}");
+                break;
+            }
+            Err(ReplError::Refused { code, .. }) if code == "in_flight" && Instant::now() < end => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("the change after it: {e:?}"),
+        }
+    }
+
+    let last = propose_all(leader, &entries[N as usize..]).await;
+    tokio::task::block_in_place(|| wait_applied(&nodes, last));
+    tokio::task::block_in_place(|| converge(nodes, 2 * N, "caller-gone"));
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
 /// Two of three disks are gone for good. The survivor, restarted with
 /// `force_recover` naming itself, becomes its only voter in a new term and
 /// serves; two new nodes on empty directories join it (learner, catch up,

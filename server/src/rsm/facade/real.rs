@@ -7194,7 +7194,7 @@ impl Rsm for RaftFacade {
             }),
             Err(ReplError::Timeout) => Ok(ApiOut::json(
                 504,
-                serde_json::json!({"ok": false, "code": "timeout", "error": "the deadline passed before the change committed: it may still complete; read GET /api/v1/system/raft/membership before repeating it"}).to_string(),
+                serde_json::json!({"ok": false, "code": "timeout", "error": "the deadline passed before the change committed: the leader goes on with it, and refuses another change (in_flight) until it ends; read GET /api/v1/system/raft/membership before repeating it"}).to_string(),
             )),
             Err(ReplError::Refused { code, message }) => {
                 let status = match code.as_str() {
