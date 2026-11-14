@@ -574,6 +574,11 @@
       ; ordinary queue).
       (when (and (= :ok (:type res)) (:made client))
         (swap! (:made client) conj (:reader op)))
+      ; Not made (a kill, a 503): ask again (rt-reading-lz-kill 2026-11-14:
+      ; the one ask failed, the reader was made only at the final catch-up,
+      ; and :make-reader never answered :ok).
+      (when (and (not= :ok (:type res)) (:asked client))
+        (reset! (:asked client) false))
       res)
 
     :finish-catch-up
@@ -776,7 +781,8 @@
                        (compare-and-set! asked false true))))]
     {:client          (map->Client {:invoke-fn reading-invoke!
                                     :setup-fn  reading-setup!
-                                    :made      made})
+                                    :made      made
+                                    :asked     asked})
      :checker         (checker/compose {:readers (reading-checker), :framed (framed-checker)})
      :generator       (gen/mix [(enqueue-gen ["jepsen-0" "jepsen-1"])
                                 (fn [] (if (due?)
