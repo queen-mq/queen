@@ -19,8 +19,13 @@
              than 2 s before the pop completed
     maxwait  a delivery by a pop sent more than 4 s + the scan (1 s) + 2 s
              of margin after the push was acknowledged
-  Times are the client's; the broker counts from when it applies the push,
-  which is later, so each rule can only be broken by the broker."
+  Times are the client's. The broker stamps a message no earlier than its
+  push was sent and no later than it was acknowledged, so each rule takes
+  the bound only the broker can break: delayed and window the push's send
+  time, of every push, one that timed out included (its message may be the
+  oldest of a batch: qo-window-part 2026-11-14, a push stuck 5 s in a
+  partition landed just ahead of a new one); maxwait the acknowledgement,
+  so only acknowledged pushes."
   (:require [jepsen [checker :as checker]
                     [client :as client]
                     [generator :as gen]
@@ -69,8 +74,9 @@
       (let [opt     (:queue-opt test)
             judged? (not (some #{:clock} (:faults test)))
             hist    (h/client-ops history)
-            pushes  (->> hist (h/filter #(and (= :enqueue (:f %)) (= :ok (:type %))))
-                         (map (fn [op] [(:value op) {:inv (:time (h/invocation hist op)), :comp (:time op)}]))
+            pushes  (->> hist (h/filter #(and (= :enqueue (:f %)) (#{:ok :info} (:type %))))
+                         (map (fn [op] [(:value op) {:inv (:time (h/invocation hist op)), :comp (:time op)
+                                                     :acked? (= :ok (:type op))}]))
                          (into {}))
             pops    (->> hist (h/filter #(and (= :dequeue (:f %)) (#{:ok :info} (:type %)))) vec)
             bad     (case opt
@@ -91,7 +97,7 @@
                       (for [op pops, m (:msgs op)
                             :let [p   (pushes (:v m))
                                   inv (:time (h/invocation hist op))]
-                            :when (and p (< (+ (:comp p) (* 7 s)) inv))]
+                            :when (and p (:acked? p) (< (+ (:comp p) (* 7 s)) inv))]
                         {:v (:v m), :pop-sent-ms-after-push (quot (- inv (:comp p)) 1000000)}))
             bad     (vec bad)]
         {:valid?   (or (not judged?) (empty? bad))

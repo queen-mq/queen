@@ -15,6 +15,9 @@
 (defn enq [v t] [{:process 0, :type :invoke, :f :enqueue, :value v, :time t}
                  {:process 0, :type :ok, :f :enqueue, :value v, :time (+ t 1000)}])
 
+(defn enq-info [v t0 t1] [{:process 2, :type :invoke, :f :enqueue, :value v, :time t0}
+                          {:process 2, :type :info, :f :enqueue, :value v, :time t1}])
+
 (defn deq [t0 t1 & vps]
   [{:process 1, :type :invoke, :f :dequeue, :value nil, :time t0}
    {:process 1, :type :ok, :f :dequeue, :value (mapv first vps), :time t1
@@ -31,13 +34,22 @@
       (is (not (:valid? r)))
       (is (= 1 (:count r)))))
   (testing "under clock faults it is counted, not judged"
-    (is (:valid? (run :delayed #{:clock} [(enq 1 0) (deq s s [1 "w0"])])))))
+    (is (:valid? (run :delayed #{:clock} [(enq 1 0) (deq s s [1 "w0"])]))))
+  (testing "a push that timed out, delivered 1 s after it was sent: early all the same"
+    (is (not (:valid? (run :delayed #{} [(enq-info 1 0 (* 5 s)) (deq s s [1 "w0"])]))))))
 
 (deftest window
   (testing "a batch whose oldest message is 2 s old"
     (is (:valid? (run :window #{} [(enq 1 0) (enq 2 s) (deq (* 2 s) (* 2 s) [1 "w0"] [2 "w0"])]))))
   (testing "a batch handed over before its oldest message waited 2 s"
-    (is (not (:valid? (run :window #{} [(enq 1 0) (deq s s [1 "w0"])]))))))
+    (is (not (:valid? (run :window #{} [(enq 1 0) (deq s s [1 "w0"])])))))
+  ;; qo-window-part 2026-11-14: 7027's push timed out after 5 s in a partition
+  ;; and landed ahead of 7033, sent as it timed out; one pop took both.
+  (testing "the batch's oldest message is a push that timed out, sent 5 s before"
+    (is (:valid? (run :window #{} [(enq-info 7027 0 (* 5 s)) (enq 7033 (* 5 s))
+                                   (deq (* 5 s) (+ (* 5 s) (quot s 5)) [7027 "w5"] [7033 "w5"])]))))
+  (testing "a push that timed out, delivered alone 1 s after it was sent: early"
+    (is (not (:valid? (run :window #{} [(enq-info 9 0 (* 5 s)) (deq s s [9 "w0"])]))))))
 
 (deftest maxwait
   (testing "delivered within 4 s + scan + margin"
@@ -45,7 +57,9 @@
   (testing "a pop sent well after the message should have been removed"
     (let [r (run :maxwait #{} [(enq 1 0) (deq (* 9 s) (* 9 s) [1 "w0"])])]
       (is (not (:valid? r)))
-      (is (= 1 (:count r))))))
+      (is (= 1 (:count r)))))
+  (testing "a push that timed out may land any time after: not judged"
+    (is (:valid? (run :maxwait #{} [(enq-info 1 0 (* 5 s)) (deq (* 20 s) (* 20 s) [1 "w0"])])))))
 
 (deftest maxwait-skips
   ; Partition 1 is "w1". Offsets 0 and 1 were pushed; a pop answered at
