@@ -43,7 +43,10 @@
 //! body and `Retry-After`, so an engine retries a 429 or a 503 behind the
 //! broker's own hint and stops on a 400, exactly as over HTTP. Every call is
 //! SPAWNED onto the broker runtime and awaited from the connectors' runtime,
-//! so broker code never runs on a connector thread.
+//! so broker code never runs on a connector thread. A write runs to its end
+//! whoever still waits for it; a pop ends with its caller, as a pop over HTTP
+//! ends when its client hangs up, so a worker that stops while it waits in
+//! one leaves no lease behind.
 //!
 //! ## One combination that does not run
 //! With `QUEEN_RAFT_CLIENT_OFFLOAD=false` only the leader serves typed calls
@@ -191,6 +194,12 @@ impl LocalQueen {
     /// Run `call` on the broker runtime and await it from here. A node that
     /// does not serve typed calls answers the retryable 503 instead
     /// ([`NOT_SERVED_BODY`]), asked on the broker side like the call itself.
+    ///
+    /// The call runs to its end even when its caller stops waiting (a unit
+    /// that is stopped mid-call): right for a write, whose outcome the next
+    /// owner reads from the broker (an ack that lands frees its lease, a
+    /// commit that lands moves the pointer). A call that WAITS is
+    /// [`LocalQueen::on_broker_while_awaited`]'s.
     fn on_broker<T, F, Fut>(
         &self,
         what: &'static str,
@@ -201,19 +210,47 @@ impl LocalQueen {
         F: FnOnce(Arc<dyn Rsm>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<T, QueenError>> + Send + 'static,
     {
+        let task = self.spawn_on_broker(call);
+        Box::pin(async move { task.await.map_err(|e| ended(what, e))? })
+    }
+
+    /// [`LocalQueen::on_broker`] for a call that waits at the broker for its
+    /// caller's sake, a pop in its long poll: the task ends with its caller.
+    /// A sink worker that stops drops the pop it waits in; left running, that
+    /// pop took the next messages under the sink's lease and answered nobody
+    /// ([`crate::util::AbortOnDrop`]).
+    fn on_broker_while_awaited<T, F, Fut>(
+        &self,
+        what: &'static str,
+        call: F,
+    ) -> BoxFuture<'static, Result<T, QueenError>>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<dyn Rsm>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, QueenError>> + Send + 'static,
+    {
+        let mut task = crate::util::AbortOnDrop(self.spawn_on_broker(call));
+        Box::pin(async move { (&mut task.0).await.map_err(|e| ended(what, e))? })
+    }
+
+    fn spawn_on_broker<T, F, Fut>(&self, call: F) -> tokio::task::JoinHandle<Result<T, QueenError>>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<dyn Rsm>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, QueenError>> + Send + 'static,
+    {
         let rsm = Arc::clone(&self.rsm);
-        let task = self.broker.spawn(async move {
+        self.broker.spawn(async move {
             if rsm.route() != Route::Local {
                 return Err(not_served());
             }
             call(rsm).await
-        });
-        Box::pin(async move {
-            task.await.map_err(|e| {
-                QueenError::Transport(format!("the broker task serving {what} ended: {e}"))
-            })?
         })
     }
+}
+
+fn ended(what: &str, e: tokio::task::JoinError) -> QueenError {
+    QueenError::Transport(format!("the broker task serving {what} ended: {e}"))
 }
 
 fn not_served() -> QueenError {
@@ -328,7 +365,7 @@ impl QueenApi for LocalQueen {
         } else {
             CALL_BUDGET
         });
-        let answered = self.on_broker("a pop", move |rsm| async move {
+        let answered = self.on_broker_while_awaited("a pop", move |rsm| async move {
             if let Err(e) = check_message_key_names(&tenant, &req.queue, Some(&req.group), None) {
                 return Err(rsm_error(e).await);
             }

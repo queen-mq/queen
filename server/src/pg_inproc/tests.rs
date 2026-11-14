@@ -969,3 +969,65 @@ fn the_fingerprint_follows_every_api_write() {
     assert!(a.doc.is_ok(), "{:?}", a.doc.as_ref().err());
     assert_eq!(a.kind.as_deref(), Some("source"));
 }
+
+/// Jepsen pgsink-restart, 2026-11-14: a sink worker that stops drops the pop
+/// it is waiting in (queen-pg `sink/engine.rs`). The call went on as a task
+/// of the broker's runtime, took the next message under the sink's lease and
+/// answered nobody: the partition stayed leased, to no worker, for the whole
+/// lease (60 s by default). The pop now ends with its caller.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pop_its_caller_dropped_leaves_no_lease_behind() {
+    let broker = Broker::open("dropped-pop");
+    let queen = broker.queen(DEFAULT_TENANT);
+    let ask = |wait_ms: u64| PopRequest {
+        queue: "jobs".to_string(),
+        group: "pg-copy".to_string(),
+        batch: 10,
+        wait_ms,
+        lease_seconds: 30,
+        subscription_mode: "all".to_string(),
+        max_partitions: None,
+    };
+    let item = |n: u64| json!({"queue": "jobs", "partition": "p0", "payload": {"n": n}, "transactionId": format!("t{n}")});
+    // The queue, its partition and the group exist: one message, taken and
+    // acknowledged.
+    broker.push_as(DEFAULT_TENANT, vec![item(1)]).await;
+    let first = queen.pop(ask(0)).await.expect("a pop");
+    assert_eq!(first.messages.len(), 1, "{:?}", first.messages);
+    let acked = queen
+        .ack(AckRequest {
+            group: "pg-copy".to_string(),
+            items: first
+                .messages
+                .iter()
+                .map(|m| AckItem {
+                    transaction_id: m.transaction_id.clone(),
+                    partition_id: m.partition_id.clone(),
+                    lease_id: m.lease_id.clone(),
+                    status: AckStatus::Ok,
+                    error: None,
+                })
+                .collect(),
+        })
+        .await
+        .expect("an ack");
+    assert!(
+        acked.results.iter().all(|r| r.success),
+        "{:?}",
+        acked.results
+    );
+
+    // A worker waits for the next message and is stopped: its pop is dropped.
+    let waiting = tokio::time::timeout(Duration::from_millis(300), queen.pop(ask(5_000))).await;
+    assert!(waiting.is_err(), "the pop was waiting when it was dropped");
+
+    // The next message belongs to the next worker that asks.
+    broker.push_as(DEFAULT_TENANT, vec![item(2)]).await;
+    let next = queen.pop(ask(2_000)).await.expect("a pop");
+    assert_eq!(
+        next.messages.len(),
+        1,
+        "the message went to the pop nobody waits for: {:?}",
+        next.messages
+    );
+}

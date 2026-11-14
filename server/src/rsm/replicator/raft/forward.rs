@@ -349,6 +349,22 @@ pub(crate) fn serve_stream(
 /// Read the stream's commands; each is handled on its own task, and its
 /// answer goes to `tx` when it resolves. The answer body ends once the
 /// follower ended its commands and every one of them is answered.
+///
+/// # A follower that is gone
+///
+/// A stream that BREAKS (the follower died, or the connection did) leaves
+/// commands in flight here whose answers nobody will read. Each is dropped
+/// where it waits, as a client's request is when the client hangs up: a pop
+/// in its long poll stops waiting (the engine serves no waiter whose answer
+/// has no receiver, and releases a claim nobody receives). Until 2026-11-14
+/// such a pop waited on, took the next messages under its lease and answered
+/// into the closed stream: those partitions stayed leased, to nobody, for
+/// the whole lease (Jepsen W29: a sink's partitions for 60 s after a node
+/// restarted). A command already handed to the planner is planned whatever
+/// happens here, and its retry carries the same request id.
+///
+/// A stream the follower ENDED (idle, or its link replaced) is not gone: the
+/// answers still go out.
 #[cfg(feature = "server")]
 async fn read_commands(
     body: axum::body::Body,
@@ -361,11 +377,15 @@ async fn read_commands(
     let mut data = body.into_data_stream();
     let mut frames = FrameBuf::default();
     let mut ready = Vec::new();
+    // Closed when the stream broke: no permit is ever added, so a task that
+    // waits for one waits until then (and for ever on a stream that ended).
+    let broke = Arc::new(tokio::sync::Semaphore::new(0));
     while let Some(chunk) = data.next().await {
         let chunk = match chunk {
             Ok(c) => c,
             Err(e) => {
                 tracing::debug!(target: "rsm", error = %e, "raft forward stream: the follower's body ended");
+                broke.close();
                 return;
             }
         };
@@ -374,10 +394,17 @@ async fn read_commands(
             return;
         }
         for (seq, command) in ready.drain(..) {
-            let (h, tx) = (handler.clone(), tx.clone());
+            let (h, tx, broke) = (handler.clone(), tx.clone(), broke.clone());
             rt.spawn(async move {
-                let answer =
-                    crate::rsm::admit::forwarded_scope(from, async move { h(command).await }).await;
+                let served =
+                    crate::rsm::admit::forwarded_scope(from, async move { h(command).await });
+                let answer = tokio::select! {
+                    answer = served => answer,
+                    // The follower's half broke, or the answer body has no
+                    // reader any more.
+                    _ = broke.acquire() => return,
+                    _ = tx.closed() => return,
+                };
                 let _ = tx.send(match answer {
                     Ok(b) => answer_frame(seq, KIND_ANSWER, &b),
                     Err(e) => answer_frame(seq, KIND_FAILED, e.as_bytes()),
@@ -1371,5 +1398,154 @@ mod tests {
             .call(&addr, slow(4), Duration::from_secs(5), false)
             .await
             .is_ok());
+    }
+
+    /// Sets its flag when it is dropped: a handler's future that was given up.
+    struct Gone(Arc<AtomicBool>);
+
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A handler that waits like a pop in its long poll: it says when it
+    /// started, answers `done` once `gate` opens, and says when its future
+    /// was dropped (answered or given up).
+    fn waiting(
+        started: &Arc<AtomicBool>,
+        dropped: &Arc<AtomicBool>,
+        gate: &Arc<tokio::sync::Notify>,
+    ) -> RemoteHandler {
+        let (started, dropped, gate) = (started.clone(), dropped.clone(), gate.clone());
+        Arc::new(move |_body: Bytes| -> Fut {
+            let (started, dropped, gate) = (started.clone(), dropped.clone(), gate.clone());
+            Box::pin(async move {
+                let _gone = Gone(dropped);
+                started.store(true, Ordering::SeqCst);
+                gate.notified().await;
+                Ok(Bytes::from_static(b"done"))
+            })
+        })
+    }
+
+    async fn within(flag: &AtomicBool, wait: Duration) -> bool {
+        let t0 = Instant::now();
+        while !flag.load(Ordering::SeqCst) {
+            if t0.elapsed() > wait {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        true
+    }
+
+    /// A follower's stream written by hand, one command (`seq` 1) on it:
+    /// what `open` and the writer send, so the test owns the socket.
+    #[cfg(feature = "server")]
+    async fn one_command(addr: &str, end_the_body: bool) -> tokio::net::TcpStream {
+        let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let mut out = format!(
+            "POST {ROUTE} HTTP/1.1\r\nhost: {addr}\r\ncontent-type: {CONTENT_TYPE}\r\n\
+             transfer-encoding: chunked\r\n{FROM_HEADER}: 2\r\n\r\n"
+        )
+        .into_bytes();
+        let mut frames = Vec::new();
+        command_frame(&mut frames, 1, b"x");
+        out.extend_from_slice(format!("{:x}\r\n", frames.len()).as_bytes());
+        out.extend_from_slice(&frames);
+        out.extend_from_slice(b"\r\n");
+        if end_the_body {
+            out.extend_from_slice(b"0\r\n\r\n");
+        }
+        sock.write_all(&out)
+            .await
+            .expect("the stream's head and command");
+        sock.flush().await.expect("flush");
+        sock
+    }
+
+    /// Jepsen W29, 2026-11-14: a follower that dies leaves commands in flight
+    /// at the leader. A pop among them waited on in its long poll, took the
+    /// next messages under its lease and answered into the dead stream: the
+    /// partitions stayed leased to nobody for the whole lease. A command whose
+    /// stream broke is now dropped where it waits, which is what makes the
+    /// engine hand back what such a pop holds.
+    #[cfg(feature = "server")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_command_whose_stream_broke_is_dropped_where_it_waits() {
+        let (started, dropped) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let addr = serve(waiting(&started, &dropped, &gate), None).await;
+        let sock = one_command(&addr, false).await;
+        assert!(
+            within(&started, Duration::from_secs(5)).await,
+            "the command is in flight"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "it waits while its stream lives"
+        );
+        // The follower dies: its connection goes, mid-body.
+        drop(sock);
+        assert!(
+            within(&dropped, Duration::from_secs(5)).await,
+            "the command went on waiting for a follower that is gone"
+        );
+    }
+
+    /// A stream the follower ENDED is not a stream that broke: the follower
+    /// closed its commands (an idle stream, a replaced link) and still reads
+    /// the answers, so a command in flight waits on and is answered.
+    #[cfg(feature = "server")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_command_whose_stream_the_follower_ended_is_still_answered() {
+        let (started, dropped) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let addr = serve(waiting(&started, &dropped, &gate), None).await;
+        let sock = one_command(&addr, true).await;
+        assert!(
+            within(&started, Duration::from_secs(5)).await,
+            "the command is in flight"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "the follower ended its commands and still reads: the command waits on"
+        );
+        gate.notify_one();
+        // The write half stays open (a half-closed client is closed by the
+        // leader); the answers are read as the forwarder reads them.
+        let (r, _w) = sock.into_split();
+        let mut r = BufReader::with_capacity(64 * 1024, r);
+        let (status, chunked) = read_head(&mut r).await.expect("the answer's head");
+        assert_eq!((status, chunked), (200, true));
+        let mut body = ChunkedReader::new(r);
+        let mut frames = FrameBuf::default();
+        let mut ready = Vec::new();
+        let answer = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let chunk = body
+                    .next_chunk()
+                    .await
+                    .expect("the answer body")
+                    .expect("the stream ended before the answer");
+                frames.feed(chunk, &mut ready).expect("frames");
+                if let Some((_, a)) = ready.iter().find(|(seq, _)| *seq == 1) {
+                    return a.clone();
+                }
+            }
+        })
+        .await
+        .expect("the command is answered");
+        assert_eq!(answer.first(), Some(&KIND_ANSWER));
+        assert_eq!(&answer[1..], b"done");
     }
 }

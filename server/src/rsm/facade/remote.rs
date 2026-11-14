@@ -368,9 +368,15 @@ pub(super) fn handler(
         );
         match &clients {
             Some(rt) if on_raft_runtime() => {
-                let task = rt.spawn(fut);
+                // The route stops waiting when the follower's connection
+                // goes (it died, or gave the command up): the command goes
+                // with it, as it does when it is worked on the route's own
+                // task. Left running, a pop in its long poll took the next
+                // messages for a follower that was gone.
+                let mut task = crate::util::AbortOnDrop(rt.spawn(fut));
                 Box::pin(async move {
-                    task.await
+                    (&mut task.0)
+                        .await
                         .map_err(|e| format!("the forwarded command's task: {e}"))?
                 })
             }
@@ -462,6 +468,90 @@ mod tests {
         let (reply, _) = decode_reply(&answer.expect("answered")).expect("decodes");
         assert!(matches!(reply, Reply::Retry { hint: Some(3) }), "{reply:?}");
         assert!(!on_raft_runtime(), "a test thread is not a raft one");
+        drop(tx);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The per-command route of the Raft RPC server stops waiting when the
+    /// follower's connection goes. The command it awaited was a task of the
+    /// clients' runtime, and went on without it: a pop in its long poll then
+    /// took the next messages for a follower that was gone (Jepsen W29,
+    /// 2026-11-14). The command goes with the route's future.
+    #[test]
+    fn a_command_the_raft_route_stopped_awaiting_is_dropped() {
+        use std::sync::Mutex;
+        let rt = |name: &str| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name(name)
+                .enable_all()
+                .build()
+                .expect("runtime")
+        };
+        let (clients, raft) = (rt("clients"), rt("queen-raft"));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Submission>(8);
+        let dir = std::env::temp_dir().join(format!(
+            "queen-remote-handler-dropped-{}-{}",
+            std::process::id(),
+            crate::frames::uuid_bytes_to_string(&crate::util::uuidv7_bytes())
+        ));
+        let store = Arc::new(
+            crate::rsm::store::HeedStore::open(
+                &dir.join("store"),
+                &crate::rsm::store::StoreOpts {
+                    map_bytes: Some(64 << 20),
+                    ..Default::default()
+                },
+            )
+            .expect("store"),
+        );
+        let engine = Engine::new(store);
+        let h = clients.block_on(async { handler(engine, &tx, None, Arc::new(|| 7)) });
+        // A batcher that takes the command and never answers: a command that
+        // waits, as a pop does in its long poll.
+        let held: Arc<Mutex<Option<Submission>>> = Arc::new(Mutex::new(None));
+        let keep = held.clone();
+        clients.spawn(async move {
+            while let Some(sub) = rx.recv().await {
+                *keep.lock().unwrap() = Some(sub);
+            }
+        });
+        let cmd = Command::Effects(crate::rsm::planner::EffectsCommand {
+            request_id: [9; 16],
+            tenant: "t".into(),
+            effects: vec![crate::rsm::effect::Effect::Noop],
+        });
+        let body = bytes::Bytes::from(encode_request(&cmd, Duration::from_secs(30), &[]).unwrap());
+        let reached = held.clone();
+        raft.block_on(raft.spawn(async move {
+            assert!(on_raft_runtime(), "called on the raft runtime");
+            let answer = h(body);
+            let t0 = std::time::Instant::now();
+            while reached.lock().unwrap().is_none() && t0.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                reached.lock().unwrap().is_some(),
+                "the command reached the batcher"
+            );
+            // The follower's connection goes: the route's future is dropped.
+            drop(answer);
+        }))
+        .expect("the raft runtime's task");
+        let waits = || {
+            held.lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|sub| !sub.reply.is_closed())
+        };
+        let t0 = std::time::Instant::now();
+        while waits() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !waits(),
+            "the command still waits for its reply: its task went on without the route"
+        );
         drop(tx);
         let _ = std::fs::remove_dir_all(&dir);
     }

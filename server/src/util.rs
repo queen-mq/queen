@@ -160,6 +160,28 @@ impl Drop for DeterministicUuids {
     }
 }
 
+/// A task that is aborted when its caller stops waiting for it.
+///
+/// Dropping a `JoinHandle` detaches the task: it runs on. That is wrong for
+/// work done only for the caller's sake, which waits at the broker for
+/// something to hand it: a parked fetch, a pop in its long poll. Such a pop
+/// went on waiting after its caller had gone, took the next messages under
+/// its lease and answered nobody (Jepsen W29, 2026-11-14: a sink's partitions
+/// leased for 60 s to a worker that had stopped). Aborted, the pop's future
+/// is dropped where it waits, and the engine hands back what it holds
+/// ([`crate::rsm::consume`]: a waiter nobody receives is not served, and a
+/// claim nobody receives is released).
+///
+/// Await it through the handle: `(&mut guard.0).await`.
+pub struct AbortOnDrop<T>(pub tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        // A task that already ended is not touched.
+        self.0.abort();
+    }
+}
+
 /// Wall clock, milliseconds since the epoch: what [`uuidv7_bytes_at`] takes.
 pub fn unix_ms() -> u64 {
     SystemTime::now()

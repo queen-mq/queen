@@ -678,8 +678,11 @@ impl Worker {
             let started = Instant::now();
             let answer = tokio::select! {
                 r = self.sh.ctx.api.pop(req) => r,
-                // A pop in flight is dropped: whatever it leased comes back
-                // when the lease runs out, and is then applied once.
+                // A pop in flight is dropped. The broker stops a pop nobody
+                // waits for (in-process: its task ends with this future), so
+                // it takes nothing more; what it had already leased when the
+                // stop came is back once the lease runs out, and is then
+                // applied once.
                 _ = self.stop.wait() => return Ok(()),
             };
             match answer {

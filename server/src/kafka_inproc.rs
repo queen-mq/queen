@@ -34,6 +34,7 @@ use tower::ServiceExt;
 
 use crate::config::KafkaFacadeConfig;
 use crate::rsm::facade::Rsm;
+use crate::util::AbortOnDrop;
 
 const THREAD_NAME: &str = "queen-kafka";
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
@@ -435,15 +436,6 @@ impl Broker for RouterDispatch {
                 f.records,
             );
         }
-    }
-}
-
-/// A broker task aborted when its caller stops waiting for it.
-struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
-
-impl<T> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }
 
