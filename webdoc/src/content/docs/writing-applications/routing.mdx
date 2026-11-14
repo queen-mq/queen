@@ -106,7 +106,7 @@ A reading queue has its own leases, retries, dead-letter queue, priority, delays
 | Case | Answer |
 | --- | --- |
 | A push into a reading queue | refused, `reading_queue`: push to its source |
-| An existing ordinary queue given `from` | refused: a reading queue is a new queue |
+| An existing ordinary queue given `from` | it becomes the reading queue if no message was ever pushed to it (a consumer that popped it before it was configured created it); refused once it holds messages |
 | A reading queue that reads itself, at any depth | refused, `route_loop` |
 | A source that does not exist, or is a filtered group's | refused, `source_not_found` or `bad_source` |
 | More than 16 sources, or a 65th reader of one source | refused, `too_many_sources` or `too_many_readers` (`QUEEN_MAX_SOURCES_PER_QUEUE`, `QUEEN_MAX_READERS_PER_QUEUE`) |

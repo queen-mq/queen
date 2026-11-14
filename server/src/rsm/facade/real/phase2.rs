@@ -1984,12 +1984,10 @@ fn apply_route_options(
         }
         return Ok(false);
     }
-    if old.is_some() && !was_reader {
-        return Err(reject(
-            "bad_request",
-            format!("{queue} exists as an ordinary queue; a reading queue is a new one: pick another name"),
-        ));
-    }
+    // An ordinary queue of this name becomes a reader if it holds nothing of
+    // its own, which the planner decides with every entry in flight in view
+    // (`planner/route.rs`, `in_use`). It is what a consumer leaves behind
+    // that pops the reading queue before it is configured.
     let rules = cond::Rules::route();
     let top_where = match o.get("where") {
         None | Some(Value::Null) => Vec::new(),

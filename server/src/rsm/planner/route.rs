@@ -32,6 +32,10 @@ use crate::rsm::store::Reads;
 
 use super::{Overlay, Plan, Planner, PushCommand, PushItem, Refusal};
 
+/// The most partitions [`Planner::in_use`] looks at before it takes a queue
+/// to be in use.
+const UNUSED_PARTITIONS: usize = 1_024;
+
 /// Messages that met no reader's partition field (`partitionBy` named a field
 /// the message does not have): the `queen_route_unrouted_total` counter.
 pub static UNROUTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -469,6 +473,21 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                         .route()
                         .map(|r| r.sources.iter().map(|s| s.queue.clone()).collect())
                         .unwrap_or_default();
+                    // An ordinary queue of this name becomes a reader: only
+                    // one that holds nothing of its own ([`Planner::in_use`]).
+                    if old.is_some()
+                        && old_sources.is_empty()
+                        && !new_sources.is_empty()
+                        && self.in_use(ov, tenant, queue)?
+                    {
+                        return Err(Refusal::client(
+                            "bad_request",
+                            format!(
+                                "{} is an ordinary queue that holds messages; a reading queue starts empty: pick another name",
+                                route::shown_name(queue)
+                            ),
+                        ));
+                    }
                     // A reader: check its sources, and keep what they keep.
                     if !new_sources.is_empty() {
                         if new_sources.len() > route::max_sources_per_queue() {
@@ -638,6 +657,47 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // in `extra` holds every change made to it before.
         effects.extend(extra);
         Ok(())
+    }
+
+    /// Whether `queue` holds, or ever held, a message of its own: one of its
+    /// partitions, committed or created by an entry in flight, has an offset.
+    ///
+    /// A queue that does not is a name and its settings, nothing more, and may
+    /// become a reading queue. It is what a consumer leaves behind that
+    /// starts before its reading queue is configured: a pop of a queue that
+    /// does not exist creates it, so that its group is registered from then
+    /// on (`consume/pop.rs`), and until 2026-11-14 that queue, being
+    /// "ordinary", held the name for good (Jepsen W16: the reader made in the
+    /// middle of the run was refused, three runs out of three).
+    ///
+    /// A queue with more than [`UNUSED_PARTITIONS`] partitions is taken to be
+    /// in use without looking at each: this runs on the planning thread.
+    fn in_use(&self, ov: &Overlay, tenant: &str, queue: &str) -> Result<bool, Refusal> {
+        use crate::rsm::store::TypedReads;
+        let mut pids: Vec<Pid> = Vec::new();
+        self.reads()
+            .scan_queue_partitions(tenant, queue, None, UNUSED_PARTITIONS + 1, &mut |pid| {
+                pids.push(pid);
+                true
+            })
+            .map_err(super::store_err)?;
+        if pids.len() > UNUSED_PARTITIONS {
+            return Ok(true);
+        }
+        for ((t, q, _), pid) in ov.names_in_flight() {
+            if t == tenant && q == queue && !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+        for pid in pids {
+            if self
+                .partition(ov, pid)?
+                .is_some_and(|part| part.last_offset >= 0)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Whether a catch-up may stop: every partition of every source, committed

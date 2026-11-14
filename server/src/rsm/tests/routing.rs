@@ -447,10 +447,138 @@ async fn a_reading_queue_refuses_pushes_and_the_settings_its_sources_own() {
         body.to_string().contains("keeps what its sources keep"),
         "{body}"
     );
-    // An ordinary queue cannot become a reader.
+    // An ordinary queue that holds messages cannot become a reader.
     configure(&facade, json!({"queue":"plain","options":{}})).await;
+    push(
+        &facade,
+        json!([{"queue":"plain","partition":"p","transactionId":"own","payload":{}}]),
+    )
+    .await;
     let (s, body) = configure(&facade, json!({"queue":"plain","options":{"from":"src"}})).await;
     assert_ne!(s, 200, "{body}");
+    assert!(
+        body.to_string().contains("holds messages"),
+        "the refusal says why: {body}"
+    );
+    // Its own message is still its own, and it still takes pushes.
+    let got = drain(&facade, "plain").await;
+    assert_eq!(got.len(), 1, "{got:?}");
+    let out = push(
+        &facade,
+        json!([{"queue":"plain","partition":"p","transactionId":"own-2","payload":{}}]),
+    )
+    .await;
+    assert_eq!(out[0]["status"], "queued", "{out}");
+}
+
+/// Jepsen W16, 2026-11-14: the reading queue made in the middle of the run
+/// was refused, three runs out of three. Its consumers had popped it first,
+/// and a pop of a queue that does not exist creates it (so that the group is
+/// registered from then on): the name then belonged to an "ordinary queue",
+/// which nothing could turn into a reading queue. A queue that holds nothing
+/// of its own is a name and its settings: it becomes the reading queue, and
+/// the group that waited on it gets what its sources are sent from then on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_queue_its_consumers_popped_first_becomes_a_reading_queue() {
+    let (facade, _dir) = open("reader-after-pop").await;
+    configure(&facade, json!({"queue":"src","options":{}})).await;
+    // The consumer starts before the reading queue is configured.
+    let first = pop(&facade, "rd", Some("g"), group_options(None, "all"))
+        .await
+        .expect("a pop of a queue that does not exist");
+    assert!(messages(&first).is_empty(), "{first}");
+    let (s, body) = configure(
+        &facade,
+        json!({"queue":"rd","options":{"from":"src","where":"data.kind = 'a'"}}),
+    )
+    .await;
+    assert_eq!(s, 200, "the queue the pop made holds nothing: {body}");
+    push(
+        &facade,
+        json!([
+            {"queue":"src","partition":"p","transactionId":"t1","payload":{"kind":"a"}},
+            {"queue":"src","partition":"p","transactionId":"t2","payload":{"kind":"b"}},
+            {"queue":"src","partition":"p","transactionId":"t3","payload":{"kind":"a"}}
+        ]),
+    )
+    .await;
+    let got = pop(&facade, "rd", Some("g"), group_options(None, "all"))
+        .await
+        .expect("pop");
+    let msgs = messages(&got);
+    let txns: Vec<&str> = msgs
+        .iter()
+        .map(|m| m["transactionId"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(txns, ["t1", "t3"], "{got}");
+    // It is a reading queue in every other way: it takes no push of its own.
+    let e = try_push(&facade, json!([{"queue":"rd","payload":{}}])).await;
+    let refused = match e {
+        Err(e) => e.contains("push to src"),
+        Ok(v) => v.to_string().contains("push to src"),
+    };
+    assert!(refused, "a push into a reader is refused");
+
+    // So does a queue that was configured and never pushed to.
+    configure(&facade, json!({"queue":"empty","options":{"leaseTime":7}})).await;
+    let (s, body) = configure(&facade, json!({"queue":"empty","options":{"from":"src"}})).await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(
+        body["options"]["leaseTime"], 7,
+        "its own settings stay: {body}"
+    );
+    assert_eq!(body["route"]["from"][0]["queue"], "src", "{body}");
+}
+
+/// The check is the planner's, with every entry in flight in view: a push
+/// that creates the queue's first partition in the same cycle as the
+/// configure is seen, although nothing of it is committed yet.
+#[test]
+fn a_push_in_flight_keeps_its_queue_from_becoming_a_reader() {
+    use super::planner_harness::{effects, push as push_cmd, qcfg, Cell, TENANT};
+    use crate::rsm::effect::{Effect, QueueConfig, SourceRule};
+    use crate::rsm::planner::Plan;
+    let upsert = |queue: &str, cfg: QueueConfig| Effect::QueueUpsert {
+        tenant: TENANT.to_string(),
+        queue: queue.to_string(),
+        cfg,
+    };
+    let reading = || {
+        let mut cfg = qcfg();
+        cfg.route_mut().sources = vec![SourceRule {
+            queue: "src".to_string(),
+            where_json: "[]".to_string(),
+        }];
+        cfg
+    };
+    let mut c = Cell::new("route-in-use");
+    let made = c.run(&[effects(
+        1,
+        vec![
+            upsert("src", qcfg()),
+            upsert("busy", qcfg()),
+            upsert("idle", qcfg()),
+        ],
+    )]);
+    assert!(matches!(made.plan(0), Ok(Plan::Logged { .. })));
+    let cycle = c.run(&[
+        push_cmd(2, "busy", "p0", &["t1"]),
+        effects(3, vec![upsert("busy", reading())]),
+        effects(4, vec![upsert("idle", reading())]),
+    ]);
+    assert!(matches!(cycle.plan(0), Ok(Plan::Logged { .. })));
+    match cycle.plan(1) {
+        Err(r) => {
+            assert_eq!(r.code, "bad_request");
+            assert!(r.message.contains("holds messages"), "{}", r.message);
+        }
+        other => panic!("a queue with a push in flight became a reader: {other:?}"),
+    }
+    assert!(
+        matches!(cycle.plan(2), Ok(Plan::Logged { .. })),
+        "a queue that holds nothing becomes one: {:?}",
+        cycle.plan(2)
+    );
 }
 
 /// A message a reader cannot take (its `partitionBy` value is too long for a
