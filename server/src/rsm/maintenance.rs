@@ -1085,6 +1085,20 @@ pub(crate) fn judge_partition_unskipped<R: Reads + ?Sized>(
 ///   oldest, `txns_start <= log_start`) is too, and no log cutoff moves the
 ///   log; with `txns_start >= log_start` the full scan is skipped as well.
 ///
+/// # Rows below the log (2026-11-14)
+///
+/// A message that retention removed keeps its row for the txns window (the
+/// dedup window, 15 minutes at least), so a queue whose messages leave sooner
+/// (`maxWaitTimeSeconds`, a short `retentionSeconds`) has rows below
+/// `log_start`: `[rows_at, log_start)`. The log is judged from the first row
+/// at or past `log_start`, and that row's stamp says whether it can move.
+/// Until this date both read from `rows_at`: a step reads `row_limit + 1`
+/// rows, so once more than that many lay below the log it met no retained
+/// message and the log stopped, until those rows left with the txns window.
+/// A message then outlived its queue's limit by the whole dedup window
+/// (Jepsen W24: `maxWaitTimeSeconds` 4, delivered 10 s after its push; all
+/// 26,210 messages of the run were delivered, none removed).
+///
 /// Same verdict in every case, then. The one thing the first shortcut gives
 /// up is noticing an oldest txns row that does not decode (the second reads
 /// that row, and one that does not decode takes the full scan, as before).
@@ -1107,6 +1121,8 @@ fn judge_with<R: Reads + ?Sized>(
     let rows_at = part.rows_start.max(part.txns_start);
     // Retained messages without a row: `[log_start, rows_at)`.
     let unrowed = part.log_start < rows_at;
+    // Rows of messages that already left the log: `[rows_at, log_start)`.
+    let below_log = part.log_start > rows_at;
     // The partition holds no row at all (everything it has is unrowed, or it
     // is empty): nothing to scan, nothing to expire.
     let no_rows = rows_at as i64 > part.last_offset;
@@ -1134,14 +1150,40 @@ fn judge_with<R: Reads + ?Sized>(
     }
     let fresh = |cutoff: i64| !oldest_bad && oldest_at.is_none_or(|at| at >= cutoff);
 
+    // The first RETAINED message's row, when rows lie below the log (see
+    // "Rows below the log" above): its stamp says whether the log can move.
+    // The oldest row is then the row of a message that already left, and
+    // says nothing of what is retained.
+    let live_from = keys::txns(pid, part.log_start);
+    let mut live_at: Option<i64> = None;
+    let mut live_bad = false;
+    if below_log && !no_rows && log_cut.is_some() {
+        r.scan_raw(
+            Keyspace::Txns,
+            &live_from,
+            &prefix,
+            1,
+            &mut |_key, value| {
+                match TxnsRow::decode(value) {
+                    Ok(row) => live_at = Some(row.created_at_us),
+                    Err(_) => live_bad = true,
+                }
+                false
+            },
+        )?;
+    }
+
     // Can the LOG move? Only through a log cutoff the oldest retained message
-    // is older than. With a row at `log_start` the oldest row bounds it (rows
-    // are in created order and none starts above the first retained frame);
-    // without one the partition row's own stamp does, and an unknown stamp
-    // lets the queue-log walk below decide.
+    // is older than. With the rows starting at `log_start` the oldest row
+    // bounds it (rows are in created order and none starts above the first
+    // retained frame); with rows below the log, the first row at or past it
+    // does (none: nothing is retained); without a row the partition row's
+    // own stamp does, and an unknown stamp lets the queue-log walk below
+    // decide.
     let log_may_move = match log_cut {
         None => false,
         Some(c) if unrowed => part.oldest_live_at_us.is_none_or(|at| at < c),
+        Some(c) if below_log => live_bad || live_at.is_some_and(|at| at < c),
         Some(c) => !fresh(c),
     };
     // Can the ROWS move? Only with a row older than the txns cutoff, and, where
@@ -1157,10 +1199,11 @@ fn judge_with<R: Reads + ?Sized>(
         return idle_verdict(r, now_us, cfg, pid, part, cut.txns);
     }
 
-    // The rows themselves, when a judgment below reads them: the rows part,
-    // and the log part of a partition whose retained messages all have one.
-    let need_rows =
-        !no_rows && (!skip || oldest_bad || rows_may_move || (!unrowed && log_may_move));
+    // The rows themselves, from `rows_at`, when a judgment below reads them:
+    // the rows part, and the log part of a partition whose rows begin at its
+    // log.
+    let need_rows = !no_rows
+        && (!skip || oldest_bad || rows_may_move || (!unrowed && !below_log && log_may_move));
     let mut segments = Vec::new();
     let mut corrupt = false;
     if need_rows {
@@ -1173,6 +1216,31 @@ fn judge_with<R: Reads + ?Sized>(
                 (Some(base), Ok(row)) => {
                     segments.push((base, row));
                     true
+                }
+                _ => {
+                    corrupt = true;
+                    false
+                }
+            },
+        )?;
+    }
+    // The rows from `log_start`, for the log part of a partition with rows
+    // below its log. They end at the first row no log cutoff can take: rows
+    // are in created order, so none after it is stale either.
+    let need_live = below_log && !no_rows && log_cut.is_some() && (!skip || log_may_move);
+    let mut live = Vec::new();
+    if need_live {
+        let newest_log_cut = log_cut.unwrap_or(i64::MIN);
+        r.scan_raw(
+            Keyspace::Txns,
+            &live_from,
+            &prefix,
+            cfg.row_limit + 1,
+            &mut |key, value| match (keys::txns_base_of(key), TxnsRow::decode(value)) {
+                (Some(base), Ok(row)) => {
+                    let stale = row.created_at_us < newest_log_cut;
+                    live.push((base, row));
+                    stale
                 }
                 _ => {
                     corrupt = true;
@@ -1248,7 +1316,7 @@ fn judge_with<R: Reads + ?Sized>(
             }
         }
     } else if log_cut.is_some() {
-        let (target, full) = log_over(&segments);
+        let (target, full) = log_over(if below_log { &live } else { &segments });
         log_target = target;
         more |= full;
     }

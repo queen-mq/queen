@@ -1012,3 +1012,182 @@ fn a_round_over_a_small_store_is_spread_over_the_interval() {
         "an interval too short to cut in steps"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Rows below the log (2026-11-14)
+// ---------------------------------------------------------------------------
+
+const SEC_US: i64 = 1_000_000;
+
+/// A queue that removes a message after 4 s (`maxWaitTimeSeconds`), with the
+/// default dedup window.
+fn max_wait_4s() -> crate::rsm::effect::QueueConfig {
+    let mut qcfg = super::apply::queue_config(0);
+    qcfg.max_wait_time_seconds = 4;
+    qcfg
+}
+
+/// Jepsen qo-maxwait, 2026-11-14 (2.8.1 too): a message older than
+/// `maxWaitTimeSeconds` was still delivered 10 s after its push. The rows of
+/// the messages retention already removed stay for the dedup window, below
+/// `log_start`. The step read its `row_limit + 1` rows from the first of
+/// them, so once more than that many lay below the log it met no row of a
+/// retained message, and the log did not move again.
+#[test]
+fn the_log_moves_when_more_rows_than_a_step_reads_lie_below_it() {
+    // 1,500 appends whose messages are gone (the log starts at 1,500) and
+    // whose rows stay for the dedup window, then 10 retained ones. All of
+    // them are 10 s old, and the queue removes a message after 4 s.
+    // Partition 2 is the same with 900 rows below the log, fewer than a
+    // step reads: it always moved.
+    let (_d, store) = store(
+        "log-above-rows",
+        &[
+            (1, part(1_500, 0, 1_509, NOW - 10 * SEC_US)),
+            (2, part(900, 0, 909, NOW - 10 * SEC_US)),
+        ],
+    );
+    txns_rows(&store, 1, 0, 1_510, NOW - 10 * SEC_US);
+    txns_rows(&store, 2, 0, 910, NOW - 10 * SEC_US);
+    let cfg = maintenance::Config::default();
+    store
+        .read(|r| {
+            let cut = maintenance::queue_cutoffs(r, NOW, &cfg, "t", "q", &max_wait_4s());
+            let few = r.partition(2)?.expect("partition");
+            assert_eq!(
+                maintenance::judge_partition(r, NOW, &cfg, 2, &few, &cut)?,
+                Some(maintenance::Verdict::Watermark {
+                    log_start: 910,
+                    txns_start: 0,
+                    rows: None,
+                    more: false,
+                })
+            );
+            let part = r.partition(1)?.expect("partition");
+            let got = maintenance::judge_partition(r, NOW, &cfg, 1, &part, &cut)?;
+            assert_eq!(
+                got,
+                Some(maintenance::Verdict::Watermark {
+                    log_start: 1_510,
+                    txns_start: 0,
+                    rows: None,
+                    more: false,
+                })
+            );
+            assert_eq!(
+                got,
+                maintenance::judge_partition_unskipped(r, NOW, &cfg, 1, &part, &cut)?
+            );
+            // The same on a cluster at catalogue version 6, where the rows
+            // have a watermark of their own: it stays where it is.
+            let v6 = maintenance::cutoffs_v6_for_test(
+                None,
+                None,
+                Some(NOW - 4 * SEC_US),
+                NOW - HOUR_US,
+                true,
+            );
+            let got = maintenance::judge_partition(r, NOW, &cfg, 1, &part, &v6)?;
+            assert_eq!(
+                got,
+                Some(maintenance::Verdict::Watermark {
+                    log_start: 1_510,
+                    txns_start: 0,
+                    rows: Some(crate::rsm::effect::RowsMark {
+                        rows_start: 0,
+                        oldest_live_at_us: None,
+                    }),
+                    more: false,
+                })
+            );
+            assert_eq!(
+                got,
+                maintenance::judge_partition_unskipped(r, NOW, &cfg, 1, &part, &v6)?
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// A step that starts at the log, above rows of messages long gone, is
+/// bounded like any other: the row limit, counted from the log's start, and
+/// a verdict that asks to be judged again.
+#[test]
+fn a_step_from_the_log_start_stops_at_the_row_limit_and_asks_for_more() {
+    // 1,500 rows of removed messages, then 2,500 retained ones, all 10 s old.
+    let (_d, store) = store(
+        "log-above-rows-more",
+        &[(1, part(1_500, 0, 3_999, NOW - 10 * SEC_US))],
+    );
+    txns_rows(&store, 1, 0, 4_000, NOW - 10 * SEC_US);
+    let cfg = maintenance::Config::default();
+    store
+        .read(|r| {
+            let cut = maintenance::queue_cutoffs(r, NOW, &cfg, "t", "q", &max_wait_4s());
+            let part = r.partition(1)?.expect("partition");
+            let got = maintenance::judge_partition(r, NOW, &cfg, 1, &part, &cut)?;
+            assert_eq!(
+                got,
+                Some(maintenance::Verdict::Watermark {
+                    log_start: 1_500 + cfg.row_limit as u64,
+                    txns_start: 0,
+                    rows: None,
+                    more: true,
+                })
+            );
+            assert_eq!(
+                got,
+                maintenance::judge_partition_unskipped(r, NOW, &cfg, 1, &part, &cut)?
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Rows below the log and nothing stale in it: the judgment reads two rows,
+/// the oldest and the first retained one. The oldest row alone says nothing
+/// here: it is the row of a message that left long ago, and while the log
+/// was judged by it every visit of such a partition read `row_limit + 1`
+/// rows to move nothing.
+#[test]
+fn a_fresh_log_above_old_rows_is_judged_from_two_rows() {
+    // 1,500 rows of removed messages, 10 s old; 10 retained ones, 1 s old.
+    let (_d, store) = store(
+        "log-above-rows-fresh",
+        &[(1, part(1_500, 0, 1_509, NOW - SEC_US))],
+    );
+    txns_rows(&store, 1, 0, 1_500, NOW - 10 * SEC_US);
+    txns_rows(&store, 1, 1_500, 10, NOW - SEC_US);
+    let cfg = maintenance::Config::default();
+    store
+        .read(|r| {
+            let cut = maintenance::queue_cutoffs(r, NOW, &cfg, "t", "q", &max_wait_4s());
+            let part = r.partition(1)?.expect("partition");
+            let now = Counting::new(r);
+            let got = maintenance::judge_partition(&now, NOW, &cfg, 1, &part, &cut)?;
+            assert_eq!(got, None, "nothing retained is older than 4 s");
+            assert_eq!(
+                now.txns_rows.get(),
+                2,
+                "the oldest row and the first retained"
+            );
+            assert_eq!(
+                got,
+                maintenance::judge_partition_unskipped(r, NOW, &cfg, 1, &part, &cut)?
+            );
+            // Three seconds later the retained ones are 4 s old and leave.
+            let later = NOW + 3 * SEC_US + 1;
+            let cut = maintenance::queue_cutoffs(r, later, &cfg, "t", "q", &max_wait_4s());
+            assert_eq!(
+                maintenance::judge_partition(r, later, &cfg, 1, &part, &cut)?,
+                Some(maintenance::Verdict::Watermark {
+                    log_start: 1_510,
+                    txns_start: 0,
+                    rows: None,
+                    more: false,
+                })
+            );
+            Ok(())
+        })
+        .unwrap();
+}
