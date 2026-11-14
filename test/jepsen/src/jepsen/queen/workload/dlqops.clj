@@ -143,6 +143,25 @@
           (recur (+ offset (count page)) out)
           out)))))
 
+(defn replay-outcome
+  "A replay's completion type: :ok when answered 200 with replayedAs; :fail
+  when refused for certain (a 4xx, or a 200 that did not replay); otherwise
+  (a 5xx, a 503 timeout, no leader) unknown, :info: the replay may have been
+  applied (dlqops-part, 2026-11-14: a replay answered during a partition was
+  delivered as its copy 47 ms later)."
+  [r]
+  (cond (:exception r)                                         (unknown-or-fail r)
+        (and (= 200 (:status r)) (get-in r [:body :replayedAs])) :ok
+        (and (integer? (:status r)) (< (:status r) 500))         :fail
+        :else                                                  :info))
+
+(defn replay-fate
+  "A replay op's outcome over its two tries (:type, then :again): :ok if
+  either moved the dead letter, else :info if either may have, else :fail."
+  [op]
+  (let [ts (set (keep identity [(:type op) (:again op)]))]
+    (cond (ts :ok) :ok, (ts :info) :info, :else :fail)))
+
 (defn- replay!
   [client test op]
   (let [page (try (read-dlq! client test) (catch clojure.lang.ExceptionInfo e nil))]
@@ -150,12 +169,10 @@
       (let [once  (fn [] (call client :post (str (:base client) "/api/v1/dlq/" (enc (:id d)) "/replay")
                                nil (:client-timeout-ms test)))
             r1    (once)
-            r2    (when (< (rand/double) 0.5) (once))
-            judge (fn [r] (cond (:exception r) (unknown-or-fail r)
-                                (and (= 200 (:status r)) (get-in r [:body :replayedAs])) :ok
-                                :else :fail))]
-        (assoc op :type (judge r1), :id (:id d), :value (:v d), :txn (:txn d)
-               :again (when r2 (judge r2))
+            r2    (when (< (rand/double) 0.5) (once))]
+        (assoc op :type (replay-outcome r1), :id (:id d), :value (:v d), :txn (:txn d)
+               :again (when r2 (replay-outcome r2))
+               :answer (when-not (:exception r1) [(:status r1) (:body r1)])
                :replayed-as (get-in r1 [:body :replayedAs :offset])))
       (assoc op :type :fail, :error :empty-dlq))))
 
@@ -240,10 +257,24 @@
                                                               (= :unknown (:ack d))))
                                                  ds)))
                           (mapv :txn))
-            ; Replays.
-            replays  (->> done (filter #(and (= :replay (:f %)) (= :ok (:type %)))))
+            ; Replays, each judged by the better of its two tries: answered
+            ; 200, or answered nothing certain (a 503, a timeout) yet the copy
+            ; dlq:<id> was delivered, so it applied and is held to the same
+            ; rules. A replay refused for certain (4xx) on both tries whose
+            ; copy came anyway, with no other replay of that dead letter that
+            ; may have moved it, moved what it said it did not.
+            all-replays (->> done (filter #(= :replay (:f %))))
+            replays  (->> all-replays (filter #(= :ok (replay-fate %))))
             copies   (fn [id] (->> ds (filter #(= (str "dlq:" id) (:txn %)))))
-            replay-bad (->> replays
+            applied  (concat replays
+                             (->> all-replays (filter #(and (= :info (replay-fate %))
+                                                            (seq (copies (:id %)))))))
+            movers   (->> all-replays (remove #(= :fail (replay-fate %))) (map :id) set)
+            refused-moved (->> all-replays
+                               (filter #(and (= :fail (replay-fate %)) (:id %)
+                                             (not (movers (:id %))) (seq (copies (:id %)))))
+                               (mapv #(select-keys % [:id :value :answer])))
+            replay-bad (->> applied
                             (keep (fn [r]
                                     (let [cs   (copies (:id r))
                                           offs (set (map :offset cs))
@@ -261,14 +292,20 @@
             ended?   (fn [v]
                        (or (contains? completed v)
                            (dlq-txns (str "q" v))
-                           (some #(and (= v (:value %)) (= :ok (:type %))) replays)
+                           (some #(= v (:value %)) applied)
+                           ; moved although refused: it ended, as its copy, and
+                           ; fails the run under :replay-refused-but-moved
+                           (some #(= v (:value %)) refused-moved)
                            (some #(and (= v (:value %)) (#{:ok :info} (:type %))) deletes)
                            ; an ack whose answer was lost may have applied
                            (some #(and (= v (:v %)) (= :unknown (:ack %))) ds)))
             lost     (->> pushed (remove ended?) sort vec)]
         {:valid?          (boolean (and dlq (empty? retry-dlq) (empty? twice) (empty? unasked)
-                                        (empty? replay-bad) (empty? after-del) (empty? lost)))
+                                        (empty? replay-bad) (empty? refused-moved)
+                                        (empty? after-del) (empty? lost)))
+         :replay-refused-but-moved (take 16 refused-moved)
          :replays         (count replays)
+         :replays-unknown-applied (- (count applied) (count replays))
          :second-replays  (frequencies (keep :again replays))
          :deletes         (frequencies (map :type deletes))
          :batch-rule-redeliveries (count shadowed)

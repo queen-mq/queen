@@ -65,4 +65,48 @@
       (is (seq (:deleted-still-in-dlq r)))))
   (testing "an acknowledged push that ended nowhere"
     (let [r (run (concat (enq 10) clean))]
-      (is (= [10] (:lost r))))))
+      (is (= [10] (:lost r)))))
+  ;; dlqops-part 2026-11-14: replay of v 2224 answered while a partition began
+  ;; was judged :fail, yet its copy dlq:<id> was delivered 47 ms later.
+  (let [unknown (concat (enq 12) clean
+                        (deq (m 12 3 :dlq :pid "2"))
+                        (op :replay :info :id "d12" :txn "q12" :value 12 :again :fail))]
+    (testing "a replay answered 503 whose copy came and completed: not lost"
+      (let [r (run (concat unknown (deq (m 12 4 :completed :txn "dlq:d12" :pid "2"))))]
+        (is (:valid? r) (pr-str r))
+        (is (= 1 (:replays-unknown-applied r)))))
+    (testing "a replay answered 503 whose copy came twice: held to the replay rules"
+      (let [r (run (concat unknown (deq (m 12 4 :completed :txn "dlq:d12" :pid "2"))
+                           (deq (m 12 6 :completed :txn "dlq:d12" :pid "2"))))]
+        (is (some #(= :two-copies (:problem %)) (:replay-problems r)))))
+    (testing "a replay answered 503, no copy, not in the DLQ: lost"
+      (let [r (run unknown)]
+        (is (= [12] (:lost r))))))
+  (let [base (concat (enq 12) clean (deq (m 12 3 :dlq :pid "2")))
+        copy (deq (m 12 4 :completed :txn "dlq:d12" :pid "2"))]
+    (testing "refused on the first try, moved on the second: not lost"
+      (let [r (run (concat base (op :replay :fail :id "d12" :txn "q12" :value 12 :again :ok) copy))]
+        (is (:valid? r) (pr-str r))))
+    (testing "refused for certain on both tries, yet its copy came"
+      (let [r (run (concat base (op :replay :fail :id "d12" :txn "q12" :value 12 :again :fail
+                                    :answer [409 {:dlqRowRemoved false}])
+                           copy))]
+        (is (= ["d12"] (map :id (:replay-refused-but-moved r))))
+        (is (= [] (:lost r)))
+        (is (false? (:valid? r)))))
+    (testing "refused, while another replay of the same dead letter moved it"
+      (let [r (run (concat base (op :replay :fail :id "d12" :txn "q12" :value 12 :again :fail)
+                           (op :replay :ok :id "d12" :txn "q12" :value 12) copy))]
+        (is (:valid? r) (pr-str r))))))
+
+(deftest replay-answers
+  (testing "200 with replayedAs: replayed"
+    (is (= :ok (w/replay-outcome {:status 200, :body {:replayedAs {:offset 3}}}))))
+  (testing "404 gone, 409 refused: nothing was moved"
+    (is (= :fail (w/replay-outcome {:status 404, :body {:result "gone"}})))
+    (is (= :fail (w/replay-outcome {:status 409, :body {:dlqRowRemoved false}}))))
+  (testing "503, the request deadline elapsed: unknown, the move may commit"
+    (is (= :info (w/replay-outcome {:status 503, :body {:error "the request deadline elapsed"}}))))
+  (testing "no answer: unknown; a refused connection: nothing sent"
+    (is (= :info (w/replay-outcome {:exception {:type :jepsen.queen.http/timeout}})))
+    (is (= :fail (w/replay-outcome {:exception {:type :jepsen.queen.http/refused}})))))
