@@ -224,9 +224,15 @@
   (setup! [this test]
     (when (= node (first (:nodes test)))
       (svc/reset-postgres! test ["public.jepsen_sink (id text, v bigint)"])
+      ; leaseSeconds 5, the shortest a sink takes (its default is 60): a batch
+      ; a worker had popped when its node was killed comes back when its lease
+      ; ends, and the final read gives up after 15 s without a new row
+      ; (pgsink-lz-kill 2026-11-14: read 20 to 35 s after the last kill, the
+      ; rows of the leased partitions not there yet).
       (put-connector! test "jepsen-sink"
                       {:kind "sink", :connection (svc/pg-conn test)
-                       :sink {:queue "jepsen-pgs", :table "public.jepsen_sink", :mode "append"}})))
+                       :sink {:queue "jepsen-pgs", :table "public.jepsen_sink", :mode "append"
+                              :leaseSeconds 5}})))
 
   (invoke! [this test op]
     (case (:f op)
