@@ -327,6 +327,19 @@
          :not-initialized (vec (keep (fn [[n st]] (when-not (:initialized st) n)) views))
          :no-answer       (vec (remove (set (keys views)) (:nodes test)))}))))
 
+(defn stats-checker-without
+  "Jepsen's stats checker (an :f that never answered :ok is invalid), over
+  the history without the ops of `fs`: those a workload sends expecting a
+  refusal (W22's :push-other and :kv-other: one answered :ok there is the
+  workload's own violation, which its checker judges)."
+  [fs]
+  (let [c (kafka/stats-checker)]
+    (if (empty? fs)
+      c
+      (reify checker/Checker
+        (check [this test history opts]
+          (checker/check c test (h/remove #(contains? fs (:f %)) history) opts))))))
+
 (defn test-name
   "A name without spaces (it is the store directory)."
   [opts]
@@ -524,7 +537,7 @@
                (gen/time-limit (:final-time-limit opts)
                                (gen/clients fg))))
             :checker     (checker/compose
-                           {:stats    (kafka/stats-checker)
+                           {:stats    (stats-checker-without (:refused-by-design workload #{}))
                             :perf     (perf-checker {:nemeses (:perf nemesis)})
                             :clock    (checker/clock-plot)
                             :ex       (checker/unhandled-exceptions)

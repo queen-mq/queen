@@ -100,6 +100,25 @@
          :early-or-late (take 16 bad)
          :count    (count bad)}))))
 
+(defn maxwait-skip-excused?
+  "W24 maxwait: a pop that starts past the next offset of a partition is
+  excused when every skipped message may have been removed by then: its
+  push was sent at least `wait-ms` before the pop answered (the broker
+  removes a message only once it is older than maxWaitTimeSeconds, counted
+  from when it applied the push). A skipped offset no acknowledged push
+  names is excused too: its push answer was lost, so its time is unknown."
+  [wait-ms]
+  (fn [history op p first-off before]
+    (let [pushed (into {}
+                       (for [e (h/client-ops history)
+                             :when (and (= :enqueue (:f e)) (= :ok (:type e)) (:offset e)
+                                        (= p (queue/partition-name (:partition e))))]
+                         [(:offset e) (:time (h/invocation history e))]))]
+      (every? (fn [o]
+                (let [t (get pushed o)]
+                  (or (nil? t) (<= (* 1000000 wait-ms) (- (:time op) t)))))
+              (range (inc before) first-off)))))
+
 (defn workload
   [opts]
   (let [opt   (keyword (or (:queue-opt opts) :delayed))
@@ -109,7 +128,10 @@
      :db-env          (db-env opt)
      :checker         (checker/compose
                         (cond-> {:timing (timing-checker)
-                                 :queue  (queue/queue-checker)}
+                                 :queue  (queue/queue-checker
+                                           (if (= :maxwait opt)
+                                             {:skip-excused? (maxwait-skip-excused? 4000)}
+                                             {}))}
                           ; With maxwait an unread message may be removed:
                           ; total-queue would call it lost.
                           (not= :maxwait opt) (assoc :total-queue (queue/total-queue-checker))))

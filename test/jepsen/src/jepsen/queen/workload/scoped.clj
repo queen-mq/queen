@@ -218,6 +218,9 @@
     (throw (ex-info "--workload scoped needs --via-proxy (scoped keys live in the proxy)" {})))
   {:client          (map->Client {})
    :checker         (checker)
+   ; Sent to be refused: none answers :ok unless the broker is wrong, which
+   ; the checker above judges, so the generic stats checker leaves them out.
+   :refused-by-design #{:push-other :kv-other}
    :generator       (gen/mix [(map (fn [v] {:f :push-own, :value v}) (range 0 Long/MAX_VALUE 2))
                               (map (fn [v] {:f :push-other, :value v}) (range 1 Long/MAX_VALUE 2))
                               (repeat {:f :pop-own, :value nil})

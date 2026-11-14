@@ -5,6 +5,7 @@
             [jepsen [checker :as checker]
                     [history :as h]
                     [util :as util]]
+            [jepsen.queen.core :as core]
             [jepsen.queen.http :as qh]
             [jepsen.queen.workload.scoped :as w]))
 
@@ -54,3 +55,16 @@
   (testing "an acknowledged own push missing from the log"
     (let [res (run (concat (op :push-own :ok :value 8 :device "d1" :to "d1") clean))]
       (is (= [8] (:lost-own res))))))
+
+(deftest refused-by-design-is-not-a-stats-failure
+  ; Every :push-other refused, as it must be: Jepsen's stats checker calls an
+  ; :f that never answered :ok invalid, unless the workload says to leave it out.
+  (let [refused (vec (mapcat (fn [i] [{:process 0, :type :invoke, :f :push-other, :value i}
+                                      {:process 0, :type :fail, :f :push-other, :value i}])
+                             (range 3)))
+        owned   [{:process 1, :type :invoke, :f :push-own, :value 0}
+                 {:process 1, :type :ok, :f :push-own, :value 0}]
+        check   (fn [fs] (checker/check (core/stats-checker-without fs)
+                                        test-map (hist (into refused owned)) {}))]
+    (is (false? (:valid? (check #{}))))
+    (is (true? (:valid? (check #{:push-other}))))))

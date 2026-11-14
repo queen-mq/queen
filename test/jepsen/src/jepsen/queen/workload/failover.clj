@@ -368,13 +368,19 @@
     ; --tenants: the test queue in every tenant, configured as the db
     ; configures the default tenant's. The standby gets it from the log.
     (when (and (pos? (tenant-count test)) (= node (first (qdb/source-nodes test))))
+      ; Retried for a minute: a group just elected answers 503 for a moment.
       (doseq [[hdr _] (by-tenant test)]
-        (let [r (qh/request! http :post (str base "/api/v1/configure")
-                             {:queue (queue test), :options (qdb/queue-config test)}
-                             15000 hdr)]
-          (info "W12 queue configured for" hdr (:status r))
-          (when-not (= 200 (:status r))
-            (throw (ex-info "tenant configure failed" {:tenant hdr, :answer r})))))))
+        (util/await-fn
+          (fn []
+            (let [r (qh/request! http :post (str base "/api/v1/configure")
+                                 {:queue (queue test), :options (qdb/queue-config test)}
+                                 15000 hdr)]
+              (info "W12 queue configured for" hdr (:status r))
+              (when-not (= 200 (:status r))
+                (throw (ex-info "tenant configure failed" {:tenant hdr, :answer r})))
+              r))
+          {:timeout 60000, :retry-interval 1000, :log-interval 10000
+           :log-message (str "configuring the W12 queue for " hdr)}))))
 
   (invoke! [this test op]
     (let [op (assoc op :cluster cluster, :node node)]

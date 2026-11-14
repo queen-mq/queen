@@ -46,3 +46,21 @@
     (let [r (run :maxwait #{} [(enq 1 0) (deq (* 9 s) (* 9 s) [1 "w0"])])]
       (is (not (:valid? r)))
       (is (= 1 (:count r))))))
+
+(deftest maxwait-skips
+  ; Partition 1 is "w1". Offsets 0 and 1 were pushed; a pop answered at
+  ; `at` starts at offset 2 with nothing acked before it.
+  (let [excused? (w/maxwait-skip-excused? 4000)
+        push     (fn [v off t] [{:process 0, :type :invoke, :f :enqueue, :value v, :time t}
+                                {:process 0, :type :ok, :f :enqueue, :value v, :time (+ t 1000)
+                                 :partition 1, :offset off}])
+        pop-at   (fn [at] {:process 1, :type :ok, :f :dequeue, :value [], :time at, :index 99})
+        hist     (fn [ops] (h/history (vec (apply concat ops)) {:have-indices? false}))]
+    (testing "every skipped message pushed 4 s or more before the pop answered: it may be removed"
+      (is (excused? (hist [(push 1 0 0) (push 2 1 (* 1 s))]) (pop-at (* 5 s)) "w1" 2 -1)))
+    (testing "one pushed 2 s before: it cannot have been removed yet, the skip stands"
+      (is (not (excused? (hist [(push 1 0 0) (push 2 1 (* 3 s))]) (pop-at (* 5 s)) "w1" 2 -1))))
+    (testing "a skipped offset no acknowledged push names: its time is unknown"
+      (is (excused? (hist [(push 1 0 0)]) (pop-at (* 5 s)) "w1" 2 -1)))
+    (testing "another partition's pushes say nothing about this one"
+      (is (not (excused? (hist [(push 1 0 (* 4 s)) (push 2 1 (* 4 s))]) (pop-at (* 5 s)) "w1" 2 -1))))))

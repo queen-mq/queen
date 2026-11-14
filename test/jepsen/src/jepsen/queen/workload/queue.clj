@@ -325,7 +325,12 @@
       base)))
 
 (defn queue-checker
-  []
+  "W2's rules over the deliveries. `skip-excused?` (history, the pop op, its
+  partition, the pop's first offset there, the highest offset acked before
+  it) excuses a pop that starts past the next offset: W24 maxwait, whose
+  skipped messages may have been removed."
+  ([] (queue-checker {}))
+  ([{:keys [skip-excused?] :or {skip-excused? (constantly false)}}]
   (reify checker/Checker
     (check [this test history opts]
       (let [ds        (deliveries history)
@@ -380,7 +385,7 @@
             acks-by-p (->> ds
                            (filter #(#{:acked :unknown :noop} (:ack %)))
                            (group-by :partition))
-            skips     (->> ops
+            all-skips (->> ops
                            (mapcat
                              (fn [op]
                                (let [inv (h/invocation history op)]
@@ -393,8 +398,10 @@
                                                             (reduce max -1))]
                                        :when (< (inc before) first-off)]
                                    {:op (:index op), :partition p, :first-offset first-off
-                                    :highest-acked-before before}))))
+                                    :highest-acked-before before
+                                    :excused (boolean (skip-excused? history op p first-off before))}))))
                            vec)
+            skips     (filterv (complement :excused) all-skips)
             noops     (->> ds (filter #(= :noop (:ack %))) (mapv #(select-keys % [:v :partition :offset :op-index])))
             ; A payload that is not the value its transactionId names.
             payload   (->> ds
@@ -430,7 +437,8 @@
          :offset-value-mismatch (take 16 mismatch)
          :pop-internal-gaps    (take 16 internal)
          :pop-skips            (take 16 skips)
-         :pop-skip-count       (count skips)}))))
+         :pop-skip-count       (count skips)
+         :pop-skips-excused    (count (filter :excused all-skips))})))))
 
 (defn total-queue-checker
   "jepsen.checker/total-queue over the acked values: each :ok dequeue becomes

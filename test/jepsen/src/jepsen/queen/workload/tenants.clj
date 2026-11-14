@@ -22,7 +22,8 @@
                     [client :as client]
                     [generator :as gen]
                     [history :as h]
-                    [random :as rand]]
+                    [random :as rand]
+                    [util :as util]]
             [jepsen.queen.http :as qh]
             [jepsen.queen.workload.log :as log]
             [jepsen.queen.workload.queue :as queue]
@@ -177,15 +178,23 @@
   (setup! [this test]
     ; The queue in every tenant, configured as the db configures its test
     ; queues in the default one.
+    ; Retried for a minute, as the db configures its own queues: a group
+    ; just elected answers 503 "no quorum-ack lease; retry" for a moment
+    ; (three of eight --raft-groups 3 runs of 2026-11-14 stopped on it).
     (when (= node (first (:nodes test)))
       (doseq [t (tenant-ids (:tenants test))]
-        (let [r (request this :post (str base "/api/v1/configure")
-                         {:queue queue-name, :options (assoc (deref (requiring-resolve 'jepsen.queen.db/queue-options))
-                                                             :dedupWindowSeconds 86400)}
-                         15000 t)]
-          (info "tenant" t "queue configured:" (:status r))
-          (when-not (= 200 (:status r))
-            (throw (ex-info "tenant configure failed" {:tenant t, :answer (dissoc r :exception)})))))))
+        (util/await-fn
+          (fn []
+            (let [r (request this :post (str base "/api/v1/configure")
+                             {:queue queue-name, :options (assoc (deref (requiring-resolve 'jepsen.queen.db/queue-options))
+                                                                 :dedupWindowSeconds 86400)}
+                             15000 t)]
+              (info "tenant" t "queue configured:" (:status r))
+              (when-not (= 200 (:status r))
+                (throw (ex-info "tenant configure failed" {:tenant t, :answer (dissoc r :exception)})))
+              r))
+          {:timeout 60000, :retry-interval 1000, :log-interval 10000
+           :log-message (str "configuring the queue of tenant " t)}))))
 
   (invoke! [this test op]
     (case (:f op)
