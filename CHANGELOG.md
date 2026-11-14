@@ -29,6 +29,12 @@ of a filtered group says `"filtered": true`, an empty one too, so a client stops
 would ignore its `where`; group listings show a filtered group under its queue with its `where`,
 and a queue's page shows its readers' ages, its holders and a catch-up's progress.
 
+**A queue its consumers popped first can become a reading queue.** `from` on an ordinary queue is
+accepted while no message was ever pushed to it, and refused once it holds messages. Why: a pop
+of a queue that does not exist creates it, so a consumer that started before the `configure` call
+made the name an ordinary queue, which could never become the reading queue it was waiting for
+(found by the Jepsen tests).
+
 **Headers.** A message can carry headers, a map of strings stored in clear beside its payload
 (`headers: { type: 'order.paid', traceparent: '...' }`), returned by pop, fetch, the feed and the
 message browser, readable by a `where` without the payload (so on an encrypted queue too). A timer
@@ -48,6 +54,31 @@ KV or timers, KV calls, timers, pushes to queues that others read and first push
 partitions no longer wait for one thread. Followers apply the entries as before: no cluster
 version, a rolling restart. Why: the control step was the transaction ceiling, about 70 µs a
 transaction on one thread whatever the machine's size.
+
+**Fixed: `maxWaitTimeSeconds` and a short retention on a busy partition.** A partition that took
+more than 1,000 pushes inside its dedup window stopped removing messages when the queue said:
+`maxWaitTimeSeconds`, `retentionSeconds` and `completedRetentionSeconds` then removed a message
+only about when its dedup row left, an hour later by default. Retention now starts at the oldest
+message the partition still keeps. Why: a step read its 1,000 rows from the oldest dedup row, and
+on a busy partition those were all rows of messages already removed (found by the Jepsen tests,
+in 2.8.1 too).
+
+**Fixed: a KV write with a TTL that is committed late.** A `put` or `putIfAbsent` with
+`ttlSeconds` now answers `expiresAt`, and one the cluster committed after its lifetime was over
+answers `applied: false` with `reason: "expired"`. A lock acquire in that state is made again
+inside the call; a renew answers `lost`. Why: a TTL is counted from when the leader plans the
+write. A write committed seconds later, across a leader change, was answered `applied: true`
+although it had already expired, and the next `putIfAbsent` or lock acquire won at once: two
+holders (found by the Jepsen tests, in 2.8.1 too). A transaction's KV operations are answered as
+before: the transaction committed. The Rust SDK's `KvReason` gets `Expired` (a Rust client older
+than this release cannot parse that answer and returns an error for it) and the Go SDK
+`KVReasonExpired`.
+
+**Fixed: a pop nobody waits for takes no lease.** When a node stops or dies, the leader drops the
+long-poll pops that node had forwarded to it, and a PostgreSQL sink's worker that stops no longer
+leaves its pop running. Why: such a pop went on waiting, took the next messages and answered
+nobody, and their partitions stayed leased until the lease ran out: 60 seconds of nothing written
+for a sink after a restart (found by the Jepsen tests, in 2.8.1 too).
 
 ## 2.8.1 - 2026-11-11
 
