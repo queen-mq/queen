@@ -235,7 +235,20 @@
     (let [ops (->> (w16-history)
                    (remove #(and (= :dequeue (:f %)) (= "jepsen-r1" (:reader %)))))
           res (w16 ops)]
-      (is (pos? (get-in res [:readers "jepsen-r1" :unconsumed-count]))))))
+      (is (pos? (get-in res [:readers "jepsen-r1" :unconsumed-count])))))
+
+  ;; rt-reading-kill 2026-11-14: the pop answered, its ack's answer was lost
+  ;; (an I/O error), and the message never came back: the ack applied.
+  (testing "a pop whose ack's answer was lost: the ack may have applied"
+    (let [ops (map (fn [op] (if (and (= :dequeue (:f op)) (= "jepsen-r1" (:reader op)) (= :ok (:type op)))
+                              (-> op (assoc :type :info, :error [:ack :jepsen.queen.http/io])
+                                  (update :msgs (fn [ms] (mapv #(dissoc % :ack) ms))))
+                              op))
+                   (w16-history))
+          res (w16 ops)]
+      (is (zero? (get-in res [:readers "jepsen-r1" :unconsumed-count]))
+          (pr-str (get-in res [:readers "jepsen-r1"])))
+      (is (get-in res [:readers "jepsen-r1" :valid?])))))
 
 ;; ---------------------------------------------------------------------------
 ;; W17 link in a transaction

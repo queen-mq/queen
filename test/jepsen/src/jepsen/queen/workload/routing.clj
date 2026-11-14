@@ -700,10 +700,18 @@
                                   ; leases, order; and every message the
                                   ; reader holds acked by the end.
                                   qc       (checker/check (queue/queue-checker) test cons-ops opts)
+                                  ; An :info pop answered but its ack's
+                                  ; answer was lost (an I/O error, a timeout,
+                                  ; 503 outcome_unknown): the ack may have
+                                  ; applied, as W2's own checker counts it
+                                  ; (rt-reading-kill/-pause/-deaf 2026-11-14:
+                                  ; each such message never came back).
                                   acked    (->> cons-ops
                                                 (h/filter #(#{:ok :info} (:type %)))
-                                                (mapcat :msgs)
-                                                (filter #(#{:acked :noop} (:ack %)))
+                                                (mapcat (fn [op] (if (= :info (:type op))
+                                                                   (map #(update % :ack (fnil identity :unknown)) (:msgs op))
+                                                                   (:msgs op))))
+                                                (filter #(#{:acked :noop :unknown} (:ack %)))
                                                 (map :txn) set)
                                   unconsumed (->> (keys counts) (remove acked) sort vec)
                                   made?    (or (= :setup (:at r))
