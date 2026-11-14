@@ -23,6 +23,17 @@
 //!    Jepsen W4, G-single). Their bytes never enter the log (D7). One read
 //!    budget per call, spent in 024's apply order.
 //!
+//! 4. **A put with a ttl** — answered at its own position too, for the one
+//!    thing only that position can say: when THIS write expires. The planner
+//!    stamps the ttl when it plans; an entry that commits late (a leader
+//!    without its quorum, a hand-over) lands with a lifetime that has run
+//!    out, and by the time the receiver reads the state another claim may
+//!    already own the row. Apply renders `expiresAt` from the row while it is
+//!    still the write's own, and the receiver answers a put that is already
+//!    expired as not applied, `reason: "expired"` (`kvp::expire_late_puts`;
+//!    Jepsen W25: two holders of one claim). A transaction's riders are not
+//!    judged: the transaction committed, and says so.
+//!
 //! The store reads run on the blocking pool inside one read transaction (pin
 //! 2, I15), under the request's deadline.
 
@@ -115,10 +126,11 @@ impl RaftFacade {
         super::check_kv_scope(&ctx, &ops).map_err(KvFailure::Rsm)?;
         self.kv_ops_admitted(&ops)?;
 
+        let reads = ops.iter().any(KvOp::is_read);
         let pre: Vec<KvOpOutcome> = if ops.iter().any(KvOp::is_planned) {
-            let registered = ops
-                .iter()
-                .any(KvOp::is_read)
+            // A call with a read, or with a put that sets a ttl, is answered
+            // at its own position in the log.
+            let registered = (reads || ops.iter().any(KvOp::sets_ttl))
                 .then(|| {
                     crate::rsm::kv_reads::global().register(ctx.request_id, &ctx.tenant, &ops, raw)
                 })
@@ -173,22 +185,39 @@ impl RaftFacade {
             // request-id hit — a forwarding retry of an entry an earlier
             // attempt committed — and this node's apply may not have passed it
             // yet, so wait for the rendering, up to the deadline.
-            if let Some(reg) = &registered {
+            //
+            // So is a put with a ttl that applied: the expiry of ITS row is
+            // read at its own position, and nowhere else (another claim may
+            // own the row by the time this node's state is read). A call
+            // without a read has a position only if something of it was
+            // logged, which an applied put is; one whose every write lost was
+            // never logged (`Plan::Empty`), has no expiry to say, and is
+            // answered below from its verdicts.
+            let ttl_applied = ops
+                .iter()
+                .zip(&o.results)
+                .any(|(op, r)| op.sets_ttl() && matches!(r, KvOpOutcome::Write(w) if w.applied));
+            if reads || ttl_applied {
+                // Registered ids are unique (minted here per call, D6).
+                let Some(reg) = &registered else {
+                    return Err(KvFailure::Rsm(RsmError::Internal(
+                        "kv read: the call's id was already registered".into(),
+                    )));
+                };
                 let _ = at;
                 return match rendered(reg, &ctx).await {
                     Some(answer) => answer
-                        .map(|results| KvOut { results })
+                        .map(|mut results| {
+                            // A put whose lifetime was over when it landed is
+                            // answered as what it is: not applied.
+                            kvp::expire_late_puts(&ops, &mut results, wall_micros());
+                            KvOut { results }
+                        })
                         .map_err(|e| KvFailure::Rsm(RsmError::Internal(format!("kv read: {e}")))),
-                    // Applied, but its reads are gone: the outcome is unknown
+                    // Applied, but its answer is gone: the outcome is unknown
                     // to the client, never answered from later state.
                     None => Err(KvFailure::Rsm(RsmError::Timeout)),
                 };
-            }
-            if ops.iter().any(KvOp::is_read) {
-                // Registered ids are unique (minted here per call, D6).
-                return Err(KvFailure::Rsm(RsmError::Internal(
-                    "kv read: the call's id was already registered".into(),
-                )));
             }
             o.results
         } else {
@@ -200,6 +229,8 @@ impl RaftFacade {
             vec![KvOpOutcome::Deferred; ops.len()]
         };
 
+        // No read and no ttl put that applied got here with a write: those
+        // are answered at their position, above.
         let results = self
             .kv_read(&ctx, true, move |r, tenant, now| {
                 if raw {
@@ -296,6 +327,14 @@ impl RaftFacade {
             )))),
             Err(_) => Err(KvFailure::Rsm(RsmError::Timeout)),
         }
+    }
+
+    /// Test-only: keep apply from starting its next entry while the guard
+    /// lives. What is planned and committed meanwhile lands LATE, which is
+    /// what a leader without its quorum does to an entry.
+    #[cfg(test)]
+    pub(crate) fn hold_apply(&self) -> std::sync::RwLockReadGuard<'_, ()> {
+        self.store.entry_gate().whole()
     }
 
     /// Test-only: the raw row count of the two KV keyspaces, expired rows

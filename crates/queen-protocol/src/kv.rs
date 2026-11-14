@@ -474,6 +474,12 @@ pub enum KvReason {
     Limit,
     /// `incr` met a live key whose value is not a number.
     Type,
+    /// A `put` or `putIfAbsent` with a TTL was committed after its lifetime
+    /// was over (the cluster was slow to commit it: a leader change). It holds
+    /// nothing, as if it had not been written: send it again. Brokers after
+    /// 2.8.1 answer it; older ones answered `applied: true` for a key that
+    /// had already expired.
+    Expired,
 }
 
 /// One row of a multi-key read.
@@ -975,6 +981,29 @@ mod tests {
     }
 
     #[test]
+    fn a_put_with_a_ttl_says_when_it_expires_or_that_it_already_has() {
+        let held: KvResult = serde_json::from_str(
+            r#"{"index":0,"op":"putIfAbsent","applied":true,"key":"claim","value":"w-1",
+                "version":7,"expiresAt":"2026-11-14T10:00:02+00:00"}"#,
+        )
+        .unwrap();
+        assert!(held.applied());
+        assert_eq!(
+            held.expires_at.as_deref(),
+            Some("2026-11-14T10:00:02+00:00")
+        );
+        // Committed after its TTL was over: not applied, and nothing held.
+        let late: KvResult = serde_json::from_str(
+            r#"{"index":0,"op":"putIfAbsent","applied":false,"reason":"expired","key":"claim",
+                "value":null,"version":0}"#,
+        )
+        .unwrap();
+        assert!(!late.applied());
+        assert_eq!(late.reason, Some(KvReason::Expired));
+        assert_eq!(late.version, Some(0));
+    }
+
+    #[test]
     fn the_reason_taxonomy_is_closed_and_parses_every_member() {
         for (wire, want) in [
             ("exists", KvReason::Exists),
@@ -982,6 +1011,7 @@ mod tests {
             ("version", KvReason::Version),
             ("limit", KvReason::Limit),
             ("type", KvReason::Type),
+            ("expired", KvReason::Expired),
         ] {
             let r: KvResult = serde_json::from_str(&format!(
                 r#"{{"index":0,"op":"put","applied":false,"reason":"{wire}"}}"#

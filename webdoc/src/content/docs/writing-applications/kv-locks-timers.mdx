@@ -93,6 +93,10 @@ KV holds the state a step changes, in the same log as the messages. Keep there a
 
 Every write names its lifetime: a TTL, or `forever`. Every write gives the key a new, higher version, and `expect` makes a write depend on it. A missed condition answers `applied: false` with the key's current value, so read `applied` on every write.
 
+A `put` or a `putIfAbsent` with a TTL also answers `expiresAt`, the time its lifetime ends. The lifetime starts when the leader takes the write, not when your client gets the answer: count what is left from `expiresAt`, not from now. A write the cluster committed only after its lifetime was over answers `applied: false` with `reason: "expired"`: nobody holds the key, so send it again.
+
+<Why>a write normally commits in milliseconds, and during a leader change it can take seconds. A claim with a 2 second TTL that commits 4 seconds late is already expired when it lands, and another caller takes the key at once. Answered `applied: true`, both would believe they hold it.</Why>
+
 <Why>state written by messages tends to outlive the reason it was written. A lifetime on every key means nobody has to clean it up by hand. KV has no queries: keep the records you search in your own database, and in KV what a step needs to decide.</Why>
 
 ## Timers
@@ -112,6 +116,7 @@ A timer is a message scheduled for later. It is named by its queue and its key, 
 A lock is a lease: one holder at a time, for a lifetime the holder declares and renews. A semaphore is the same with `n` holders. A lock somebody else holds is not an error: the answer says `acquired: false` and who holds it. [One worker at a time](/patterns/one-worker/) runs a nightly job with one.
 
 - **A lock expires without telling its holder.** A paused or slow process can carry on after another one took the lock. Fence the work: `.guard(lock)` on the transaction inside QueenMQ, or the lock's token outside it (a resource that refuses a token lower than the highest it has seen).
+- **A lock is never granted already expired.** An acquire the cluster committed after its lifetime was over is made again by the broker, inside the same call. A renew that lands that late answers `lost`.
 - **The token changes at every renew.** Use the token of the last answer; the SDK handles do.
 - **The JavaScript, Python, Go, Rust and C++ handles renew in the background**, every third of the lifetime, and tell you when the lock is lost. The PHP handle renews when its `keepAlive()` is called.
 

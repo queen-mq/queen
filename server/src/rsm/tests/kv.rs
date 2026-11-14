@@ -1896,6 +1896,117 @@ fn a_writing_calls_reads_see_nothing_planned_after_it() {
     assert!(reads.call(&rid(ida)).is_none() && reads.call(&rid(idb)).is_none());
 }
 
+/// Jepsen W25 (2026-11-14, two holders of one claim): the expiry of a put is
+/// stamped when it is planned, and only the row at the call's own position
+/// says it. Claim `a` is planned with a 2 s lifetime; its entry lands 4 s
+/// later, by which time claim `b` was planned against an expired key and took
+/// it. `a`'s answer, rendered at its own position, carries `a`'s expiry even
+/// though the row is `b`'s by the time anybody reads the state; judged when
+/// it is answered, `a` holds nothing and `b` does.
+#[test]
+fn a_ttl_put_answers_its_own_expiry_whoever_owns_the_row_later() {
+    use crate::rsm::planner::kv::{expire_late_puts, render_answer};
+    let mut c = Cell::new("kv-ttl-answer");
+    let (ida, idb) = (0x7725_0001u64, 0x7725_0002u64);
+    let claim =
+        |v: &str| json!([{"op":"putIfAbsent","ns":"w25","key":"claim","value":v,"ttlSeconds":2}]);
+    let (a, b) = (claim("a"), claim("b"));
+    let (ops_a, ops_b) = (ops_for(TENANT, &a), ops_for(TENANT, &b));
+    let reads = crate::rsm::kv_reads::global();
+    let t0 = c.now();
+
+    let ra = reads
+        .register(rid(ida), TENANT, &ops_a, false)
+        .expect("register a");
+    let cycle_a = c.run(&[kv_cmd(ida, a.clone())]);
+    assert!(cycle_a.logged);
+    let pre_a = match cycle_a.outcome(0) {
+        Outcome::Kv(o) => o.results,
+        other => panic!("a kv call answered {other:?}"),
+    };
+    let mut got_a = ra.take().expect("a rendered at its position").expect("a");
+    assert!(applied(&got_a[0]), "{got_a:?}");
+    assert_eq!(got_a[0]["expiresAt"], json!(ts_jsonb(t0 + 2 * SEC)));
+
+    // The key has expired when b is planned: b takes it.
+    c.advance(4 * SEC);
+    let rb = reads
+        .register(rid(idb), TENANT, &ops_b, false)
+        .expect("register b");
+    assert!(c.run(&[kv_cmd(idb, b.clone())]).logged);
+    let mut got_b = rb.take().expect("b rendered at its position").expect("b");
+    assert!(applied(&got_b[0]), "{got_b:?}");
+    assert_eq!(got_b[0]["expiresAt"], json!(ts_jsonb(t0 + 6 * SEC)));
+    assert!(got_b[0]["version"].as_u64() > got_a[0]["version"].as_u64());
+
+    // Read off the state as it is now, nothing can be said of a's write: the
+    // row is b's. This is all the receiver had before it was answered at its
+    // position.
+    let now = c.now();
+    let late = c
+        .node
+        .store()
+        .read(|r| render_answer(r, TENANT, &ops_a, &pre_a, now, false))
+        .expect("render");
+    assert!(applied(&late[0]), "{late:?}");
+    assert!(late[0].get("expiresAt").is_none(), "{late:?}");
+
+    // The receiver's judgment when each is answered.
+    expire_late_puts(&ops_a, &mut got_a, now);
+    assert_eq!(
+        got_a[0],
+        json!({"index":0,"op":"putIfAbsent","applied":false,"reason":"expired",
+               "key":"claim","value":null,"version":0})
+    );
+    expire_late_puts(&ops_b, &mut got_b, now);
+    assert!(applied(&got_b[0]), "{got_b:?}");
+    assert_eq!(got_b[0]["expiresAt"], json!(ts_jsonb(t0 + 6 * SEC)));
+    drop((ra, rb));
+}
+
+/// What `expire_late_puts` judges: an applied put that set a ttl and whose
+/// own expiry has come. Nothing else: not a key that never expires, not an
+/// `incr` (the lifetime it finds is not its own), not a write that lost, not
+/// a put whose row was no longer its own when the answer was rendered.
+#[test]
+fn only_a_put_whose_own_ttl_is_over_is_answered_expired() {
+    use crate::rsm::planner::kv::expire_late_puts;
+    let ops = ops_for(
+        TENANT,
+        &json!([
+            {"op":"put","ns":"n","key":"a","value":1,"ttlSeconds":5},
+            {"op":"put","ns":"n","key":"b","value":1,"ttlSeconds":5},
+            {"op":"put","ns":"n","key":"c","value":1,"forever":true},
+            {"op":"incr","ns":"n","key":"d","delta":1,"ttlSeconds":5},
+            {"op":"putIfAbsent","ns":"n","key":"e","value":1,"ttlSeconds":5},
+            {"op":"put","ns":"n","key":"f","value":1,"ttlSeconds":5},
+        ]),
+    );
+    let now = BASE_US;
+    let (past, ahead) = (ts_jsonb(now - SEC), ts_jsonb(now + SEC));
+    let mut results = vec![
+        json!({"index":0,"op":"put","applied":true,"key":"a","value":1,"version":7,"expiresAt":past}),
+        json!({"index":1,"op":"put","applied":true,"key":"b","value":1,"version":8,"expiresAt":ahead}),
+        json!({"index":2,"op":"put","applied":true,"key":"c","value":1,"version":9,"expiresAt":past}),
+        json!({"index":3,"op":"incr","applied":true,"key":"d","value":1,"version":10,"expiresAt":past}),
+        json!({"index":4,"op":"putIfAbsent","applied":false,"reason":"exists","key":"e","value":2,"version":3,"expiresAt":past}),
+        json!({"index":5,"op":"put","applied":true,"key":"f","value":1,"version":11}),
+    ];
+    let before = results.clone();
+    expire_late_puts(&ops, &mut results, now);
+    assert_eq!(
+        results[0],
+        json!({"index":0,"op":"put","applied":false,"reason":"expired","key":"a","value":null,"version":0})
+    );
+    assert_eq!(results[1..], before[1..]);
+    // The boundary is the reader's: a row is dead AT its expiry (§5.7).
+    let mut edge = vec![
+        json!({"index":0,"op":"put","applied":true,"key":"a","value":1,"version":7,"expiresAt":ts_jsonb(now)}),
+    ];
+    expire_late_puts(&ops[..1], &mut edge, now);
+    assert_eq!(edge[0]["applied"], false, "{edge:?}");
+}
+
 /// Jepsen W4 pause (G-single): a read-only call returned one key of a two-key
 /// batch before the other had applied — the RAM keyspaces are read live, and
 /// the read landed between the batch's two effects. A reader at the entry gate

@@ -663,3 +663,111 @@ async fn one_call_carries_many_locks_and_tenants_never_meet() {
     f.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Keeps apply from starting its next entry until it is dropped, so that what
+/// is planned meanwhile lands late (`RaftFacade::hold_apply`; as in
+/// `facade_kv.rs`).
+struct ApplyHeld {
+    release: std::sync::mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ApplyHeld {
+    fn new(f: &Arc<RaftFacade>) -> ApplyHeld {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let (held, is_held) = std::sync::mpsc::channel::<()>();
+        let f = f.clone();
+        let thread = std::thread::spawn(move || {
+            let _gate = f.hold_apply();
+            let _ = held.send(());
+            let _ = wait.recv();
+        });
+        is_held.recv().expect("the gate is held");
+        ApplyHeld {
+            release,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for ApplyHeld {
+    fn drop(&mut self) {
+        let _ = self.release.send(());
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// A lock is a `putIfAbsent` with a lifetime, and the lifetime is stamped
+/// when the write is planned. An acquire whose entry is committed late (a
+/// leader that lost its quorum) used to be granted a permit that had expired
+/// before it was granted: `acquired: true`, a token, and a lock anybody could
+/// take at once (Jepsen W25, 2026-11-14). The acquire is now made again, and
+/// what it grants is a permit that is held. A renew that lands late answers
+/// what happened to the permit: `lost`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_acquire_or_a_renew_that_lands_late_grants_nothing_expired() {
+    let dir = scratch("late");
+    let f = Arc::new(RaftFacade::open(&build_ctx(&dir)).expect("open facade"));
+
+    // ---- an acquire --------------------------------------------------------
+    let held = ApplyHeld::new(&f);
+    let acquire = {
+        let f = f.clone();
+        tokio::spawn(async move {
+            one(
+                &f,
+                json!({"op":"acquire","name":"report","ttlSeconds":1,"owner":"w-1"}),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(1_300)).await;
+    drop(held);
+    let got = acquire.await.expect("acquire");
+    assert_eq!(got["acquired"], true, "the acquire was made again: {got}");
+    let seen = one(&f, json!({"op":"get","name":"report"})).await;
+    assert_eq!(
+        seen["held"], true,
+        "the permit it was granted is held: {seen}"
+    );
+    assert_eq!(
+        seen["holders"][0]["token"].as_u64(),
+        Some(token(&got)),
+        "{seen}"
+    );
+
+    // ---- a renew -----------------------------------------------------------
+    let long = one(
+        &f,
+        json!({"op":"acquire","name":"nightly","ttlSeconds":600,"owner":"w-2"}),
+    )
+    .await;
+    assert_eq!(long["acquired"], true, "{long}");
+    let held = ApplyHeld::new(&f);
+    let renew = {
+        let (f, t) = (f.clone(), token(&long));
+        tokio::spawn(async move {
+            one(
+                &f,
+                json!({"op":"renew","name":"nightly","token":t,"ttlSeconds":1,"owner":"w-2"}),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(1_300)).await;
+    drop(held);
+    let got = renew.await.expect("renew");
+    assert_eq!(
+        got["renewed"], false,
+        "the renewed lifetime was over when it landed: {got}"
+    );
+    assert_eq!(got["reason"], "lost", "{got}");
+    let seen = one(&f, json!({"op":"get","name":"nightly"})).await;
+    assert_eq!(seen["held"], false, "{seen}");
+
+    let f = Arc::try_unwrap(f).unwrap_or_else(|_| panic!("the facade is still shared"));
+    f.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

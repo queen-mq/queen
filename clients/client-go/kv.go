@@ -178,6 +178,7 @@ const (
 	KVReasonVersion = "version" // expect:N>0 lost: somebody else wrote first
 	KVReasonLimit   = "limit"   // incr would cross min/max, or delta is out of range
 	KVReasonType    = "type"    // incr on a live key whose value is not a number
+	KVReasonExpired = "expired" // a put with a TTL, committed after the TTL was over: send it again
 )
 
 // ---------------------------------------------------------------------------

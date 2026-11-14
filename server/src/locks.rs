@@ -779,6 +779,18 @@ fn applied(verdict: &Value) -> bool {
     verdict["applied"] == Value::Bool(true)
 }
 
+/// The write landed with its lifetime already over: its entry was committed
+/// late (a leader that lost its quorum, a hand-over), and the KV answers it
+/// as not applied (`rsm/planner/kv.rs`, `expire_late_puts`). Until 2026-11-14
+/// it answered `applied`, and an acquire handed out a permit that was
+/// expired the moment it was granted, beside whoever took the lock next.
+///
+/// A renew that lands so needs nothing here: read again, its row is gone,
+/// and it answers `lost`, which is what happened to the permit.
+fn landed_expired(verdict: &Value) -> bool {
+    verdict["reason"] == crate::rsm::planner::kv::REASON_EXPIRED
+}
+
 /// What an operation is waiting on after the reads.
 enum Step {
     /// Answered.
@@ -934,7 +946,10 @@ async fn apply_steps(
             } if owner_of(&verdict["value"]) == Some(owner.as_str()) => {
                 granted(i, name, slot, token, Some(owner), true)
             }
-            LockOp::Acquire { name, limit: 1, .. } => {
+            // A lock somebody holds. Not one whose own write landed already
+            // expired (`landed_expired`): nobody holds that, and the acquire
+            // is made again, like a semaphore's that lost its slot.
+            LockOp::Acquire { name, limit: 1, .. } if !landed_expired(verdict) => {
                 refused(i, name, "held", holder_of_verdict(slot, verdict))
             }
             LockOp::Acquire {

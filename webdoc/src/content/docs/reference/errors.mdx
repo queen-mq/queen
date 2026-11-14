@@ -229,6 +229,8 @@ quota, the grant, the rates and the pause are KV's.
 A lost precondition on `POST /api/v1/kv` is not an error either. An ordinary one shows as
 `applied: false` in its result, and a `required` one answers 200 with
 `{"ok": false, "reason": "kv_precondition", "failedIndex", "kvReason", "version", "value"}`.
+A `put` or `putIfAbsent` whose TTL was over when the cluster committed it answers `applied: false`
+with `reason: "expired"`: it holds nothing, and can be sent again.
 Cancelling a timer that is not pending answers 200 with `ok: false`. On `POST /api/v1/locks`, a
 lock somebody else holds answers 200 with `acquired: false` and `reason: "held"` (or `contended`
 for a busy semaphore), and a renew or release whose token is no longer the lock's answers

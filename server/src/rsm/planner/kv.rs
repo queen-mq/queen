@@ -411,6 +411,20 @@ impl KvOp {
         )
     }
 
+    /// A put that sets the key's lifetime (`ttlSeconds`). Its answer says when
+    /// that lifetime ends, and says so when it already has
+    /// ([`render_answer`], [`expire_late_puts`]). Not `incr`: it keeps the
+    /// lifetime of the row it finds, which is somebody else's to have set.
+    pub fn sets_ttl(&self) -> bool {
+        matches!(
+            self,
+            KvOp::Put {
+                expiry: KvExpiry::TtlSeconds(_),
+                ..
+            }
+        )
+    }
+
     /// Answered from applied state by the receiver, never by the planner.
     pub fn is_read(&self) -> bool {
         matches!(
@@ -1873,6 +1887,117 @@ pub fn render_call_raw<R: Reads + ?Sized>(
     RAW_VALUES.with(|f| f.set(true));
     let _reset = Reset;
     render_call(r, tenant, ops, pre, now_us)
+}
+
+/// [`render_call`] (or [`render_call_raw`], with `raw`) for the answer of a KV
+/// call of its own, as opposed to a transaction's riders: a put with a
+/// `ttlSeconds` that applied also answers `expiresAt`, read from the row it
+/// left.
+///
+/// # Why the answer carries the expiry
+///
+/// The planner stamps a ttl when it PLANS the write (`expires_at_us:
+/// expiry.at(now)`); apply cannot (it has no clock, I2). Between the two lies
+/// the commit, which is normally milliseconds and can be seconds: a leader
+/// that lost its quorum keeps the entry in its log, and the next leader
+/// commits it. The row is then written with a lifetime that has partly or
+/// wholly run out, and `applied: true` alone told its writer it held the key
+/// for the whole ttl. Jepsen W25 (2026-11-14, 2.8.1 too): a `putIfAbsent`
+/// with `ttlSeconds: 2` answered `applied: true` 4.4 s after it was sent,
+/// beside another claim of the same key that had just won: two holders.
+///
+/// So the answer says when the write expires, and the receiver, which has a
+/// clock, answers a write that is already expired as not applied
+/// ([`expire_late_puts`]).
+///
+/// The row must be the write's OWN (its version). Rendered at the call's own
+/// position in the log, which is where the receiver has it rendered
+/// (`facade/real/kv.rs`), it always is, unless a later op of the same call
+/// wrote the key again. Rendered later, another call may have replaced it,
+/// and nothing is said then of a row that is somebody else's.
+pub fn render_answer<R: Reads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    ops: &[KvOp],
+    pre: &[KvOpOutcome],
+    now_us: i64,
+    raw: bool,
+) -> crate::rsm::store::Result<Vec<Value>> {
+    let mut out = if raw {
+        render_call_raw(r, tenant, ops, pre, now_us)?
+    } else {
+        render_call(r, tenant, ops, pre, now_us)?
+    };
+    for (i, op) in ops.iter().enumerate() {
+        let (true, KvOp::Put { ns, key, .. }, Some(KvOpOutcome::Write(w))) =
+            (op.sets_ttl(), op, pre.get(i))
+        else {
+            continue;
+        };
+        if !w.applied {
+            continue;
+        }
+        let expires = r
+            .kv(tenant, ns, key)?
+            .filter(|row| row.version == w.version)
+            .and_then(|row| row.expires_at_us);
+        if let (Some(at), Some(Value::Object(m))) = (expires, out.get_mut(i)) {
+            m.insert(EXPIRES_AT.to_string(), Value::String(ts_jsonb(at)));
+        }
+    }
+    Ok(out)
+}
+
+/// The field a ttl put's answer carries its expiry in ([`render_answer`]).
+const EXPIRES_AT: &str = "expiresAt";
+
+/// Why a ttl put that landed did not apply: its lifetime was already over
+/// when its answer was made ([`expire_late_puts`]). An answer's word only: it
+/// is in no recorded outcome, so it is not a [`KvReason`].
+pub const REASON_EXPIRED: &str = "expired";
+
+/// Answer as NOT applied every put of `results` whose `expiresAt`
+/// ([`render_answer`]) is at or before `now_us`: `applied: false`, `reason:
+/// "expired"`, no value and version 0, which is what the key holds for every
+/// reader (an expired row is an absent one, §5.7).
+///
+/// Such a write was never live for anybody: every read and every later
+/// `putIfAbsent` judged it expired from the moment it landed. Its writer is
+/// the one party that could not know, and acted on `applied: true` as the
+/// holder of a key somebody else could take at once.
+///
+/// The receiver calls it when it answers, with its own clock. A put whose
+/// `expiresAt` is still ahead keeps it: the client reads there how long it
+/// really holds the key, which is the ttl less the time the write took to
+/// land.
+pub fn expire_late_puts(ops: &[KvOp], results: &mut [Value], now_us: i64) {
+    for (i, op) in ops.iter().enumerate() {
+        if !op.sets_ttl() {
+            continue;
+        }
+        let Some(v) = results.get_mut(i) else {
+            continue;
+        };
+        if v.get("applied") != Some(&Value::Bool(true)) {
+            continue;
+        }
+        let late = v
+            .get(EXPIRES_AT)
+            .and_then(Value::as_str)
+            .and_then(crate::util::parse_iso_ms)
+            .is_some_and(|ms| ms.saturating_mul(1_000) <= now_us);
+        if late {
+            *v = obj(vec![
+                ("index", Value::from(i)),
+                ("op", Value::String(op.name().to_string())),
+                ("applied", Value::Bool(false)),
+                ("reason", Value::String(REASON_EXPIRED.to_string())),
+                ("key", Value::String(op.key().unwrap_or("").to_string())),
+                ("value", Value::Null),
+                ("version", Value::from(0u64)),
+            ]);
+        }
+    }
 }
 
 pub fn render_call<R: Reads + ?Sized>(

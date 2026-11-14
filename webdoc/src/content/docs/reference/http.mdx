@@ -221,7 +221,7 @@ read it there:
 |---|---|
 | `201` from `POST /api/v1/push` | The request was handled. Each item has its own `status`: `queued`, `duplicate` (its `transactionId` is already in the partition's dedup window, or repeated in the request) or `error`. |
 | `200` from `POST /api/v1/transaction` with `success: false` | Rolled back: nothing was written. `reason` says why. See [transaction](/reference/transaction/). |
-| `200` from the KV, lock and timer routes | A business verdict: `applied: false` (a lost `putIfAbsent`, a version mismatch), `acquired: false` (a lock somebody else holds) or `ok: false` (cancelling a timer that is not pending). |
+| `200` from the KV, lock and timer routes | A business verdict: `applied: false` (a lost `putIfAbsent`, a version mismatch, a write whose TTL was over when it was committed), `acquired: false` (a lock somebody else holds) or `ok: false` (cancelling a timer that is not pending). |
 | `204` from a pop | No message was available before the long-poll ended. |
 | `503` `outcome_unknown` | The leader changed while an ack, nack or DLQ move was being made durable. It may or may not have applied. |
 | `503` `retry`, `no_leader`, `timeout` | The call did not complete. Retry after `Retry-After` (1 s); a write may still have applied, so make it safe to repeat. |

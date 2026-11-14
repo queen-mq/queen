@@ -456,3 +456,132 @@ async fn a_call_whose_writes_all_lose_still_answers_its_reads() {
     f.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Keeps apply from starting its next entry until it is dropped: what is
+/// planned and committed meanwhile lands late, as an entry does that a leader
+/// without its quorum kept in its log (`RaftFacade::hold_apply`). The guard
+/// lives on a thread of its own, so no lock is held across an await.
+struct ApplyHeld {
+    release: std::sync::mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ApplyHeld {
+    fn new(f: &Arc<RaftFacade>) -> ApplyHeld {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let (held, is_held) = std::sync::mpsc::channel::<()>();
+        let f = f.clone();
+        let thread = std::thread::spawn(move || {
+            let _gate = f.hold_apply();
+            let _ = held.send(());
+            let _ = wait.recv();
+        });
+        is_held.recv().expect("the gate is held");
+        ApplyHeld {
+            release,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for ApplyHeld {
+    fn drop(&mut self) {
+        let _ = self.release.send(());
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Jepsen W25, 2026-11-14 (2.8.1 too): two holders of one claim. A
+/// `putIfAbsent` with `ttlSeconds: 2` was planned by a leader that then lost
+/// its quorum; the next leader committed the entry 4.4 s later, and the write
+/// landed with its lifetime over. It was answered `applied: true`, and a
+/// second claim, planned after the expiry, won at the same moment.
+///
+/// Here the first claim's entry is kept from applying for longer than its
+/// ttl, and a second claim of the same key is planned meanwhile. Exactly one
+/// of them is answered as the holder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claim_that_lands_after_its_ttl_is_answered_expired() {
+    let dir = scratch("ttl-late");
+    let f = Arc::new(RaftFacade::open(&build_ctx(&dir)).expect("open facade"));
+    let claim = |value: &str, ttl: u64| json!({"op":"putIfAbsent","ns":"claims","key":"job","value":value,"ttlSeconds":ttl});
+
+    // A claim that lands in time: applied, and it says until when.
+    let other = one(
+        &f,
+        json!({"op":"putIfAbsent","ns":"claims","key":"other","value":"x","ttlSeconds":600}),
+    )
+    .await;
+    assert!(applied(&other), "{other}");
+    assert!(
+        other["expiresAt"].as_str().is_some(),
+        "a put with a ttl answers when it expires: {other}"
+    );
+    // A key that never expires has no expiry to answer.
+    let forever = one(
+        &f,
+        json!({"op":"put","ns":"claims","key":"kept","value":"x","forever":true}),
+    )
+    .await;
+    assert!(applied(&forever), "{forever}");
+    assert!(forever.get("expiresAt").is_none(), "{forever}");
+
+    let held = ApplyHeld::new(&f);
+    let first = {
+        let (f, op) = (f.clone(), claim("first", 1));
+        tokio::spawn(async move { one(&f, op).await })
+    };
+    // Past the first claim's lifetime: the second is planned against a key
+    // that has expired.
+    tokio::time::sleep(Duration::from_millis(1_300)).await;
+    let second = {
+        let (f, op) = (f.clone(), claim("second", 600));
+        tokio::spawn(async move { one(&f, op).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(held);
+    let (first, second) = (first.await.expect("first"), second.await.expect("second"));
+
+    assert_eq!(
+        first["applied"], false,
+        "the first claim landed after its ttl and holds nothing: {first}"
+    );
+    assert_eq!(first["reason"], "expired", "{first}");
+    assert_eq!(first["op"], "putIfAbsent");
+    assert_eq!(first["key"], "job");
+    assert_eq!(first["value"], Value::Null);
+    assert_eq!(version(&first), 0, "{first}");
+    assert!(first.get("expiresAt").is_none(), "{first}");
+    assert!(applied(&second), "the second claim holds the key: {second}");
+    let got = one(&f, json!({"op":"get","ns":"claims","key":"job"})).await;
+    assert_eq!(got["value"], "second", "{got}");
+    assert_eq!(version(&got), version(&second));
+    assert_eq!(got["expiresAt"], second["expiresAt"], "{got} {second}");
+
+    // Alone too: a put nobody replaced, landed late, is not applied, and the
+    // key reads absent.
+    let held = ApplyHeld::new(&f);
+    let late = {
+        let f = f.clone();
+        tokio::spawn(async move {
+            one(
+                &f,
+                json!({"op":"put","ns":"claims","key":"alone","value":1,"ttlSeconds":1}),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(1_300)).await;
+    drop(held);
+    let late = late.await.expect("late");
+    assert_eq!(late["applied"], false, "{late}");
+    assert_eq!(late["reason"], "expired", "{late}");
+    let got = one(&f, json!({"op":"get","ns":"claims","key":"alone"})).await;
+    assert_eq!(got["found"], false, "{got}");
+
+    let f = Arc::try_unwrap(f).unwrap_or_else(|_| panic!("the facade is still shared"));
+    f.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

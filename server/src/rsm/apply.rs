@@ -1803,7 +1803,9 @@ impl<'s, S: Store> Applier<'s, S> {
 
     /// Render the answers of `cmds` (indexes into `c.entry.commands`) against
     /// the state as it stands now — after their own effects and every earlier
-    /// command's, before any later one's — at the entry's instant (D5).
+    /// command's, before any later one's — at the entry's instant (D5). A put
+    /// with a ttl answers its row's expiry, read here while the row is still
+    /// its own; the receiver, which has a clock, judges it.
     fn render_kv_reads(&self, c: &Committed, cmds: &[usize]) {
         let reads = crate::rsm::kv_reads::global();
         for &i in cmds {
@@ -1814,13 +1816,15 @@ impl<'s, S: Store> Applier<'s, S> {
             let Some((tenant, ops, raw)) = reads.call(&cmd.request_id) else {
                 continue;
             };
-            let render = if raw {
-                crate::rsm::planner::kv::render_call_raw
-            } else {
-                crate::rsm::planner::kv::render_call
-            };
-            let answer = render(&self.writes, &tenant, &ops, &o.results, c.entry.now_us)
-                .map_err(|e| e.to_string());
+            let answer = crate::rsm::planner::kv::render_answer(
+                &self.writes,
+                &tenant,
+                &ops,
+                &o.results,
+                c.entry.now_us,
+                raw,
+            )
+            .map_err(|e| e.to_string());
             reads.answer(&cmd.request_id, answer);
         }
     }
@@ -2011,8 +2015,9 @@ impl<'s, S: Store> Applier<'s, S> {
         // A test's injected refusal (`faults::refuse_apply_of`): off unless a
         // test armed one, one relaxed load per entry.
         let refuse_at = crate::rsm::faults::apply_refusal(&c.entry);
-        // KV calls whose receiver waits for its reads (`kv_reads`): each is
-        // rendered right after its OWN last effect, before any later command's.
+        // KV calls whose receiver waits for its answer (`kv_reads`: its reads,
+        // the expiry of its ttl puts): each is rendered right after its OWN
+        // last effect, before any later command's.
         let kv_render = self.kv_render_points(c);
         let effects = &c.entry.effects;
         // Runs only for an entry with enough pid-keyed effects to repay the

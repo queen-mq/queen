@@ -10,6 +10,12 @@
 //! before any later command's effect, and leaves it here for the receiver to
 //! take. The read bytes never enter the log (D7).
 //!
+//! A call with a put that sets a ttl registers too, whether it reads or not
+//! (2026-11-14): the expiry of ITS write can only be read from the row at its
+//! own position — later, the row may be another write's — and the receiver
+//! needs it to tell a write that landed already expired
+//! ([`crate::rsm::planner::kv::render_answer`]).
+//!
 //! Process-wide: request ids are unique, and every node's state after a given
 //! command is the same, so whichever apply thread in the process gets there
 //! first may render it (an in-process test cluster runs several nodes).
