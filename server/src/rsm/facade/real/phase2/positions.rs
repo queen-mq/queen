@@ -89,8 +89,11 @@ impl RaftFacade {
                         }
                     }
                     None => {
+                        // A filtered group's positions are on its hidden
+                        // queue, in that queue's offsets: no position of the
+                        // source.
                         let mut queues: Vec<String> = Vec::new();
-                        r.scan_queues(&tenant, usize::MAX, &mut |q, _| {
+                        crate::rsm::route::scan_visible(r, &tenant, &mut |q, _| {
                             queues.push(q.to_string());
                             true
                         })?;

@@ -206,6 +206,9 @@ test('a source\'s line: its reading queues with their where, its filtered groups
   assert.equal(text(readByLine(many, { queue: 'orders' })), 'Read by a, b, c, d and 2 more')
   assert.equal(readByLine(routeOf({ route: ROUTE_IT }), { queue: 'orders-it' }), null)
   assert.equal(readByLine(null), null)
+  // What is on partitions none of them takes (the broker's messages.unread).
+  assert.equal(text(readByLine(many, { queue: 'orders', unread: 1200 })), 'Read by a, b, c, d and 2 more · 1,200 on partitions none of them takes')
+  assert.equal(text(readByLine(many, { queue: 'orders', unread: 0 })), 'Read by a, b, c, d and 2 more')
 })
 
 // ---- filtered groups ---------------------------------------------------------------

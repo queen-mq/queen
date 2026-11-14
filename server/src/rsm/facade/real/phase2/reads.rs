@@ -931,8 +931,10 @@ impl RaftFacade {
                 let mut queues = Vec::new();
                 match &queue {
                     Some(q) => queues.push(q.clone()),
+                    // A filtered group's hidden queue holds links to its
+                    // source's messages: each message is listed once, there.
                     None => {
-                        r.scan_queues(&tenant, usize::MAX, &mut |q, _| {
+                        crate::rsm::route::scan_visible(r, &tenant, &mut |q, _| {
                             queues.push(q.to_string());
                             true
                         })?;
@@ -2704,6 +2706,9 @@ pub(crate) fn group_lags<R: Reads + ?Sized>(
         std::collections::BTreeMap::new();
     let mut walked = 0usize;
     for (tenant, queue) in super::stats::all_queues(r)? {
+        // A filtered group's cursors are on its hidden queue; its lag is the
+        // source's, named as the API names it.
+        let shown = crate::rsm::route::shown_name(&queue).to_string();
         // The groups registered on the queue, each with the instant its first
         // read of a partition starts from (`None`: the partition's floor).
         let mut registered: Vec<(String, Option<i64>)> = Vec::new();
@@ -2750,10 +2755,10 @@ pub(crate) fn group_lags<R: Reads + ?Sized>(
                 |k: i64| oldest_unconsumed_us(qlog, reader, &tenant, pid, &p, &sealed, k - 1);
             let mut add = |group: &str, pending: u64, oldest_us: Option<i64>| {
                 let a = agg
-                    .entry((tenant.clone(), queue.clone(), group.to_string()))
+                    .entry((tenant.clone(), shown.clone(), group.to_string()))
                     .or_insert_with(|| GroupLag {
                         tenant: tenant.clone(),
-                        queue: queue.clone(),
+                        queue: shown.clone(),
                         group: group.to_string(),
                         pending: 0,
                         lag_seconds: 0,

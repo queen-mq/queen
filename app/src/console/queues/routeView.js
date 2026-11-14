@@ -188,9 +188,11 @@ export function behindText(oldestAt, now = Date.now()) {
  * where is its entry's; else a reading queue's own row in `queues` (its
  * `route.from` entry for this queue), a filtered group's row in `groups`. How
  * far behind a reader is comes from one queue's read (`oldestUnconsumedAt`);
- * none behind says nothing. null when nothing reads it.
+ * none behind says nothing. `unread` (the queue's `messages.unread`) ends it
+ * with what is on partitions that none of them takes. null when nothing reads
+ * it.
  */
-export function readByLine(route, { queue = '', queues = [], groups = [], max = 4, now = Date.now() } = {}) {
+export function readByLine(route, { queue = '', queues = [], groups = [], max = 4, now = Date.now(), unread = 0 } = {}) {
   if (!route) return null
   const readers = route.readers
   const known = new Set(readers.map(entryKey))
@@ -222,6 +224,10 @@ export function readByLine(route, { queue = '', queues = [], groups = [], max = 
   if (also.length) {
     parts.push({ t: readers.length ? ' · also in ' : 'Its messages are also in ' })
     listInto(parts, also.map((h) => [h.group ? groupRef(h.queue, h.group) : queueRef(h.queue)]), max)
+  }
+  const left = Number(unread)
+  if (readers.length && Number.isFinite(left) && left > 0) {
+    parts.push({ t: ` · ${fmt(left)} on partitions none of them takes` })
   }
   return parts
 }

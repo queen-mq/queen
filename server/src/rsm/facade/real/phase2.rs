@@ -801,8 +801,9 @@ impl RaftFacade {
         let rows = tokio::task::spawn_blocking(move || {
             let mut short = false;
             let rows = store.read(|r| {
+                // A filtered group's hidden queue is no topic of its own.
                 let mut queues = Vec::new();
-                r.scan_queues(&tenant, usize::MAX, &mut |name, cfg| {
+                crate::rsm::route::scan_visible(r, &tenant, &mut |name, cfg| {
                     queues.push((name.to_string(), cfg));
                     true
                 })?;
@@ -1034,7 +1035,7 @@ impl RaftFacade {
         let tasks = labels(|c| c.task.as_ref());
         let (mut partitions, mut total, mut pending, mut processing, mut completed) =
             (0i64, 0i64, 0i64, 0i64, 0i64);
-        let mut dead_letter = 0i64;
+        let (mut dead_letter, mut unread) = (0i64, 0i64);
         for s in &stats {
             let c = SnapCounts::of(s);
             partitions += c.parts;
@@ -1044,6 +1045,7 @@ impl RaftFacade {
             processing += c.processing;
             completed += (c.total - c.pending - c.dead_letter).max(0);
             dead_letter += c.dead_letter;
+            unread += c.unread;
         }
         // Per queue: the oldest unconsumed message's age and the most one
         // cursor has pending; averaged over the queues that have any.
@@ -1079,7 +1081,7 @@ impl RaftFacade {
             json!({
                 "queues":queues,"partitions":partitions,
                 "namespaces":namespaces,"tasks":tasks,
-                "messages":{"total":total,"pending":pending,"processing":processing,"completed":completed,"failed":0,"deadLetter":dead_letter},
+                "messages":{"total":total,"pending":pending,"processing":processing,"completed":completed,"failed":0,"deadLetter":dead_letter,"unread":unread},
                 "lag":{
                     "time":{"avg":mean(&ages),"median":0,"min":0,"max":ages.iter().copied().max().unwrap_or(0)},
                     "offset":{"avg":mean(&offs),"median":0,"min":0,"max":offs.iter().copied().max().unwrap_or(0)}
@@ -2307,6 +2309,8 @@ struct SnapCounts {
     pending: i64,
     /// Inside a live lease (a subset of `pending`).
     processing: i64,
+    /// On partitions nothing reads (a subset of `pending`, never leased).
+    unread: i64,
     dead_letter: i64,
     retained: i64,
 }
@@ -2319,6 +2323,7 @@ impl SnapCounts {
             total: s.fig.total,
             pending: s.fig.pending,
             processing: s.fig.processing,
+            unread: s.fig.unread,
             dead_letter: s.dead_letter,
             retained: s.retained,
         }
@@ -2327,9 +2332,10 @@ impl SnapCounts {
 
 /// A queue as the queue listing shows it: `pending` excludes
 /// what is leased (`processing`); `completed` = total − pending − DLQ, as the
-/// queue detail counts it.
+/// queue detail counts it; `unread` is the part of `pending` on partitions
+/// that nothing reads ([`stats::Consumers`]).
 fn queue_json(name: &str, c: &QueueConfig, n: &SnapCounts) -> Value {
-    json!({"id":uuid_bytes_to_string(&c.id),"name":name,"queue":name,"namespace":c.namespace.clone().unwrap_or_default(),"task":c.task.clone().unwrap_or_default(),"storage":"segments","partitions":n.parts,"segments":{"segments":n.segments,"messages":n.total},"messages":{"total":n.total,"pending":(n.pending-n.processing).max(0),"processing":n.processing,"completed":(n.total-n.pending-n.dead_letter).max(0),"deadLetter":n.dead_letter},"retainedBytes":n.retained,"options":config_options(c),"createdAt":crate::rsm::planner::timers::iso_us(c.created_at_us)})
+    json!({"id":uuid_bytes_to_string(&c.id),"name":name,"queue":name,"namespace":c.namespace.clone().unwrap_or_default(),"task":c.task.clone().unwrap_or_default(),"storage":"segments","partitions":n.parts,"segments":{"segments":n.segments,"messages":n.total},"messages":{"total":n.total,"pending":(n.pending-n.processing).max(0),"processing":n.processing,"completed":(n.total-n.pending-n.dead_letter).max(0),"deadLetter":n.dead_letter,"unread":n.unread},"retainedBytes":n.retained,"options":config_options(c),"createdAt":crate::rsm::planner::timers::iso_us(c.created_at_us)})
 }
 
 /// `GET /api/v1/resources/queues/:queue`: the queue, its first `max`
@@ -2366,7 +2372,8 @@ fn queue_detail<R: TypedReads + ?Sized>(
         })?;
     }
     let mut partitions = Vec::new();
-    let mut totals = [0i64; 5]; // total, pending, processing, completed, dlq
+    let mut totals = [0i64; 6]; // total, pending, processing, completed, dlq, unread
+    let readers = stats::Consumers::of(r, tenant, queue)?;
     let mut retained = 0i64;
     let mut segments = 0i64;
     let mut consumed_total = 0u64;
@@ -2380,24 +2387,31 @@ fn queue_detail<R: TypedReads + ?Sized>(
         let Ok(Some(p)) = r.partition(pid) else { return true };
         let total = (p.last_offset - p.log_start as i64 + 1).max(0);
         let Backlog {
-            floor,
+            own,
             processing,
             consumed,
             last_activity,
         } = backlog(r, pid, now);
-        let pending = p.pending_from(floor) as i64;
-        let processing = processing.min(pending);
+        // Its filtered groups' share of it, and what nothing reads.
+        let share = readers.share(r, tenant, &p.partition, now);
+        let (pending, unread) = stats::fold(&p, queue, own, &readers, &share);
+        let (pending, unread) = (pending as i64, unread as i64);
+        let processing = (processing + share.processing).min(pending);
+        let consumed = consumed.saturating_add(share.consumed);
+        let last_activity = last_activity.max(share.last_activity);
         let dead_letter = dlq_by_pid.get(&pid).copied().unwrap_or(0);
         let completed = (total - pending - dead_letter).max(0);
         let stats = json!({
             "total":total,"pending":pending,"processing":processing,
-            "completed":completed,"failed":Value::Null,"deadLetter":dead_letter
+            "completed":completed,"failed":Value::Null,"deadLetter":dead_letter,
+            "unread":unread
         });
         totals[0] += total;
         totals[1] += pending;
         totals[2] += processing;
         totals[3] += completed;
         totals[4] += dead_letter;
+        totals[5] += unread;
         consumed_total = consumed_total.saturating_add(consumed);
         let partition_bytes = r.partition_counter(pid, Counter::RetainedBytes).unwrap_or(0);
         retained += partition_bytes;
@@ -2434,6 +2448,7 @@ fn queue_detail<R: TypedReads + ?Sized>(
             f.processing,
             (f.total - f.pending - dlq).max(0),
             dlq,
+            f.unread,
         ];
         segments = f.segments;
         retained = r.queue_counter(tenant, queue, Counter::RetainedBytes)?;
@@ -2458,7 +2473,7 @@ fn queue_detail<R: TypedReads + ?Sized>(
         "createdAt":crate::rsm::planner::timers::iso_us(cfg.created_at_us),
         "options":config_options(&cfg),"partitions":partitions,
         "segments":{"segments":segments,"messages":totals[0]},
-        "totals":{"total":totals[0],"pending":totals[1],"processing":totals[2],"completed":totals[3],"failed":Value::Null,"deadLetter":totals[4]},
+        "totals":{"total":totals[0],"pending":totals[1],"processing":totals[2],"completed":totals[3],"failed":Value::Null,"deadLetter":totals[4],"unread":totals[5]},
         "retainedBytes":retained,
         "partitionCount":partition_count,"totalConsumed":consumed_total,"statsAge":stats_age
     });
@@ -2468,11 +2483,12 @@ fn queue_detail<R: TypedReads + ?Sized>(
     Ok(Some(v))
 }
 
-/// What a partition's cursors say about its backlog. `floor` is the committed
+/// What a partition's cursors say about its backlog. `own` is the committed
 /// offset its pending counts from: the slowest named group's, the queue-mode
-/// cursor's when no group reads it, `-1` when nothing does.
+/// cursor's when no group reads it, `None` when it has no cursor (then
+/// [`stats::fold`] says what counts).
 struct Backlog {
-    floor: i64,
+    own: Option<i64>,
     /// What live leases hold, not yet capped at the pending.
     processing: i64,
     consumed: u64,
@@ -2506,7 +2522,7 @@ fn backlog<R: TypedReads + ?Sized>(r: &R, pid: crate::rsm::effect::Pid, now: i64
         true
     });
     Backlog {
-        floor: named_min.or(queue_min).unwrap_or(-1),
+        own: named_min.or(queue_min),
         processing,
         consumed,
         last_activity,
@@ -2536,8 +2552,9 @@ fn top_partitions<R: TypedReads + ?Sized>(
             vec![q.to_string()]
         }
         None => {
+            // A filtered group's partitions count in its source's.
             let mut qs = Vec::new();
-            r.scan_queues(tenant, usize::MAX, &mut |name, _| {
+            crate::rsm::route::scan_visible(r, tenant, &mut |name, _| {
                 qs.push(name.to_string());
                 true
             })?;
@@ -2546,9 +2563,12 @@ fn top_partitions<R: TypedReads + ?Sized>(
     };
     let mut walked = 0usize;
     let mut truncated = false;
-    // (pending, processing, floor, queue index, pid, row)
+    // (pending, processing, where its lag is read, queue index, row): the lag
+    // of the oldest message something has not consumed, here from its own
+    // floor and in its filtered groups' partitions.
     let mut rows = Vec::new();
     'queues: for (qi, name) in queues.iter().enumerate() {
+        let readers = stats::Consumers::of(r, tenant, name)?;
         let mut pids = Vec::new();
         r.scan_queue_partitions(
             tenant,
@@ -2568,38 +2588,56 @@ fn top_partitions<R: TypedReads + ?Sized>(
             walked += 1;
             let Some(p) = r.partition(pid)? else { continue };
             let b = backlog(r, pid, now);
-            let pending = p.pending_from(b.floor) as i64;
-            rows.push((pending, b.processing.min(pending), b.floor, qi, pid, p));
+            let share = readers.share(r, tenant, &p.partition, now);
+            let (pending, unread) = stats::fold(&p, name, b.own, &readers, &share);
+            let pending = pending as i64;
+            let processing = (b.processing + share.processing).min(pending);
+            let mut lag_at = share.behind;
+            // Its own messages count from its floor; a partition nothing
+            // reads from its first.
+            let own = b.own.or((readers.own() || unread > 0).then_some(-1));
+            let uuid = p.uuid;
+            let partition = p.partition.clone();
+            if let Some(floor) = own {
+                lag_at.push((pid, p, floor));
+            }
+            rows.push((pending, processing, lag_at, qi, partition, uuid, unread));
         }
     }
     rows.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then_with(|| a.3.cmp(&b.3))
-            .then_with(|| a.5.partition.cmp(&b.5.partition))
+            .then_with(|| a.4.cmp(&b.4))
     });
     rows.truncate(limit);
     let partitions: Vec<Value> = rows
         .into_iter()
-        .map(|(pending, processing, floor, qi, pid, p)| {
+        .map(|(pending, processing, lag_at, qi, partition, uuid, unread)| {
             let oldest = if pending > 0 {
-                let sealed = || {
-                    let mut files = Vec::new();
-                    let _ = r.scan_partition_files(pid, usize::MAX, &mut |f| {
-                        files.push(f);
-                        true
-                    });
-                    files
-                };
-                reads::oldest_unconsumed_us(qlog, reader, tenant, pid, &p, &sealed, floor)
+                lag_at
+                    .iter()
+                    .filter_map(|(pid, p, floor)| {
+                        let sealed = || {
+                            let mut files = Vec::new();
+                            let _ = r.scan_partition_files(*pid, usize::MAX, &mut |f| {
+                                files.push(f);
+                                true
+                            });
+                            files
+                        };
+                        reads::oldest_unconsumed_us(qlog, reader, tenant, *pid, p, &sealed, *floor)
+                    })
+                    .min()
             } else {
                 None
             };
             json!({
                 "queue":queues[qi],
-                "partition":p.partition,
-                "id":uuid_bytes_to_string(&p.uuid),
+                "partition":partition,
+                "id":uuid_bytes_to_string(&uuid),
                 "pending":pending,
                 "processing":processing,
+                "unread":unread,
                 "lagSeconds":oldest.map(|t| ((now - t) as f64 / 1_000_000.0).round().max(0.0) as i64),
             })
         })
@@ -2736,6 +2774,40 @@ pub(super) fn depth_json_limited<R: Reads + ?Sized>(
     let Some(_) = r.queue(tenant, queue)? else {
         return Ok(None);
     };
+    // A filtered group's depth is its hidden queue's: only the messages its
+    // `where` took, under the source's name.
+    if let Some(g) = group.filter(|_| !crate::rsm::route::is_hidden(queue)) {
+        let hidden = crate::rsm::route::hidden_queue(queue, g);
+        let filter = r.queue(tenant, &hidden)?.and_then(|c| {
+            let rt = c.route()?;
+            (rt.hidden_group == g).then(|| {
+                rt.sources
+                    .first()
+                    .map(|s| {
+                        crate::rsm::route::cond::to_text(&crate::rsm::route::compiled(
+                            &s.where_json,
+                        ))
+                    })
+                    .unwrap_or_default()
+            })
+        });
+        if let Some(filter) = filter {
+            let mut v = depth_json_limited(r, tenant, &hidden, Some(g), now, limit)?;
+            if let Some(o) = v.as_mut().and_then(Value::as_object_mut) {
+                o.insert("queue".into(), json!(queue));
+                o.insert("filtered".into(), Value::Bool(true));
+                o.insert("where".into(), Value::String(filter));
+            }
+            return Ok(v);
+        }
+    }
+    // Queue level, its filtered groups' share and what nothing reads count
+    // ([`stats::fold`]).
+    let readers = match group {
+        None => Some(stats::Consumers::of(r, tenant, queue)?),
+        Some(_) => None,
+    };
+    let mut unread_total = 0i64;
     // (partition, pending, processing): small rows, the JSON is built only
     // for the ones listed.
     let mut parts: Vec<(String, i64, i64)> = Vec::new();
@@ -2767,12 +2839,14 @@ pub(super) fn depth_json_limited<R: Reads + ?Sized>(
                     0
                 }
             };
-            let (committed, processing) = if let Some(g) = group {
-                r.cursor(pid, g)
+            let (pending, processing) = if let Some(g) = group {
+                let (committed, processing) = r
+                    .cursor(pid, g)
                     .ok()
                     .flatten()
                     .map(|c| (c.committed, live(&c)))
-                    .unwrap_or((-1, 0))
+                    .unwrap_or((-1, 0));
+                (p.pending_from(committed) as i64, processing)
             } else {
                 let mut named: Option<i64> = None;
                 let mut seen = 0usize;
@@ -2791,9 +2865,12 @@ pub(super) fn depth_json_limited<R: Reads + ?Sized>(
                 if seen < named_groups.len() {
                     named = Some(-1);
                 }
-                (named.or(qm).unwrap_or(-1), proc)
+                let readers = readers.as_ref().expect("read for a queue-level depth");
+                let share = readers.share(r, tenant, &p.partition, now);
+                let (pending, unread) = stats::fold(&p, queue, named.or(qm), readers, &share);
+                unread_total += unread as i64;
+                (pending as i64, proc + share.processing)
             };
-            let pending = p.pending_from(committed) as i64;
             let processing = processing.min(pending);
             parts.push((p.partition.to_string(), pending, processing));
         }
@@ -2814,7 +2891,7 @@ pub(super) fn depth_json_limited<R: Reads + ?Sized>(
         })
         .collect();
     Ok(Some(
-        json!({"queue":queue,"group":group,"pending":pending,"processing":processing,"ready":ready,"partitionsPending":pp,"partitionsReady":pr,"conflation":conflation,"effectivePending":if conflation{pp}else{pending},"effectiveReady":if conflation{pr}else{ready},"partitions":listed,"partitionsTruncated":truncated}),
+        json!({"queue":queue,"group":group,"pending":pending,"processing":processing,"ready":ready,"partitionsPending":pp,"partitionsReady":pr,"conflation":conflation,"effectivePending":if conflation{pp}else{pending},"effectiveReady":if conflation{pr}else{ready},"partitions":listed,"partitionsTruncated":truncated,"unread":unread_total}),
     ))
 }
 

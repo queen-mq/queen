@@ -22,7 +22,10 @@
 //                        and warn when it holds messages that nothing is set up
 //                        to read: no live group, no named group at all, not a
 //                        topic the Kafka facade created, and Settings does not
-//                        say no reader is expected there.
+//                        say no reader is expected there. A source that reading
+//                        queues or filtered groups read warns for its
+//                        `messages.unread` alone: what is on partitions that no
+//                        group of it and no reader can take.
 //
 // Why a named group, in any state, takes the "no reader" alarm away: it is a
 // subscription somebody made, and its own row tells its story — behind, never
@@ -117,9 +120,11 @@ export function ackAttention(name, linesFor, ops = null) {
 
 /**
  * The queues that need you, in the order they were given, each as
- *   { name, sev: 'bad'|'warn', reason: 'lag'|'acks'|'noReader'|'feedDown', lag, pending, deadOnly, ops, readers? }
+ *   { name, sev: 'bad'|'warn', reason: 'lag'|'acks'|'noReader'|'feedDown', lag, pending, deadOnly, ops, readers?, unread? }
  * `lag` is the worst live group's age in seconds; `deadOnly` says the queue has
- * a queue-mode cursor, but it has never consumed; `ops` is the queue's hour
+ * a queue-mode cursor, but it has never consumed; `unread` (a routed source's
+ * noReader only) says `pending` is the part on partitions nothing reads, not
+ * the whole queue; `ops` is the queue's hour
  * (queueOps) when `ops` has it. A queue behind AND failing acks takes the
  * worse of the two, and 'lag' on a tie.
  */
@@ -129,6 +134,10 @@ const FEED_DOWN = new Set(['gone', 'failed', 'quiet', 'never'])
 // A source that reading queues or filtered groups read (`route.readers`,
 // PLAN_ROUTING.md §3.5): they consume what they take, and the source keeps
 // the rest until its retention ends, so nobody popping it is not "no reader".
+// What has no reader there the broker counts: `messages.unread`, the messages
+// on partitions that no group of the queue reads and no reader's where can
+// take (a filtered group on `partition in (...)` that leaves p4 out). A where
+// on the payload or the headers may take a message anywhere: never unread.
 const routeRead = (q) => Array.isArray(q?.route?.readers) && q.route.readers.length > 0
 
 export function queueAttention(queues = [], groups = [], linesFor, ops = null) {
@@ -158,8 +167,15 @@ export function queueAttention(queues = [], groups = [], linesFor, ops = null) {
     if ((RANK[ackSev] || 0) > (RANK[sev] || 0)) { sev = ackSev; reason = 'acks' }
     if (reason) {
       out.push({ name: q.name, sev, reason, lag, pending, deadOnly: false, ops: hour })
+    } else if (routeRead(q)) {
+      // A feed stream that runs may read those partitions: the broker cannot tell.
+      const unread = num(q.messages?.unread) || 0
+      const feedRuns = (Array.isArray(q.feedReaders) ? q.feedReaders : []).some((r) => !FEED_DOWN.has(r?.status))
+      if (unread > 0 && !feedRuns && q.kafkaTopic !== true && !linesOf(linesFor, q.name)?.noReaderOk) {
+        out.push({ name: q.name, sev: 'warn', reason: 'noReader', lag, pending: unread, unread, deadOnly: false, ops: hour })
+      }
     } else if (pending > 0 && live.length === 0 && !named && q.kafkaTopic !== true
-      && !linesOf(linesFor, q.name)?.noReaderOk && !routeRead(q)) {
+      && !linesOf(linesFor, q.name)?.noReaderOk) {
       // A feed stream reads without a consumer group (queuesStore `feedReaders`):
       // the queue has a reader while one of its streams runs, or was stopped on
       // purpose; when every one is down, nothing reads it.

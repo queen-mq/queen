@@ -1151,7 +1151,10 @@ impl Engine {
     ) -> Result<PopStep> {
         let (ns, task) = (&c.namespace, &c.task);
         let mut queues: Vec<String> = Vec::new();
-        r.scan_queues(&c.tenant, usize::MAX, &mut |name, cfg| {
+        // A filtered group's hidden queue carries its source's namespace and
+        // task, and holds links to the source's messages: a discovery pop that
+        // read it would hand out the same messages a second time.
+        crate::rsm::route::scan_visible(r, &c.tenant, &mut |name, cfg| {
             let ns_ok = ns.is_empty() || cfg.namespace.as_deref() == Some(ns.as_str());
             let task_ok = task.is_empty() || cfg.task.as_deref() == Some(task.as_str());
             if ns_ok && task_ok {

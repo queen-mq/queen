@@ -49,6 +49,26 @@ pub fn shown_name(name: &str) -> &str {
     split_hidden(name).map_or(name, |(q, _)| q)
 }
 
+/// Every queue of `tenant` a client can see, in name order, into `cb`, and
+/// how many it saw. A filtered group's hidden queue is part of its group,
+/// never a queue of its own: a listing, a count or a walk over "every queue"
+/// skips it. The figures of its source count it, as the group's.
+pub fn scan_visible<R: crate::rsm::store::TypedReads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    cb: &mut dyn FnMut(&str, QueueConfig) -> bool,
+) -> crate::rsm::store::Result<usize> {
+    let mut n = 0usize;
+    r.scan_queues(tenant, usize::MAX, &mut |name, cfg| {
+        if is_hidden(name) {
+            return true;
+        }
+        n += 1;
+        cb(name, cfg)
+    })?;
+    Ok(n)
+}
+
 /// The most queues reading one source, by default (`QUEEN_MAX_READERS_PER_QUEUE`):
 /// each costs an evaluation of its `where` on every push.
 pub fn max_readers_per_queue() -> usize {

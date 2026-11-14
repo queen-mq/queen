@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use crate::rsm::effect::{Pid, QueueConfig};
 use crate::rsm::qlog::set::QLogReader;
+use crate::rsm::route::{self, cond};
 use crate::rsm::store::heed_store::HeedStore;
 use crate::rsm::store::keys::{self, Counter};
 use crate::rsm::store::rows::{self, PartitionRow};
@@ -80,8 +81,12 @@ pub(super) struct Figures {
     pub segments: i64,
     /// Messages the partitions hold.
     pub total: i64,
-    /// Not consumed by the slowest cursor, leased ones included.
+    /// Not consumed by the slowest cursor, leased ones included: its own
+    /// groups' and its filtered groups' ([`fold`]), and every unread message.
     pub pending: i64,
+    /// On partitions that nothing reads ([`Consumers`]): a subset of
+    /// `pending` that no consumer will ever take.
+    pub unread: i64,
     /// Inside a live lease (a subset of `pending`).
     pub processing: i64,
     /// Lifetime deliveries across all partition cursors.
@@ -93,6 +98,182 @@ pub(super) struct Figures {
     pub lag_age_s: i64,
     /// When they were read (wall micros); 0 for an estimate.
     pub at_us: i64,
+    /// Partition rows the walk read: the queue's own and its filtered
+    /// groups' (what the read budget counts).
+    pub cost: i64,
+}
+
+impl Figures {
+    /// What a walk of the queue costs the read budget, in partition rows.
+    pub(super) fn weight(&self) -> u64 {
+        self.cost.max(self.parts).max(0) as u64
+    }
+}
+
+/// Who reads a queue, as its figures count it.
+///
+/// - Its own groups (a named one, or queue mode): they read every partition.
+/// - Its filtered groups: each is a hidden queue with the source's partition
+///   names (PLAN_ROUTING.md §4.3), and the API names the source and the
+///   group, so their backlog is the source's. A filtered group's lag and
+///   backlog are only the messages its `where` took (§4.2).
+/// - Every reader's conditions on it (filtered groups and reading queues): a
+///   reading queue's backlog is its own queue's, but what it may take is not
+///   unread here.
+///
+/// A partition that no group of the queue reads, and that no reader's
+/// conditions can take a message of ([`cond::may_hold_in`]), is UNREAD:
+/// nothing will ever consume its messages. A queue nobody consumes at all is
+/// unread through and through, as its pending always said.
+#[derive(Default)]
+pub(super) struct Consumers {
+    own: bool,
+    /// `(hidden queue, group)` of each filtered group.
+    filtered: Vec<(String, String)>,
+    wheres: Vec<Arc<Vec<cond::Cond>>>,
+}
+
+impl Consumers {
+    pub(super) fn of<R: TypedReads + ?Sized>(
+        r: &R,
+        tenant: &str,
+        queue: &str,
+    ) -> Result<Consumers, StoreError> {
+        let mut c = Consumers::default();
+        r.scan_groups(tenant, queue, 1, &mut |_, _| {
+            c.own = true;
+            false
+        })?;
+        let Some(cfg) = r.queue(tenant, queue)? else {
+            return Ok(c);
+        };
+        let Some(rt) = cfg.route() else {
+            return Ok(c);
+        };
+        for reader in &rt.readers {
+            let Some(rc) = r.queue(tenant, reader)? else {
+                continue;
+            };
+            let Some(rr) = rc.route() else { continue };
+            for s in rr.sources.iter().filter(|s| s.queue == queue) {
+                c.wheres.push(route::compiled(&s.where_json));
+            }
+            if !rr.hidden_group.is_empty() {
+                c.filtered.push((reader.clone(), rr.hidden_group.clone()));
+            }
+        }
+        Ok(c)
+    }
+
+    /// Whether the queue has a consumer group of its own.
+    pub(super) fn own(&self) -> bool {
+        self.own
+    }
+
+    /// Partition rows one partition of the queue costs a walk.
+    pub(super) fn weight(&self) -> usize {
+        1 + self.filtered.len()
+    }
+
+    /// The filtered groups' `(hidden queue, group)`.
+    pub(super) fn filtered(&self) -> &[(String, String)] {
+        &self.filtered
+    }
+
+    /// Whether a group of the queue, or a reader of it, may take a message of
+    /// `partition`.
+    fn reads(&self, queue: &str, partition: &str) -> bool {
+        self.own
+            || self
+                .wheres
+                .iter()
+                .any(|w| cond::may_hold_in(w, queue, partition))
+    }
+
+    /// What the filtered groups hold for source partition `partition`: each
+    /// one's partition of the same name in its hidden queue.
+    pub(super) fn share<R: TypedReads + ?Sized>(
+        &self,
+        r: &R,
+        tenant: &str,
+        partition: &str,
+        now: i64,
+    ) -> Share {
+        let mut s = Share::default();
+        for (hidden, group) in &self.filtered {
+            let Ok(Some(hpid)) = r.pid_of(tenant, hidden, partition) else {
+                continue;
+            };
+            let Ok(Some(hp)) = r.partition(hpid) else {
+                continue;
+            };
+            s.reads += 1;
+            let cursor = r.cursor(hpid, group).ok().flatten();
+            let committed = cursor.as_ref().map_or(-1, |c| c.committed);
+            let pending = hp.pending_from(committed);
+            if let Some(c) = &cursor {
+                if rows::lease_live(c, now) {
+                    s.processing += c
+                        .batch_end
+                        .map(|end| (end as i64 - c.committed).max(0))
+                        .unwrap_or(0);
+                }
+                s.consumed = s.consumed.saturating_add(c.total_consumed);
+                s.last_activity = s.last_activity.max(c.lease_acquired_at_us);
+            }
+            s.pending = s.pending.max(pending);
+            if pending > 0 {
+                s.behind.push((hpid, hp, committed));
+            }
+        }
+        s
+    }
+}
+
+/// What a source partition's filtered groups hold for it ([`Consumers::share`]).
+#[derive(Default)]
+pub(super) struct Share {
+    /// The most one filtered group has not consumed there.
+    pub pending: u64,
+    /// What their live leases hold, not yet capped at the pending.
+    pub processing: i64,
+    pub consumed: u64,
+    /// The latest lease one of them took there.
+    pub last_activity: Option<i64>,
+    /// `(pid, row, committed)` of each hidden partition with something
+    /// pending: the lag's stamps are read there.
+    pub behind: Vec<(Pid, PartitionRow, i64)>,
+    /// Hidden partition rows read.
+    pub reads: i64,
+}
+
+/// One partition's `(pending, unread)` once its filtered groups and what
+/// nothing reads count. `own_floor` is the committed offset its own cursors
+/// count from (`None`: it has none), as the caller counts it.
+///
+/// A partition with no cursor of its own counts every message when the queue
+/// has a group of its own (it will read them), and nothing of its own when it
+/// has none: what its filtered groups still have counts then, and, where no
+/// reader can take a message either, every message, as unread. A queue with
+/// no reader counts exactly as before.
+pub(super) fn fold(
+    p: &PartitionRow,
+    queue: &str,
+    own_floor: Option<i64>,
+    c: &Consumers,
+    share: &Share,
+) -> (u64, u64) {
+    let own = match own_floor {
+        Some(floor) => p.pending_from(floor),
+        None if c.own => p.pending_from(-1),
+        None => 0,
+    };
+    let unread = if own_floor.is_none() && !c.reads(queue, &p.partition) {
+        p.pending_from(-1)
+    } else {
+        0
+    };
+    (own.max(share.pending).max(unread), unread)
 }
 
 /// What the lag figures read besides the store: the stamps of the oldest
@@ -114,11 +295,63 @@ pub(super) struct QueueStat {
     pub exact: bool,
 }
 
-/// Add one partition to `f`.
+/// The age in seconds of the oldest message a cursor at `committed` has not
+/// consumed on `pid`, into the overview's lag inputs.
+#[allow(clippy::too_many_arguments)]
+fn add_lag<R: TypedReads + ?Sized>(
+    f: &mut Figures,
+    r: &R,
+    l: &LagReads,
+    tenant: &str,
+    pid: Pid,
+    p: &PartitionRow,
+    committed: i64,
+    sealed: &mut Option<Vec<u32>>,
+    now: i64,
+) {
+    let pending = p.pending_from(committed);
+    f.lag_pending = f.lag_pending.max(pending);
+    if pending == 0 {
+        return;
+    }
+    // The segment path needs the partition's sealed files; the queue log
+    // answers from its index.
+    let files = match &l.qlog {
+        Some(_) => Vec::new(),
+        None => sealed
+            .get_or_insert_with(|| {
+                let mut v = Vec::new();
+                let _ = r.scan_partition_files(pid, usize::MAX, &mut |x| {
+                    v.push(x);
+                    true
+                });
+                v
+            })
+            .clone(),
+    };
+    if let Some(t) = super::reads::oldest_unconsumed_us(
+        l.qlog.as_ref(),
+        &l.reader,
+        tenant,
+        pid,
+        p,
+        &|| files.clone(),
+        committed,
+    ) {
+        let age = ((now - t) as f64 / 1_000_000.0).round() as i64;
+        f.lag_age_s = f.lag_age_s.max(age);
+    }
+}
+
+/// Add one partition of `queue` to `f`, with what its filtered groups hold
+/// for it and what nothing reads ([`fold`]).
+#[allow(clippy::too_many_arguments)]
 fn add_partition<R: TypedReads + ?Sized>(
     f: &mut Figures,
     r: &R,
     tenant: &str,
+    queue: &str,
+    readers: &Consumers,
     pid: Pid,
     p: &PartitionRow,
     now: i64,
@@ -146,42 +379,22 @@ fn add_partition<R: TypedReads + ?Sized>(
                 .unwrap_or(0);
         }
         if let Some(l) = lag {
-            let pending = p.pending_from(c.committed);
-            f.lag_pending = f.lag_pending.max(pending);
-            if pending > 0 {
-                // The segment path needs the partition's sealed files; the
-                // queue log answers from its index.
-                let files = match &l.qlog {
-                    Some(_) => Vec::new(),
-                    None => sealed
-                        .get_or_insert_with(|| {
-                            let mut v = Vec::new();
-                            let _ = r.scan_partition_files(pid, usize::MAX, &mut |x| {
-                                v.push(x);
-                                true
-                            });
-                            v
-                        })
-                        .clone(),
-                };
-                if let Some(t) = super::reads::oldest_unconsumed_us(
-                    l.qlog.as_ref(),
-                    &l.reader,
-                    tenant,
-                    pid,
-                    p,
-                    &|| files.clone(),
-                    c.committed,
-                ) {
-                    let age = ((now - t) as f64 / 1_000_000.0).round() as i64;
-                    f.lag_age_s = f.lag_age_s.max(age);
-                }
-            }
+            add_lag(f, r, l, tenant, pid, p, c.committed, &mut sealed, now);
         }
     }
-    let pending = p.pending_from(named_min.or(queue_mode).unwrap_or(-1)) as i64;
+    let share = readers.share(r, tenant, &p.partition, now);
+    if let Some(l) = lag {
+        for (hpid, hp, committed) in &share.behind {
+            add_lag(f, r, l, tenant, *hpid, hp, *committed, &mut None, now);
+        }
+    }
+    let (pending, unread) = fold(p, queue, named_min.or(queue_mode), readers, &share);
+    let pending = pending as i64;
     f.pending += pending;
-    f.processing += processing.min(pending);
+    f.unread += unread as i64;
+    f.processing += (processing + share.processing).min(pending);
+    f.consumed = f.consumed.saturating_add(share.consumed);
+    f.cost += 1 + share.reads;
     let sealed_n = match &sealed {
         Some(v) => v.len() as i64,
         None => {
@@ -198,8 +411,9 @@ fn add_partition<R: TypedReads + ?Sized>(
     f.segments += sealed_n + i64::from(p.last_offset >= p.log_start as i64);
 }
 
-/// One queue's figures, walking at most `budget` of its partitions: `None`
-/// when it has more.
+/// One queue's figures, walking at most `budget` partition rows (its own and
+/// its filtered groups', [`Consumers::weight`] per partition): `None` when it
+/// has more.
 pub(super) fn walk_queue<R: TypedReads + ?Sized>(
     r: &R,
     tenant: &str,
@@ -208,8 +422,9 @@ pub(super) fn walk_queue<R: TypedReads + ?Sized>(
     budget: u64,
     lag: Option<&LagReads>,
 ) -> Result<Option<Figures>, StoreError> {
+    let readers = Consumers::of(r, tenant, queue)?;
+    let cap = usize::try_from(budget).unwrap_or(usize::MAX) / readers.weight();
     let mut pids = Vec::new();
-    let cap = usize::try_from(budget).unwrap_or(usize::MAX);
     r.scan_queue_partitions(tenant, queue, None, cap.saturating_add(1), &mut |pid| {
         pids.push(pid);
         true
@@ -223,25 +438,29 @@ pub(super) fn walk_queue<R: TypedReads + ?Sized>(
     };
     for pid in pids {
         if let Some(p) = r.partition(pid)? {
-            add_partition(&mut f, r, tenant, pid, &p, now, lag);
+            add_partition(&mut f, r, tenant, queue, &readers, pid, &p, now, lag);
         }
     }
     Ok(Some(f))
 }
 
 /// A queue never walked: its slowest group's pending count from the group
-/// counters (a named group's, else the queue-mode group's), nothing else.
+/// counters (a named group's, a filtered group's, else the queue-mode
+/// group's), nothing else.
 fn estimate<R: TypedReads + ?Sized>(r: &R, tenant: &str, queue: &str) -> Figures {
-    let mut groups = Vec::new();
+    let mut groups: Vec<(String, String)> = Vec::new();
     let _ = r.scan_groups(tenant, queue, usize::MAX, &mut |g, _| {
-        groups.push(g.to_string());
+        groups.push((queue.to_string(), g.to_string()));
         true
     });
+    if let Ok(readers) = Consumers::of(r, tenant, queue) {
+        groups.extend(readers.filtered().iter().cloned());
+    }
     let mut named: Option<i64> = None;
     let mut queue_mode: Option<i64> = None;
-    for g in groups {
+    for (q, g) in groups {
         let v = r
-            .group_counter(tenant, queue, &g, Counter::Pending)
+            .group_counter(tenant, &q, &g, Counter::Pending)
             .unwrap_or(0);
         let slot = if g == QUEUE_MODE {
             &mut queue_mode
@@ -267,7 +486,7 @@ pub(super) fn tenant_stats<R: TypedReads + ?Sized>(
     known: Option<&StoreStats>,
 ) -> Result<Vec<QueueStat>, StoreError> {
     let mut queues = Vec::new();
-    r.scan_queues(tenant, usize::MAX, &mut |name, cfg| {
+    route::scan_visible(r, tenant, &mut |name, cfg| {
         queues.push((name.to_string(), cfg));
         true
     })?;
@@ -278,12 +497,12 @@ pub(super) fn tenant_stats<R: TypedReads + ?Sized>(
         // A queue its last walk found too big for what is left is not
         // walked again here.
         let walked = match last {
-            Some(l) if l.parts as u64 > left => None,
+            Some(l) if l.weight() > left => None,
             _ => walk_queue(r, tenant, &name, now, left, lag)?,
         };
         let (fig, exact) = match walked {
             Some(f) => {
-                left -= f.parts as u64;
+                left = left.saturating_sub(f.weight());
                 if let Some(k) = known {
                     k.remember(tenant, &name, f);
                 }
@@ -315,7 +534,7 @@ pub(super) fn queue_figures<R: TypedReads + ?Sized>(
 ) -> Result<(Figures, bool), StoreError> {
     let last = known.recall(tenant, queue);
     let walked = match last {
-        Some(f) if f.parts as u64 > budget => None,
+        Some(f) if f.weight() > budget => None,
         _ => walk_queue(r, tenant, queue, now, budget, None)?,
     };
     if let Some(f) = walked {
@@ -338,7 +557,8 @@ pub(super) fn backlogs<R: TypedReads + ?Sized>(
     budget: u64,
     known: Option<&StoreStats>,
 ) -> Result<(Vec<Backlog>, bool), StoreError> {
-    let queues = all_queues(r)?;
+    // A filtered group's hidden queue counts in its source's figures.
+    let queues = visible_queues(r)?;
     let split = |pending: i64, processing: i64| ((pending - processing).max(0), processing);
     let mut out: Vec<Backlog> = Vec::new();
     let mut total: Option<(String, i64, i64, usize)> = None;
@@ -358,12 +578,12 @@ pub(super) fn backlogs<R: TypedReads + ?Sized>(
         }
         let last = known.and_then(|k| k.recall(&tenant, &queue));
         let walked = match last {
-            Some(l) if l.parts as u64 > left => None,
+            Some(l) if l.weight() > left => None,
             _ => walk_queue(r, &tenant, &queue, now, left, None)?,
         };
         let f = match walked {
             Some(f) => {
-                left -= f.parts as u64;
+                left = left.saturating_sub(f.weight());
                 f
             }
             None => {
@@ -385,6 +605,16 @@ pub(super) fn backlogs<R: TypedReads + ?Sized>(
         out[at] = (t, String::new(), p, q);
     }
     Ok((out, all))
+}
+
+/// [`all_queues`] without the hidden queues of filtered groups: the queues a
+/// client can see, whose figures count their filtered groups' ([`fold`]).
+pub(super) fn visible_queues<R: Reads + ?Sized>(
+    r: &R,
+) -> Result<Vec<(String, String)>, StoreError> {
+    let mut queues = all_queues(r)?;
+    queues.retain(|(_, q)| !route::is_hidden(q));
+    Ok(queues)
 }
 
 /// Every (tenant, queue) of the store, a tenant's queues side by side.
@@ -501,7 +731,7 @@ fn sample(s: Arc<StoreStats>) {
             s.running.store(false, Ordering::Release);
             return;
         };
-        let queues = store.read(|r| all_queues(r));
+        let queues = store.read(|r| visible_queues(r));
         drop(store);
         let queues = match queues {
             Ok(q) => q,
@@ -543,7 +773,9 @@ fn walk_paced(s: &StoreStats, tenant: &str, queue: &str, rate: u64) -> Option<Fi
         let store = s.store.upgrade()?;
         let t0 = Instant::now();
         let now = wall_us();
+        let cost_before = f.cost;
         let chunk = store.read(|r| {
+            let readers = Consumers::of(r, tenant, queue)?;
             let mut pids = Vec::with_capacity(CHUNK);
             r.scan_queue_partitions(tenant, queue, from, CHUNK, &mut |pid| {
                 pids.push(pid);
@@ -551,7 +783,17 @@ fn walk_paced(s: &StoreStats, tenant: &str, queue: &str, rate: u64) -> Option<Fi
             })?;
             for &pid in &pids {
                 if let Some(p) = r.partition(pid)? {
-                    add_partition(&mut f, r, tenant, pid, &p, now, lag.as_ref());
+                    add_partition(
+                        &mut f,
+                        r,
+                        tenant,
+                        queue,
+                        &readers,
+                        pid,
+                        &p,
+                        now,
+                        lag.as_ref(),
+                    );
                 }
             }
             Ok(pids.last().copied().map(|last| (pids.len(), last)))
@@ -567,7 +809,9 @@ fn walk_paced(s: &StoreStats, tenant: &str, queue: &str, rate: u64) -> Option<Fi
         let Some((n, last)) = chunk else {
             break;
         };
-        let want = Duration::from_secs_f64(n as f64 / rate as f64);
+        // Paced by the rows read: a filtered group's partitions count.
+        let read = (f.cost - cost_before).max(n as i64);
+        let want = Duration::from_secs_f64(read as f64 / rate as f64);
         if let Some(rest) = want.checked_sub(t0.elapsed()) {
             std::thread::sleep(rest);
         }
@@ -948,6 +1192,157 @@ mod tests {
         };
         assert_eq!((got.parts, got.total, got.pending), (2, 2, 2));
         assert!(got.at_us > 0);
+        drop(known);
+        f.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A source its filtered group read: `src`, p1 to p3 with two messages
+    /// each; group `g` takes p1 and consumed one of its two, nothing reads p2
+    /// and p3. Past the budget the source is estimated from its groups'
+    /// counters, the filtered group's among them; the sampler counts the
+    /// group's share in the source's figures and never keeps the hidden
+    /// queue's as a queue of its own.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_filtered_groups_share_counts_in_the_estimate_and_the_sampler() {
+        let (f, dir) = facade("filtered");
+        let pop = |where_filter: Option<&str>, batch: u32| {
+            f.pop_wildcard(
+                ctx(),
+                PopReq {
+                    queue: "src".into(),
+                    group: Some("g".into()),
+                    batch,
+                    auto_ack: false,
+                    wait: false,
+                    timeout_ms: 1000,
+                    options: crate::rsm::facade::PopOptions {
+                        max_parts: 64,
+                        subscription_mode: "new".into(),
+                        where_filter: where_filter.map(str::to_string),
+                        ..Default::default()
+                    },
+                },
+            )
+        };
+        // Routing needs every member at catalogue version 8; a write raises it.
+        let until = Instant::now() + Duration::from_secs(10);
+        while !f.cluster_allows(crate::rsm::effect::VERSION_8) {
+            assert!(
+                Instant::now() < until,
+                "the cluster version never reached 8"
+            );
+            let _ = f
+                .push(
+                    ctx(),
+                    PushReq {
+                        raw: br#"{"items":[{"queue":"src","partition":"p1","transactionId":"w","payload":0}]}"#
+                            .to_vec(),
+                    },
+                )
+                .await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            pop(Some("partition = 'p1'"), 10)
+                .await
+                .expect("register")
+                .empty
+        );
+        let items: Vec<String> = (1..=3)
+            .flat_map(|p| {
+                (0..2).map(move |i| {
+                    format!(r#"{{"queue":"src","partition":"p{p}","transactionId":"t{p}-{i}","payload":{i}}}"#)
+                })
+            })
+            .collect();
+        f.push(
+            ctx(),
+            PushReq {
+                raw: format!(r#"{{"items":[{}]}}"#, items.join(",")).into_bytes(),
+            },
+        )
+        .await
+        .expect("push");
+        let tenant = crate::config::DEFAULT_TENANT;
+        let hidden = route::hidden_queue("src", "g");
+        // The warmup message landed before the group: p1 holds three.
+        let one = loop {
+            let out = pop(None, 1).await.expect("pop");
+            if !out.empty {
+                break out;
+            }
+            assert!(Instant::now() < until, "g's links never came");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let v: serde_json::Value = serde_json::from_str(&one.body).expect("json");
+        let m = &v["messages"][0];
+        f.ack(
+            ctx(),
+            crate::rsm::facade::AckReq {
+                queue: None,
+                group: "g".into(),
+                raw: serde_json::json!({
+                    "acknowledgments": [{
+                        "transactionId": m["transactionId"],
+                        "partitionId": m["partitionId"],
+                        "leaseId": m["leaseId"],
+                        "status": "completed",
+                    }],
+                    "consumerGroup": "g",
+                })
+                .to_string()
+                .into_bytes(),
+            },
+        )
+        .await
+        .expect("ack");
+        // Walked: g has one of p1's left; p2 and p3 are unread.
+        let walked = loop {
+            let all = f
+                .store
+                .read(|r| tenant_stats(r, tenant, wall_us(), 100, None, None))
+                .expect("read");
+            assert!(!all.iter().any(|s| route::is_hidden(&s.name)));
+            let s = all.iter().find(|s| s.name == "src").expect("src").fig;
+            if s.pending == 5 {
+                break s;
+            }
+            assert!(Instant::now() < until, "the ack never applied: {s:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!((walked.total, walked.pending, walked.unread), (7, 5, 4));
+        assert_eq!(walked.consumed, 1);
+        // Never walked: the counters say what g has not consumed.
+        let blank = StoreStats {
+            store: Arc::downgrade(&f.store),
+            figures: RwLock::new(HashMap::new()),
+            last_read: AtomicI64::new(0),
+            running: AtomicBool::new(false),
+            lag: Mutex::new(None),
+        };
+        let estimated = f
+            .store
+            .read(|r| tenant_stats(r, tenant, wall_us(), 0, None, Some(&blank)))
+            .expect("read");
+        let s = estimated.iter().find(|s| s.name == "src").expect("src");
+        assert!(!s.exact);
+        assert_eq!(s.fig.pending, 1, "g's pending counter");
+        // The sampler: the source's figures with g's share, no hidden queue.
+        let known = stats_for(&f.store);
+        known.wake(None);
+        let got = loop {
+            if let Some(g) = known.recall(tenant, "src").filter(|g| g.pending == 5) {
+                break g;
+            }
+            assert!(
+                Instant::now() < until + Duration::from_secs(10),
+                "the sampler walked"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!((got.pending, got.unread, got.cost), (5, 4, 4));
+        assert!(known.recall(tenant, &hidden).is_none());
         drop(known);
         f.shutdown().await;
         let _ = std::fs::remove_dir_all(dir);

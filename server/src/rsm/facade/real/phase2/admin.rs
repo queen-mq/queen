@@ -678,7 +678,7 @@ impl RaftFacade {
                 Ok((
                     r.applied_index()?,
                     r.durable_index()?,
-                    r.scan_queues(&tenant, usize::MAX, &mut |_, _| true)?,
+                    crate::rsm::route::scan_visible(r, &tenant, &mut |_, _| true)?,
                 ))
             })
         })
@@ -1016,7 +1016,7 @@ impl RaftFacade {
         let mut rows = tokio::task::spawn_blocking(move || {
             store.read(|r| {
                 let mut qs = Vec::new();
-                r.scan_queues(&tenant, usize::MAX, &mut |name, cfg| {
+                crate::rsm::route::scan_visible(r, &tenant, &mut |name, cfg| {
                     qs.push((name.to_string(), cfg));
                     true
                 })?;

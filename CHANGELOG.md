@@ -35,6 +35,18 @@ of a queue that does not exist creates it, so a consumer that started before the
 made the name an ordinary queue, which could never become the reading queue it was waiting for
 (found by the Jepsen tests).
 
+**Lag and backlog with filtered groups, and `unread`.** A filtered group's lag and depth count only
+the messages its `where` took, on the partitions it took them from, under its queue's name
+(the group listings, `/depth?group=`, `queen_consumer_group_lag_*`). A queue's `pending` is,
+partition by partition, the most that one of its groups, its own or filtered, has not consumed,
+plus every unread message. `unread` is new: the messages on partitions that no group of the queue
+reads and no reader's `where` can take (`messages.unread` on the queue list and the overview,
+`totals.unread` and each partition's `unread` on a queue's page, `unread` on `/depth`); the
+console marks such a queue "No reader". A filtered group's own storage shows in no listing, chart
+or metric, and a pop by namespace or task hands a filtered group's messages out once. Why: a
+filtered group that counted the whole queue as its lag would look behind for ever, and the
+partitions nothing reads are the gap worth seeing.
+
 **Headers.** A message can carry headers, a map of strings stored in clear beside its payload
 (`headers: { type: 'order.paid', traceparent: '...' }`), returned by pop, fetch, the feed and the
 message browser, readable by a `where` without the payload (so on an encrypted queue too). A timer

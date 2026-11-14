@@ -99,6 +99,25 @@ test('a queue a feed stream reads is not unread for having no consumer group', (
   assert.deepEqual(queueAttention([{ ...q('orders', 83), feedReaders: [] }], []).map((i) => i.reason), ['noReader'])
 })
 
+test('a source its filtered groups read has no reader only where the broker counts unread', () => {
+  const routed = (unread, more = {}) => ({
+    name: 'orders', messages: { pending: 40, unread }, route: { readers: [{ queue: 'orders', group: 'billing' }] }, ...more,
+  })
+  // Its groups read p1 to p90; p91 to p100 hold 10 that nothing reads.
+  const out = queueAttention([routed(10)], [g('orders', 5)])
+  assert.deepEqual(out.map((i) => [i.name, i.sev, i.reason, i.pending, i.unread]), [['orders', 'warn', 'noReader', 10, 10]])
+  // Every partition read (or a where on the payload, which may take any): nothing to say.
+  assert.deepEqual(queueAttention([routed(0)], [g('orders', 5)]), [])
+  assert.deepEqual(queueAttention([{ ...routed(0), messages: { pending: 40 } }], []), [])
+  // A group behind says so first; lines that expect no reader, a running feed stream or a Kafka topic let it off.
+  assert.deepEqual(queueAttention([routed(10)], [g('orders', 400)]).map((i) => i.reason), ['lag'])
+  const linesFor = () => ({ ...THRESHOLDS, noReaderOk: true })
+  assert.deepEqual(queueAttention([routed(10)], [], linesFor), [])
+  assert.deepEqual(queueAttention([routed(10, { feedReaders: [{ name: 'copy', status: 'running' }] })], []), [])
+  assert.deepEqual(queueAttention([routed(10, { feedReaders: [{ name: 'copy', status: 'gone' }] })], []).map((i) => i.reason), ['noReader'])
+  assert.deepEqual(queueAttention([routed(10, { kafkaTopic: true })], []), [])
+})
+
 test('"no reader expected" still lets a native queue off', () => {
   const linesFor = (queue) => (queue === 'audit' ? { ...THRESHOLDS, noReaderOk: true } : THRESHOLDS)
   assert.deepEqual(queueAttention([q('audit', 83)], [], linesFor), [])

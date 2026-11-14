@@ -348,6 +348,26 @@ pub fn all_hold(conds: &[Cond], s: &Subject<'_>) -> bool {
     conds.iter().all(|c| holds(c, s))
 }
 
+/// Whether a message of partition `partition` of `queue` can meet `conds`
+/// at all. The conditions on the queue and the partition decide; any other
+/// reads the message itself, so it may hold. Conditions are ANDed: one on
+/// the partition that fails rules the whole partition out.
+///
+/// It tells a partition that a reader will never take anything from (a
+/// filtered group that reads `partition in ('p1', 'p2')` and partition p4)
+/// from one where a reader takes what it wants (`data.kind = 'paid'`).
+pub fn may_hold_in(conds: &[Cond], queue: &str, partition: &str) -> bool {
+    let s = Subject {
+        queue,
+        partition,
+        ..Subject::default()
+    };
+    conds.iter().all(|c| match c.field {
+        Field::Queue | Field::Partition => holds(c, &s),
+        _ => true,
+    })
+}
+
 fn json_eq(a: &Value, b: &Value) -> bool {
     match (a.as_f64(), b.as_f64()) {
         (Some(x), Some(y)) if a.is_number() && b.is_number() => x == y,
@@ -679,6 +699,28 @@ mod tests {
             max_in: 64,
             positions: false,
         }
+    }
+
+    #[test]
+    fn only_the_queue_and_partition_conditions_rule_a_partition_out() {
+        let on = |w: &str, p: &str| may_hold_in(&parse_text(w, &r()).unwrap(), "orders", p);
+        assert!(on("partition in ('p1', 'p2')", "p1"));
+        assert!(!on("partition in ('p1', 'p2')", "p4"));
+        assert!(on("partition = 'p3'", "p3"));
+        assert!(!on("partition = 'p3'", "p30"));
+        assert!(on("partition prefix 'eu-' and data.kind = 'paid'", "eu-7"));
+        assert!(!on("partition prefix 'eu-' and data.kind = 'paid'", "us-7"));
+        assert!(!on(
+            "partition !prefix 'test-' and headers.type exists",
+            "test-1"
+        ));
+        // What the message holds decides at push time: it may hold anywhere.
+        assert!(on("data.kind = 'paid'", "p4"));
+        assert!(on("headers.type exists and transactionId prefix 'x'", "p4"));
+        assert!(!on("queue = 'refunds'", "p1"));
+        assert!(on("queue = 'orders'", "p1"));
+        // No condition takes everything.
+        assert!(may_hold_in(&[], "orders", "p1"));
     }
 
     #[test]

@@ -314,7 +314,7 @@ async fn headers_come_back_on_pop_fetch_and_the_feed() {
     )
     .await;
     assert_eq!(status, 200, "{fed}");
-    assert!(!fed.to_string().contains('\u{1}'), "{fed}");
+    assert!(!shows_hidden(&fed), "{fed}");
     let es = fed["entries"].as_array().expect("entries");
     let t1 = es.iter().find(|e| e["transactionId"] == "t1").expect("t1");
     assert_eq!(t1["headers"]["type"], "order.paid", "{t1}");
@@ -952,7 +952,7 @@ async fn a_filtered_group_gets_only_what_its_where_takes() {
         Value::Null,
     )
     .await;
-    assert!(!list.to_string().contains('\u{1}'), "{list}");
+    assert!(!shows_hidden(&list), "{list}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
@@ -1014,7 +1014,7 @@ async fn a_filtered_group_says_so_on_every_pop_and_in_every_listing() {
     assert_eq!(got.len(), 1);
     // Listings name the source and the where, never the hidden queue.
     let (_, groups) = api(&facade, "GET", "/api/v1/consumer-groups", None, Value::Null).await;
-    assert!(!groups.to_string().contains('\u{1}'), "{groups}");
+    assert!(!shows_hidden(&groups), "{groups}");
     let row = groups
         .as_array()
         .and_then(|a| a.iter().find(|r| r["name"] == "billing"))
@@ -1512,5 +1512,570 @@ async fn a_dead_letter_keeps_its_headers_and_its_replay_too() {
     assert_eq!(
         back[0]["headers"],
         json!({"traceparent":"00-ab","type":"job"})
+    );
+}
+
+// ------------------------------------------- lag and figures of a source
+
+/// Whether a hidden queue's name shows anywhere in `v`: its separator, in a
+/// key or a string (a body that did not parse keeps the escaped form).
+fn shows_hidden(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s.contains('\u{1}') || s.contains("\\u0001"),
+        Value::Array(a) => a.iter().any(shows_hidden),
+        Value::Object(o) => o
+            .iter()
+            .any(|(k, v)| k.contains('\u{1}') || shows_hidden(v)),
+        _ => false,
+    }
+}
+
+/// How many times transaction id `txn` shows in `v`, at any depth.
+fn txn_count(v: &Value, txn: &str) -> usize {
+    match v {
+        Value::Array(a) => a.iter().map(|x| txn_count(x, txn)).sum(),
+        Value::Object(o) => {
+            let here = usize::from(o.get("transactionId").and_then(Value::as_str) == Some(txn));
+            here + o.values().map(|x| txn_count(x, txn)).sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
+/// The source of the lag tests: `lagsrc` (namespace `lagns`), partitions p1
+/// to p4 with two messages each. Filtered group `ga` takes p1 and p2 and has
+/// consumed all four of its messages; `gb` takes p3 and has consumed
+/// nothing; nothing reads p4.
+async fn lag_scenario(tag: &str) -> (RaftFacade, PathBuf) {
+    let (facade, dir) = open(tag).await;
+    let (status, out) = configure(
+        &facade,
+        json!({"queue":"lagsrc","namespace":"lagns","options":{}}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    for (group, filter) in [
+        ("ga", "partition in ('p1', 'p2')"),
+        ("gb", "partition = 'p3'"),
+    ] {
+        let first = pop(
+            &facade,
+            "lagsrc",
+            Some(group),
+            group_options(Some(filter), "new"),
+        )
+        .await
+        .unwrap();
+        assert!(messages(&first).is_empty(), "{first}");
+    }
+    let items: Vec<Value> = (1..=4)
+        .flat_map(|p| {
+            (0..2).map(move |i| {
+                json!({"queue":"lagsrc","partition":format!("p{p}"),"transactionId":format!("t{p}-{i}"),"payload":{"p":p,"i":i}})
+            })
+        })
+        .collect();
+    push(&facade, Value::Array(items)).await;
+    let mut got = 0;
+    for _ in 0..300 {
+        let p = pop(&facade, "lagsrc", Some("ga"), group_options(None, "new"))
+            .await
+            .unwrap();
+        let m = messages(&p);
+        if !m.is_empty() {
+            ack_all(&facade, Some("ga"), &m).await;
+            got += m.len();
+        }
+        if got >= 4 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(got, 4, "ga takes p1 and p2: four messages");
+    // The acks applied: ga's own row (already right) has nothing left.
+    for _ in 0..500 {
+        let (_, one) = api(
+            &facade,
+            "GET",
+            "/api/v1/consumer-groups/ga",
+            None,
+            Value::Null,
+        )
+        .await;
+        let parts = one["lagsrc"]["partitions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if parts.len() == 2 && parts.iter().all(|p| p["offsetLag"] == 0) {
+            return (facade, dir);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("ga's acks never applied");
+}
+
+/// The queue list's row of `queue`.
+async fn listed(facade: &RaftFacade, queue: &str) -> Value {
+    let (_, list) = api(facade, "GET", "/api/v1/resources/queues", None, Value::Null).await;
+    list["queues"]
+        .as_array()
+        .and_then(|a| a.iter().find(|q| q["name"] == queue))
+        .cloned()
+        .unwrap_or_else(|| panic!("{queue} not listed: {list}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_source_counts_what_its_filtered_groups_still_have_and_what_nothing_reads() {
+    let (facade, _dir) = lag_scenario("lag-list").await;
+    let row = listed(&facade, "lagsrc").await;
+    // ga's four are consumed; gb's two (p3) wait for gb; p4's two wait for
+    // nobody: unread, and pending too, as every message nobody consumed.
+    assert_eq!(row["partitions"], 4, "{row}");
+    assert_eq!(row["messages"]["total"], 8, "{row}");
+    assert_eq!(row["messages"]["pending"], 4, "{row}");
+    assert_eq!(row["messages"]["unread"], 2, "{row}");
+    assert_eq!(row["messages"]["completed"], 4, "{row}");
+    // The overview and the label rows add up the queues the list shows: the
+    // hidden queues are the groups', not queues of their own.
+    let (_, list) = api(
+        &facade,
+        "GET",
+        "/api/v1/resources/queues",
+        None,
+        Value::Null,
+    )
+    .await;
+    let rows = list["queues"].as_array().cloned().unwrap_or_default();
+    let sum = |f: &dyn Fn(&Value) -> i64| rows.iter().map(f).sum::<i64>();
+    let (_, overview) = api(
+        &facade,
+        "GET",
+        "/api/v1/resources/overview",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(overview["queues"], rows.len(), "{overview}");
+    assert_eq!(
+        overview["partitions"],
+        sum(&|q| q["partitions"].as_i64().unwrap_or(0)),
+        "{overview}"
+    );
+    assert_eq!(
+        overview["messages"]["total"],
+        sum(&|q| q["messages"]["total"].as_i64().unwrap_or(0)),
+        "{overview}"
+    );
+    assert_eq!(
+        overview["messages"]["pending"],
+        sum(&|q| q["messages"]["pending"].as_i64().unwrap_or(0)),
+        "{overview}"
+    );
+    assert_eq!(
+        overview["messages"]["unread"],
+        sum(&|q| q["messages"]["unread"].as_i64().unwrap_or(0)),
+        "{overview}"
+    );
+    let (_, ns) = api(
+        &facade,
+        "GET",
+        "/api/v1/resources/namespaces",
+        None,
+        Value::Null,
+    )
+    .await;
+    let lagns = ns["namespaces"]
+        .as_array()
+        .and_then(|a| a.iter().find(|n| n["namespace"] == "lagns"))
+        .cloned()
+        .unwrap_or_else(|| panic!("{ns}"));
+    assert_eq!(lagns["queues"], 1, "{ns}");
+    assert_eq!(lagns["partitions"], 4, "{ns}");
+    assert_eq!(lagns["messages"]["pending"], 4, "{ns}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn the_backlog_chart_counts_a_filtered_message_once() {
+    let (facade, _dir) = lag_scenario("lag-chart").await;
+    let rows = facade.backlogs();
+    assert!(
+        !rows.iter().any(|(_, q, _, _)| q.contains('\u{1}')),
+        "{rows:?}"
+    );
+    let source: Vec<_> = rows.iter().filter(|(_, q, _, _)| q == "lagsrc").collect();
+    assert_eq!(source.len(), 1, "{rows:?}");
+    assert_eq!((source[0].2, source[0].3), (4, 0), "{rows:?}");
+    // The tenant's total is its queues' sum.
+    let tenant = crate::config::DEFAULT_TENANT;
+    let total = rows
+        .iter()
+        .find(|(t, q, _, _)| t == tenant && q.is_empty())
+        .unwrap_or_else(|| panic!("{rows:?}"));
+    let queues: i64 = rows
+        .iter()
+        .filter(|(t, q, _, _)| t == tenant && !q.is_empty())
+        .map(|r| r.2)
+        .sum();
+    assert_eq!(total.2, queues, "{rows:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_filtered_groups_depth_is_what_its_where_took() {
+    let (facade, _dir) = lag_scenario("lag-depth").await;
+    let depth = |group: Option<&'static str>| {
+        let facade = &facade;
+        async move {
+            let (status, v) = api(
+                facade,
+                "GET",
+                "/api/v1/resources/queues/lagsrc/depth",
+                group.map(|g| format!("group={g}")).as_deref(),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, 200, "{v}");
+            v
+        }
+    };
+    let ga = depth(Some("ga")).await;
+    assert_eq!(ga["queue"], "lagsrc", "{ga}");
+    assert_eq!(ga["filtered"], true, "{ga}");
+    assert_eq!(ga["pending"], 0, "{ga}");
+    let names: Vec<&str> = ga["partitions"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|p| p["partition"].as_str()).collect())
+        .unwrap_or_default();
+    assert_eq!(names, vec!["p1", "p2"], "{ga}");
+    let gb = depth(Some("gb")).await;
+    assert_eq!(gb["pending"], 2, "{gb}");
+    assert_eq!(gb["partitionsPending"], 1, "{gb}");
+    let all = depth(None).await;
+    assert_eq!(all["pending"], 4, "{all}");
+    assert_eq!(all["unread"], 2, "{all}");
+    assert!(!shows_hidden(&ga) && !shows_hidden(&gb) && !shows_hidden(&all));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn the_queue_detail_shows_each_partitions_share() {
+    let (facade, _dir) = lag_scenario("lag-detail").await;
+    let (_, d) = api(
+        &facade,
+        "GET",
+        "/api/v1/resources/queues/lagsrc",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(d["totals"]["pending"], 4, "{d}");
+    assert_eq!(d["totals"]["unread"], 2, "{d}");
+    assert_eq!(d["totals"]["completed"], 4, "{d}");
+    let part = |name: &str| {
+        d["partitions"]
+            .as_array()
+            .and_then(|a| a.iter().find(|p| p["name"] == name))
+            .cloned()
+            .unwrap_or_else(|| panic!("{name}: {d}"))
+    };
+    for (name, pending, unread) in [("p1", 0, 0), ("p2", 0, 0), ("p3", 2, 0), ("p4", 2, 2)] {
+        let p = part(name);
+        assert_eq!(p["stats"]["pending"], pending, "{name}: {p}");
+        assert_eq!(p["stats"]["unread"], unread, "{name}: {p}");
+    }
+    assert_eq!(part("p1")["cursor"]["totalConsumed"], 2, "{d}");
+    assert_eq!(d["partitionCount"], 4, "{d}");
+    // The partitions holding the most pending count it the same way, and
+    // date it where something still has to read it.
+    let (_, top) = api(
+        &facade,
+        "GET",
+        "/api/v1/resources/partitions",
+        Some("queue=lagsrc"),
+        Value::Null,
+    )
+    .await;
+    let row = |name: &str| {
+        top["partitions"]
+            .as_array()
+            .and_then(|a| a.iter().find(|p| p["partition"] == name))
+            .cloned()
+            .unwrap_or_else(|| panic!("{name}: {top}"))
+    };
+    for (name, pending, unread) in [("p1", 0, 0), ("p3", 2, 0), ("p4", 2, 2)] {
+        let r = row(name);
+        assert_eq!(
+            (r["pending"].clone(), r["unread"].clone()),
+            (json!(pending), json!(unread)),
+            "{r}"
+        );
+    }
+    assert!(row("p3")["lagSeconds"].is_number(), "{top}");
+    assert!(row("p1")["lagSeconds"].is_null(), "{top}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn group_lag_metrics_name_the_source_queue() {
+    let (facade, _dir) = lag_scenario("lag-prom").await;
+    let (rows, _) = facade.group_lags_for_test(usize::MAX);
+    let rows = rows.expect("within the budget");
+    assert!(
+        !rows.iter().any(|l| l.queue.contains('\u{1}')),
+        "{:?}",
+        rows.iter()
+            .map(|l| (&l.queue, &l.group))
+            .collect::<Vec<_>>()
+    );
+    let of = |g: &str| {
+        rows.iter()
+            .find(|l| l.queue == "lagsrc" && l.group == g)
+            .unwrap_or_else(|| panic!("no lag row for {g}"))
+    };
+    assert_eq!((of("ga").pending, of("ga").partitions_behind), (0, 0));
+    assert_eq!((of("gb").pending, of("gb").partitions_behind), (2, 1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn pop_and_ack_counters_name_the_source_queue() {
+    crate::metrics::install_global(std::sync::Arc::new(crate::metrics::Metrics::new()));
+    let (_facade, _dir) = lag_scenario("lag-counters").await;
+    let snap = crate::metrics::global()
+        .expect("installed")
+        .per_queue
+        .snapshot();
+    assert!(
+        !snap.keys().any(|k| k.contains('\u{1}')),
+        "{:?}",
+        snap.keys().collect::<Vec<_>>()
+    );
+    let key = crate::handlers::tenant_queue_key(crate::config::DEFAULT_TENANT, "lagsrc");
+    let source = snap
+        .get(&key)
+        .unwrap_or_else(|| panic!("{:?}", snap.keys()));
+    assert!(source.pop_count >= 4, "pops: {}", source.pop_count);
+    assert!(source.ack_success >= 4, "acks: {}", source.ack_success);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_discovery_pop_reads_each_message_once() {
+    let (facade, _dir) = lag_scenario("lag-discover").await;
+    let mut seen = Vec::new();
+    for _ in 0..20 {
+        let out = facade
+            .pop_discover(
+                ctx(),
+                crate::rsm::facade::PopDiscoverReq {
+                    namespace: "lagns".into(),
+                    task: String::new(),
+                    group: Some("everything".into()),
+                    batch: 100,
+                    auto_ack: true,
+                    wait: false,
+                    timeout_ms: 1000,
+                    options: group_options(None, "all"),
+                },
+            )
+            .await
+            .expect("discover");
+        if out.empty {
+            break;
+        }
+        let m = messages(&parse(&out.body));
+        if m.is_empty() {
+            break;
+        }
+        seen.extend(m);
+    }
+    let mut txns: Vec<String> = seen
+        .iter()
+        .map(|m| m["transactionId"].as_str().unwrap_or_default().to_string())
+        .collect();
+    txns.sort();
+    let mut want: Vec<String> = (1..=4)
+        .flat_map(|p| (0..2).map(move |i| format!("t{p}-{i}")))
+        .collect();
+    want.sort();
+    assert_eq!(txns, want, "each message once, from the source");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn no_listing_or_walk_shows_a_hidden_queue() {
+    let (facade, _dir) = lag_scenario("lag-walks").await;
+    // Every place is checked, and every one that shows a hidden queue named.
+    let mut wrong: Vec<String> = Vec::new();
+    for (method, path, query, body) in [
+        (
+            "GET",
+            "/api/v1/resources/queues",
+            Some("stats=lanes"),
+            Value::Null,
+        ),
+        ("GET", "/api/v1/resources/partitions", None, Value::Null),
+        (
+            "GET",
+            "/api/v1/analytics/partition-liveness",
+            None,
+            Value::Null,
+        ),
+        ("GET", "/api/v1/status/queues", None, Value::Null),
+        (
+            "POST",
+            "/api/v1/consumer-groups/positions",
+            None,
+            json!({"consumerGroup":"ga"}),
+        ),
+    ] {
+        let (status, v) = api(&facade, method, path, query, body).await;
+        if status != 200 || shows_hidden(&v) {
+            wrong.push(format!("{path}: {status} {v}"));
+        }
+    }
+    // The message browser lists a message once, at its source.
+    let (_, msgs) = api(&facade, "GET", "/api/v1/messages", None, Value::Null).await;
+    for txn in ["t1-0", "t3-1"] {
+        if shows_hidden(&msgs) || txn_count(&msgs, txn) != 1 {
+            wrong.push(format!(
+                "/api/v1/messages: {txn} {} times",
+                txn_count(&msgs, txn)
+            ));
+        }
+    }
+    // The shared state counts the queues a client can see.
+    let (_, shared) = api(
+        &facade,
+        "GET",
+        "/api/v1/system/shared-state",
+        None,
+        Value::Null,
+    )
+    .await;
+    let (_, list) = api(
+        &facade,
+        "GET",
+        "/api/v1/resources/queues",
+        None,
+        Value::Null,
+    )
+    .await;
+    let visible = list["queues"].as_array().map_or(0, Vec::len);
+    if shared["queues"] != visible {
+        wrong.push(format!(
+            "/api/v1/system/shared-state: {} queues, {visible} visible",
+            shared["queues"]
+        ));
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The queue list's `(pending, unread)` of `queue`, once `ok` holds for it
+/// (a push's links and a pop's checkpoint apply just after their answers).
+async fn settled(facade: &RaftFacade, queue: &str, ok: impl Fn(i64, i64) -> bool) -> (i64, i64) {
+    let mut last = (0, 0);
+    for _ in 0..300 {
+        let row = listed(facade, queue).await;
+        last = (
+            row["messages"]["pending"].as_i64().unwrap_or(-1),
+            row["messages"]["unread"].as_i64().unwrap_or(-1),
+        );
+        if ok(last.0, last.1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    last
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn unread_is_only_what_no_group_and_no_reader_can_take() {
+    let (facade, _dir) = open("lag-unread").await;
+    // Nobody reads warmup at all: every message is unread, and pending as
+    // it always was.
+    let row = listed(&facade, "warmup").await;
+    assert!(
+        row["messages"]["pending"].as_i64().unwrap_or(0) > 0,
+        "{row}"
+    );
+    assert_eq!(
+        row["messages"]["unread"], row["messages"]["pending"],
+        "{row}"
+    );
+
+    // A content filter may take a message of any partition: none is unread,
+    // and what it left out waits for nobody.
+    configure(&facade, json!({"queue":"bykind","options":{}})).await;
+    let first = pop(
+        &facade,
+        "bykind",
+        Some("paid"),
+        group_options(Some("data.kind = 'paid'"), "new"),
+    )
+    .await
+    .unwrap();
+    assert!(messages(&first).is_empty());
+    push(
+        &facade,
+        json!([
+            {"queue":"bykind","partition":"o-1","transactionId":"k1","payload":{"kind":"created"}},
+            {"queue":"bykind","partition":"o-2","transactionId":"k2","payload":{"kind":"created"}},
+            {"queue":"bykind","partition":"o-2","transactionId":"k3","payload":{"kind":"paid"}}
+        ]),
+    )
+    .await;
+    assert_eq!(
+        settled(&facade, "bykind", |p, u| p == 1 && u == 0).await,
+        (1, 0)
+    );
+
+    // A reading queue reads its source: what it may take is not unread there,
+    // and its backlog is its own queue's; a partition its where rules out is.
+    configure(&facade, json!({"queue":"rsrc","options":{}})).await;
+    let (s, cfg) = configure(
+        &facade,
+        json!({"queue":"rsrc-p1","options":{"from":"rsrc","where":"partition = 'p1'"}}),
+    )
+    .await;
+    assert_eq!(s, 200, "{cfg}");
+    push(
+        &facade,
+        json!([
+            {"queue":"rsrc","partition":"p1","transactionId":"r1","payload":{}},
+            {"queue":"rsrc","partition":"p2","transactionId":"r2","payload":{}}
+        ]),
+    )
+    .await;
+    assert_eq!(
+        settled(&facade, "rsrc", |p, u| p == 1 && u == 1).await,
+        (1, 1)
+    );
+    assert_eq!(
+        settled(&facade, "rsrc-p1", |p, u| p == 1 && u == 1).await,
+        (1, 1)
+    );
+
+    // A group of the queue's own reads every partition: nothing is unread,
+    // and its backlog counts with the filtered group's.
+    configure(&facade, json!({"queue":"both","options":{}})).await;
+    let first = pop(
+        &facade,
+        "both",
+        Some("only-p1"),
+        group_options(Some("partition = 'p1'"), "new"),
+    )
+    .await
+    .unwrap();
+    assert!(messages(&first).is_empty());
+    let plain = pop(&facade, "both", Some("plain"), group_options(None, "new"))
+        .await
+        .unwrap();
+    assert!(messages(&plain).is_empty());
+    push(
+        &facade,
+        json!([
+            {"queue":"both","partition":"p1","transactionId":"b1","payload":{}},
+            {"queue":"both","partition":"p2","transactionId":"b2","payload":{}}
+        ]),
+    )
+    .await;
+    assert_eq!(
+        settled(&facade, "both", |p, u| p == 2 && u == 0).await,
+        (2, 0)
     );
 }

@@ -75,7 +75,11 @@ function stateTitle(r) {
   const who = r.reader?.label || 'a group'
   if (s.kind === 'acks') return `${acksText(r.issue?.ops)} in the last hour.`.replace(/^./, (c) => c.toUpperCase())
   if (s.kind === 'lag') return `${who} is ${span(r.issue?.lag || r.lag || 0)} behind, with ${fmt(r.pending)} waiting.`
-  if (s.kind === 'noReader') return `${fmt(r.pending)} waiting, and no consumer group reads it.`
+  if (s.kind === 'noReader') {
+    return r.issue?.unread
+      ? `${fmt(r.issue.unread)} waiting on partitions that no group or reader takes.`
+      : `${fmt(r.pending)} waiting, and no consumer group reads it.`
+  }
   if (s.kind === 'feed' || s.kind === 'feedDown') return s.title
   return `${fmt(r.pending)} waiting; at this pace it clears in ${s.eta < 60 ? 'under a minute' : `about ${span(s.eta)}`}.`
 }

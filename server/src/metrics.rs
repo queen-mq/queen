@@ -266,6 +266,15 @@ impl PerQueue {
     /// tenants sharing a queue NAME accumulate separate counters (else their
     /// per-minute lag/ops rows would merge in-process, before the DB ever sees
     /// them). Flag OFF ⇒ every key is `<default>\x1f<queue>` ⇒ byte-identical.
+    /// The counters of `queue` of `tenant`. A filtered group's hidden queue
+    /// counts as its source: the API names the source, and a pop or an ack
+    /// of the group is one of the source's.
+    fn of(&self, tenant: &str, queue: &str) -> Arc<QueueCounters> {
+        self.counters(&crate::handlers::tenant_queue_key(
+            tenant,
+            crate::rsm::route::shown_name(queue),
+        ))
+    }
     fn counters(&self, key: &str) -> Arc<QueueCounters> {
         if let Some(c) = self.map.read().unwrap().get(key) {
             return c.clone();
@@ -278,12 +287,12 @@ impl PerQueue {
             .clone()
     }
     pub fn add_push(&self, tenant: &str, queue: &str, msgs: u64) {
-        let c = self.counters(&crate::handlers::tenant_queue_key(tenant, queue));
+        let c = self.of(tenant, queue);
         c.push_requests.fetch_add(1, Ordering::Relaxed);
         c.push_messages.fetch_add(msgs, Ordering::Relaxed);
     }
     pub fn add_pop(&self, tenant: &str, queue: &str, msgs: u64) {
-        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+        self.of(tenant, queue)
             .pop_count
             .fetch_add(msgs, Ordering::Relaxed);
     }
@@ -300,23 +309,23 @@ impl PerQueue {
         if n == 0 {
             return;
         }
-        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+        self.of(tenant, queue)
             .fetched
             .fetch_add(n, Ordering::Relaxed);
     }
     pub fn add_pop_empty(&self, tenant: &str, queue: &str) {
-        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+        self.of(tenant, queue)
             .pop_empty
             .fetch_add(1, Ordering::Relaxed);
     }
     pub fn add_transaction(&self, tenant: &str, queue: &str) {
-        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+        self.of(tenant, queue)
             .transactions
             .fetch_add(1, Ordering::Relaxed);
     }
     /// Ack outcome counts for one ack call touching `queue` (ok/failed item counts).
     pub fn add_ack(&self, tenant: &str, queue: &str, ok: u64, failed: u64) {
-        let c = self.counters(&crate::handlers::tenant_queue_key(tenant, queue));
+        let c = self.of(tenant, queue);
         c.ack_requests.fetch_add(1, Ordering::Relaxed);
         c.ack_success.fetch_add(ok, Ordering::Relaxed);
         c.ack_failed.fetch_add(failed, Ordering::Relaxed);
@@ -327,7 +336,7 @@ impl PerQueue {
         if msgs == 0 {
             return;
         }
-        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+        self.of(tenant, queue)
             .push_messages
             .fetch_add(msgs, Ordering::Relaxed);
     }
@@ -337,7 +346,7 @@ impl PerQueue {
         if ok == 0 && failed == 0 {
             return;
         }
-        let c = self.counters(&crate::handlers::tenant_queue_key(tenant, queue));
+        let c = self.of(tenant, queue);
         c.ack_success.fetch_add(ok, Ordering::Relaxed);
         c.ack_failed.fetch_add(failed, Ordering::Relaxed);
     }
@@ -347,14 +356,14 @@ impl PerQueue {
         if n == 0 {
             return;
         }
-        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+        self.of(tenant, queue)
             .conflated_count
             .fetch_add(n, Ordering::Relaxed);
     }
     /// PLAN_CONFLATION §3.3: one pop declared a conflation policy that disagrees
     /// with the group's stored one. The stored value wins; this is the loud half.
     pub fn add_conflation_conflict(&self, tenant: &str, queue: &str) {
-        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+        self.of(tenant, queue)
             .conflation_conflict_count
             .fetch_add(1, Ordering::Relaxed);
     }
@@ -363,7 +372,7 @@ impl PerQueue {
         if n == 0 {
             return;
         }
-        let c = self.counters(&crate::handlers::tenant_queue_key(tenant, queue));
+        let c = self.of(tenant, queue);
         c.lag_sum_ms.fetch_add(sum_ms, Ordering::Relaxed);
         c.lag_count.fetch_add(n, Ordering::Relaxed);
         c.lag_max_ms.fetch_max(max_ms, Ordering::Relaxed);
@@ -444,8 +453,12 @@ impl Parked {
     /// Mark one pop as parked on `queue` until the returned guard drops.
     /// Track B (§5): keyed by (tenant, queue) so the per-tenant parked gauge and
     /// queue_parked_replica series don't merge two tenants sharing a queue name.
+    /// A filtered group's waiting pop parks on its source, as the API names it.
     pub fn enter(&self, tenant: &str, queue: &str) -> ParkedGuard {
-        let gauge = self.gauge(&crate::handlers::tenant_queue_key(tenant, queue));
+        let gauge = self.gauge(&crate::handlers::tenant_queue_key(
+            tenant,
+            crate::rsm::route::shown_name(queue),
+        ));
         gauge.fetch_add(1, Ordering::Relaxed);
         ParkedGuard { gauge }
     }
@@ -2634,6 +2647,19 @@ mod kv_timers_tests {
 #[cfg(test)]
 mod per_queue_tests {
     use super::*;
+
+    /// A filtered group's pop parks on its hidden queue; the gauge names the
+    /// source, as every other per-queue figure does.
+    #[test]
+    fn a_filtered_groups_parked_pop_counts_on_its_source() {
+        let parked = Parked::default();
+        let hidden = crate::rsm::route::hidden_queue("orders", "billing");
+        let a = parked.enter("t", &hidden);
+        let b = parked.enter("t", "orders");
+        assert_eq!(parked.live(), vec![("orders".to_string(), 2)]);
+        drop((a, b));
+        assert!(parked.live().is_empty());
+    }
 
     /// A Kafka fetch's records land on their own counter of their (tenant,
     /// queue), apart from the pops: a fetch is not a delivery, and the views

@@ -173,6 +173,7 @@ export function useQueuePage(name, win) {
       }
     }
     if (i?.reason === 'noReader') {
+      if (i.unread) return { tone: 'amber', badge: 'No reader', text: `${fmt(i.unread)} waiting on partitions that no group or reader takes.` }
       return { tone: 'amber', badge: 'No reader', text: `${fmt(pending)} waiting, and no consumer group reads it.` }
     }
     // Read by feed streams and no consumer group: nothing is acked, nothing waits.
@@ -244,6 +245,12 @@ export function useQueuePage(name, win) {
         streams: names,
       }
     }
+    if (i.unread) {
+      return {
+        kind: 'noReader', tone: 'amber', title: 'Nobody reads part of it',
+        line: 'Its readers and filtered groups leave some partitions out, and no group of its own reads them. Add a group or a reader for them, or say in its alert lines that nobody reads it.',
+      }
+    }
     return {
       kind: 'noReader', tone: 'amber', title: 'Nobody reads it',
       line: i.deadOnly
@@ -260,7 +267,7 @@ export function useQueuePage(name, win) {
     if (!r) return []
     return [
       readsLine(r, { options: row.value?.options }),
-      readByLine(r, { queue: name.value, queues: qs.queues.value || [], groups: gs.groups.value || [] }),
+      readByLine(r, { queue: name.value, queues: qs.queues.value || [], groups: gs.groups.value || [], unread: row.value?.messages?.unread }),
     ].filter(Boolean)
   })
   // The holders that hold back its retention: amber, each with its oldest unconsumed message's age.

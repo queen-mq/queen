@@ -14,6 +14,7 @@ sourceOfTruth:
   - server/src/rsm/facade/real/route.rs
   - server/src/rsm/facade/real/phase2.rs
   - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2/stats.rs
   - server/src/rsm/facade/real/phase2/feed.rs
   - server/src/rsm/facade/real/phase2/streams.rs
   - server/src/rsm/planner/txn.rs
@@ -69,6 +70,7 @@ A group's `where` is set on its first pop, like its start (`subscriptionMode`), 
 | Delete the group | as any group: `DELETE /api/v1/consumer-groups/:group/queues/:queue` |
 | Every pop's answer | carries `"filtered": true`, an empty one too (a 200 with that body, not a 204). An older broker ignores `where` and would hand the group the whole queue, so the SDKs stop a consumer whose answer lacks it. |
 | The group listings | `GET /api/v1/consumer-groups` and the lag listings show the group under its queue, with `"filtered": true` and its `where` |
+| A pop by namespace or task | reads each queue once: a filtered group's messages are not handed out a second time |
 
 <Why>"only some of these" is the most common need, and here it is one line in the consumer, with no queue to create and nothing to ack that the consumer does not want.</Why>
 
@@ -128,6 +130,24 @@ The source keeps the message. For the source's retention, every reading queue an
 | retention off | everything is kept |
 
 How far back a source's readers hold its completed retention is the gauge `queen_holder_floor_age_seconds{queue}`: the age of the oldest message they still keep unconsumed. A link whose message is gone is skipped when it is read (the `queen_link_expired_at_source_total` counter). A dead letter is a copy: filed from a reading queue, it holds the message itself and its headers, because a dead letter outlives its source.
+
+## Lag, backlog and unread
+
+A filtered group is a group of its queue, so its figures are its queue's, counted from only the messages its `where` took.
+
+| Figure | Where it shows | What it counts |
+| --- | --- | --- |
+| A filtered group's lag | `GET /api/v1/consumer-groups`, `GET /api/v1/consumer-groups/lagging`, and `queen_consumer_group_lag_messages`, `queen_consumer_group_lag_seconds` and `queen_consumer_group_partitions_behind` under its queue's name | the messages its `where` took that it has not consumed, on the partitions it took them from |
+| A filtered group's depth | `GET /api/v1/resources/queues/:queue/depth?group=:group` | the same, partition by partition, with `"filtered": true` and its `where` |
+| A queue's `pending` | the queue list, the overview, `GET /api/v1/resources/queues/:queue`, `/depth` without a group, the backlog chart | partition by partition, the most that one of its groups, its own or filtered, has not consumed, plus every unread message; a message counts once, however many groups took it |
+| A queue's `unread` | `messages.unread` on the queue list and the overview, `totals.unread` and each partition's `unread` on the queue's page, `unread` on `/depth` | the messages on partitions that no group of the queue reads and no reader's `where` can take |
+| A reading queue's backlog | the reading queue's own figures | what its groups have not consumed; its source does not count it again |
+
+An example: a queue of 100 partitions, read by three filtered groups that take 30 partitions each with `partition in (...)`. Each group's lag counts its 30 partitions only, never the other 70. The 10 partitions that no group takes are `unread`, and the console marks the queue "No reader" for them.
+
+Which partitions a reader can take is decided by its conditions on `queue` and `partition`. A `where` on the payload or the headers may take a message of any partition, so it leaves no partition unread, and a message it does not take waits for nobody: it counts as completed. A queue that nothing reads at all is unread in full, as its `pending` always said.
+
+<Why>a filtered group that counted the whole queue as its lag would look behind for ever, and an autoscaler reading its depth would start workers for messages it never gets. The partitions nothing reads are the gap worth seeing: a worker that was never started.</Why>
 
 ## `link`: forward a message without its payload
 
