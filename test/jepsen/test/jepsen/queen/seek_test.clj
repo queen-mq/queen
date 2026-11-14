@@ -50,4 +50,10 @@
                            {})]
       (is (= [5] (:lost-after-seek-to-end r)))))
   (testing "under clock faults the seek rules are counted, not judged"
-    (is (:valid? (run #{:clock})))))
+    (is (:valid? (run #{:clock}))))
+  ;; seek-pause 2026-11-14: a pop sent while the seek was in flight re-read 12267.
+  (testing "a pop in flight while the seek applied brings back an acked message: read again"
+    (is (:valid? (run #{} (deq (+ (* 30 s) 500) [3])))))
+  (testing "a pop in flight while the seek applied, first delivery: no proof, must come again"
+    (let [r (run #{} (enq 4 (+ (* 26 s) (quot s 2))) (deq (+ (* 30 s) 500) [3 4]))]
+      (is (= [4] (:not-read-again r))))))

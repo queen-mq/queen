@@ -94,10 +94,23 @@
                                  :when (and p (< (:comp p) (inv-of end)))]
                              {:v (:v m), :pop (:index op)})))
             ; Seek back: every message after its point, there before it,
-            ; delivered again after it.
-            again   (set (for [op pops :when (and back (< (:time back) (inv-of op)))
-                               m (:msgs op)]
-                           (:v m)))
+            ; delivered again after it: by a pop sent after the seek
+            ; answered, or by a pop in flight while it applied that brought
+            ; back a message acked before that pop was sent, which only the
+            ; seek can do (seek-pause 2026-11-14: a 1 s long-poll sent 4 ms
+            ; before the seek answered re-read 12267 and acked it).
+            acked-before (fn [v t] (some (fn [op] (and (< (:time op) t)
+                                                       (some #(and (= v (:v %)) (= :acked (:ack %))) (:msgs op))))
+                                         pops))
+            again   (set (concat
+                           (for [op pops :when (and back (< (:time back) (inv-of op)))
+                                 m (:msgs op)]
+                             (:v m))
+                           (for [op pops :when (and back (< (inv-of back) (:time op))
+                                                    (<= (inv-of op) (:time back)))
+                                 m (:msgs op)
+                                 :when (acked-before (:v m) (inv-of op))]
+                             (:v m))))
             missed  (if-not back
                       []
                       (->> pushes
