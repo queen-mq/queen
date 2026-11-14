@@ -71,6 +71,24 @@
     (info "connector" name (:body r))
     r))
 
+(defn- await-streaming!
+  "Waits until source connector `name` reports phase streaming. Within a few
+  seconds of its creation a source makes its publication and slot, copies
+  the rows already there and then streams (integrations/postgres.mdx): a
+  change committed before that is not streamed, only its row copied.
+  pgsource 2026-11-14: all five runs began writing at once and missed
+  exactly their first 1 to 12 s of changes."
+  [test name]
+  (util/await-fn
+    (fn []
+      (let [r     (qh/request! (qh/client) :get (str (qh/base-url (first (:nodes test))) "/api/v1/connectors/" name)
+                               nil 10000)
+            phase (get-in r [:body :status :phase])]
+        (when-not (= "streaming" phase)
+          (throw (ex-info "connector not streaming yet" {:name name, :phase phase, :status (:status r)})))
+        phase))
+    {:log-message (str "waiting for connector " name " to stream"), :timeout 120000, :retry-interval 500}))
+
 (defn- read-queue-feed
   "Every entry of `queue` from the start, through the feed (relayed)."
   [client test queue]
@@ -112,7 +130,8 @@
       (svc/reset-postgres! test ["public.jepsen_src (id bigint primary key, k int not null, v bigint not null)"])
       (put-connector! test "jepsen-src"
                       {:kind "source", :connection (svc/pg-conn test)
-                       :source {:tables [{:table "public.jepsen_src", :queue "jepsen-pg"}]}})))
+                       :source {:tables [{:table "public.jepsen_src", :queue "jepsen-pg"}]}})
+      (info "connector jepsen-src:" (await-streaming! test "jepsen-src"))))
 
   (invoke! [this test op]
     (case (:f op)
