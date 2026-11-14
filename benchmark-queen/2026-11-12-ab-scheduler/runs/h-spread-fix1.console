@@ -1,0 +1,5 @@
+[16:19:08] run h-spread-fix1: build fix1, push, 1000 partitions, steps of 40s at: 1000000 1500000 2000000 2250000 | TXN_SIZE=10 KV=0 CONS=17 PROCS=8 BATCH=100 SPREAD=10 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[16:20:15] 1,000,000: offered 999,980 | pushed 1,000,020 | consumed 1,000,066 | shed 0 errors 0 | push p50 4.1 p99 12.5 | e2e p50 10.9 p99 29.4 | cores 11.0 / 5.2 / 3.9 | loader 10.0c  OK 
+[16:21:22] 1,500,000: offered 1,500,014 | pushed 1,500,007 | consumed 1,500,200 | shed 0 errors 0 | push p50 6.0 p99 67.6 | e2e p50 17.7 p99 127.0 | cores 13.5 / 6.5 / 4.8 | loader 14.3c  OK 
+[16:22:29] 2,000,000: offered 2,000,013 | pushed 1,959,641 | consumed 1,953,793 | shed 0 errors 0 | push p50 174.1 p99 1310.7 | e2e p50 294.9 p99 1441.8 | cores 16.9 / 7.5 / 4.6 | loader 17.8c  NOT CARRIED 
+[16:22:29] stopping at 2000000

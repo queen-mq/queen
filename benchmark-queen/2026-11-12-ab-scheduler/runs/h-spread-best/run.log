@@ -1,0 +1,9 @@
+[15:25:05] run h-spread-best: build best, push, 1000 partitions, steps of 40s at: 1000000 1500000 2000000 2250000 | TXN_SIZE=10 KV=0 CONS=17 PROCS=8 BATCH=100 SPREAD=10 | EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000  | FORMS=-push-wire bin -push-zstd -ack-counts -pop-frames | roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: b1 x 1000 partitions
+[15:26:12] 1,000,000: offered 999,984 | pushed 999,924 | consumed 999,876 | shed 0 errors 0 | push p50 4.1 p99 11.4 | e2e p50 10.8 p99 27.9 | cores 11.1 / 5.3 / 4.0 | loader 10.0c  OK 
+[create] done: b2 x 1000 partitions
+[15:27:20] 1,500,000: offered 1,499,993 | pushed 1,500,187 | consumed 1,500,738 | shed 0 errors 0 | push p50 6.2 p99 29.7 | e2e p50 18.7 p99 76.8 | cores 13.4 / 6.6 / 4.8 | loader 14.4c  OK 
+[create] done: b3 x 1000 partitions
+[15:28:27] 2,000,000: offered 2,000,055 | pushed 1,963,222 | consumed 1,957,246 | shed 0 errors 0 | push p50 172.0 p99 1130.5 | e2e p50 290.8 p99 1245.2 | cores 17.0 / 7.3 / 4.6 | loader 17.7c  NOT CARRIED 
+[15:28:27] stopping at 2000000
+RUN_DONE
