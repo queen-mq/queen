@@ -97,6 +97,12 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
 # rewords the 504 a membership change answers; handlers/raft.rs changes a comment on ?timeoutMs.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-14 (connections, commits, transactions): metrics.rs exports
+# queen_connections{,_max,_accepted_total,_refused_total}{listener} and
+# queen_process_transactions_total{outcome}; facade/real.rs exports
+# queen_raft_committed_entries_total and counts each transaction's outcome where its answer leaves;
+# timing.rs sums the planned commands for the dashboard. The new "Connections, commits and
+# transactions" section says so; the generated table lists them.
 ---
 
 Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`. Each node
@@ -210,6 +216,60 @@ sum by (group) (queen_consumer_group_lag_messages{group="billing"})
 The repository ships a Grafana board and Prometheus alert rules on these series:
 [`deploy/grafana/queen-consumer-lag.json`](https://github.com/queen-mq/queen/blob/master/deploy/grafana/queen-consumer-lag.json)
 and [`deploy/prometheus/queen-consumer-lag.rules.yml`](https://github.com/queen-mq/queen/blob/master/deploy/prometheus/queen-consumer-lag.rules.yml).
+
+## Connections, commits and transactions
+
+How many connections a node holds, how many commits its log takes in a second, and how many
+transactions it answers. The dashboard's Cluster page charts the same three for each node.
+
+| Family | Labels | What it says |
+|---|---|---|
+| `queen_connections` | `listener` | The connections open now |
+| `queen_connections_max` | `listener` | How many the listener serves at once: `QUEEN_MAX_CONNECTIONS` (20,000) on `PORT`, the proxy's own cap on its port |
+| `queen_connections_accepted_total` | `listener` | The connections accepted since the process started |
+| `queen_connections_refused_total` | `listener` | The connections closed as soon as they were accepted, because the listener was at its cap |
+| `queen_raft_committed_entries_total` | | The log entries committed, as this node knows it |
+| `queen_process_transactions_total` | `outcome` | The `POST /api/v1/transaction` requests this node answered, by how they ended |
+
+| `listener` | Is |
+|---|---|
+| `broker` | `PORT`: the apps inside your network, and the other nodes' relays |
+| `proxy` | The embedded proxy's own port (`QUEEN_PROXY_PORT`): the clients from outside. Present only when the proxy has its own port |
+
+| `outcome` | The answer |
+|---|---|
+| `committed` | `success: true`: every push, ack and KV write of it is in the log |
+| `rolled_back` | HTTP 200 with `success: false`: a lost `required` KV precondition, a refused ack or item. Nothing of it was written |
+| `refused` | HTTP 4xx: a body the broker refuses before it plans anything |
+| `error` | No verdict: a standby, a scope denial, a timeout or an internal error. The outcome is unknown, and the client retries |
+
+**Why a commit is not a write.** One log entry is one commit: one atomic step, made durable at
+once. The leader packs many commands into one entry, pushes, acks and transactions from many
+clients together, so under load the commits a second are far fewer than the commands a second.
+Commands per entry is how much the batching saves (`queen_raft_planner_commands_total` is there
+unless `QUEEN_RAFT_METRICS` is off). Every node of a group knows the same committed index: take
+the `max` over the nodes, never the `sum`.
+
+```text
+# commits a second, for the cluster
+max(rate(queen_raft_committed_entries_total[1m]))
+
+# commands per commit: what the leader planned over what the log took in
+sum(rate(queen_raft_planner_commands_total[1m])) / max(rate(queen_raft_committed_entries_total[1m]))
+
+# committed transactions a second, for the cluster, and the share that rolled back
+sum(rate(queen_process_transactions_total{outcome="committed"}[1m]))
+sum(rate(queen_process_transactions_total{outcome="rolled_back"}[1m])) / sum(rate(queen_process_transactions_total[1m]))
+
+# connections open on each node, and how close a listener is to its cap
+sum by (instance) (queen_connections)
+queen_connections / queen_connections_max
+```
+
+With a client in front of a load balancer or the proxy, `PORT` sees the connections that hop
+holds, not the end clients. A refused connection is one the client sees closed at once: any rate
+of `queen_connections_refused_total` above 0 means a cap is too low or a client opens a
+connection per request.
 
 ## Families
 

@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { brokerStatus, cellIssues, hostReading } from '../src/composables/useBrokerStatus.js'
+import { brokerStatus, cellIssues, hostReading, perSecond, workChip, workRows } from '../src/composables/useBrokerStatus.js'
 
 const GiB = 1024 ** 3
 
@@ -224,4 +224,54 @@ test('a problem several nodes share is one row naming them, not one per node', (
   }))
   assert.equal(apart.length, 2)
   assert.equal(apart[0].title, 'node-2 refuses writes: its disk is full')
+})
+
+test('work: commits are the node that saw the most, connections and commands are added', () => {
+  const work = (commits, commands, trx, connections) => ({ windowSeconds: 60, commitsPerSec: commits, commandsPerSec: commands, transactionsPerSec: trx, connections })
+  const s = brokerStatus({
+    leaderId: 1,
+    term: 14,
+    members: [
+      member(1, { state: 'leader', work: work(18.4, 20.3, 0, { broker: 6, proxy: 4 }) }),
+      member(2, { work: work(18.4, 0, 3, { broker: 5, proxy: 1 }) }),
+      { nodeId: 3, role: 'voter', state: 'unreachable', reachable: false, hostname: null, error: 'timeout' },
+    ],
+  })
+  assert.deepEqual(s.nodes[0].work, { windowSeconds: 60, commits: 18.4, commands: 20.3, transactions: 0, connections: 10, byListener: { broker: 6, proxy: 4 } })
+  assert.equal(s.nodes[2].work, null, 'a node nobody reached says nothing')
+  assert.equal(s.work.commits, 18.4, 'every node sees every commit: not 36.8')
+  assert.equal(s.work.commands, 20.3)
+  assert.ok(Math.abs(s.work.perCommit - 20.3 / 18.4) < 1e-9)
+  assert.equal(s.work.transactions, 3)
+  assert.equal(s.work.connections, 16)
+  assert.deepEqual(s.work.byListener, { broker: 11, proxy: 5 })
+  assert.equal(s.work.nodes, 2)
+
+  assert.deepEqual(workChip(s.work), {
+    id: 'commits', label: 'Commits', value: '18/s', tone: '',
+    title: 'Commits: entries committed to the log a second, over the last 60 s, 1.1 commands each. One entry is one atomic commit of a batch of commands; every node sees the same.',
+  })
+  const rows = workRows(s.work)
+  assert.deepEqual(rows.map((r) => [r.id, r.label, r.value, r.sub, r.to]), [
+    ['connections', 'Connections', '16', '5 via the proxy', '/cluster'],
+    ['commits', 'Commits', '18', 'a second', '/cluster'],
+  ])
+  assert.match(rows[1].title, /^Entries committed to the log a second, over the last 60 s, 1\.1 commands each\./)
+})
+
+test('work: a broker older than it shows no rows, a first minute shows "–", no proxy names the nodes', () => {
+  const old = brokerStatus({ leaderId: 1, term: 3, self: 1, members: [member(1, { state: 'leader' })] })
+  assert.equal(old.work, null)
+  assert.equal(workChip(old.work), null)
+  assert.deepEqual(workRows(old.work), [])
+
+  const first = brokerStatus({ leaderId: 1, term: 3, self: 1, members: [member(1, {
+    state: 'leader', work: { windowSeconds: null, commitsPerSec: null, commandsPerSec: null, transactionsPerSec: null, connections: { broker: 3 } },
+  })] })
+  assert.equal(workChip(first.work), null, 'no commits yet: nothing on the chip')
+  assert.deepEqual(workRows(first.work).map((r) => [r.value, r.sub]), [['3', 'on 1 node'], ['–', 'a second']])
+})
+
+test('a rate a second, short', () => {
+  assert.deepEqual([0, 0.004, 0.2, 0.25, 2.5, 4.04, 18.4, 1240.6, null].map(perSecond), ['0', '0', '0.2', '0.25', '2.5', '4', '18', '1,241', '–'])
 })

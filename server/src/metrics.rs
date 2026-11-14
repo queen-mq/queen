@@ -77,6 +77,11 @@ pub struct Metrics {
     /// Transaction requests (execute_transaction). Kept alongside push/pop/ack so
     /// the worker-metrics collector (syscollect.rs) can flush a per-minute count.
     pub transactions: AtomicU64,
+    /// Every transaction request by how it ended ([`TxnOutcome`], indexed by
+    /// it), for `queen_process_transactions_total`. `transactions` above is
+    /// the dashboard's count of committed ones and is bumped where their
+    /// pushes are attributed; this one is bumped where the answer leaves.
+    pub txn_outcomes: [AtomicU64; 4],
     /// Successful / failed ack items, accumulated across all ack calls. ack.requests
     /// counts ACK API calls; these count individual acknowledged items by outcome so
     /// the collector can populate worker_metrics.ack_{success,failed}_count.
@@ -1553,6 +1558,7 @@ impl Metrics {
             pop: std::sync::Arc::new(OpMetrics::new("pop")),
             ack: std::sync::Arc::new(OpMetrics::new("ack")),
             transactions: AtomicU64::new(0),
+            txn_outcomes: Default::default(),
             ack_success: AtomicU64::new(0),
             ack_failed: AtomicU64::new(0),
             dlq_moved: AtomicU64::new(0),
@@ -1748,6 +1754,66 @@ impl Metrics {
         for (name, help, ctr) in process {
             ht(&mut s, name, help, "counter");
             g(&mut s, name, "", ctr.load(Ordering::Relaxed).to_string());
+        }
+        // Transactions by how they ended: rate(...{outcome="committed"}) is
+        // the committed transactions a second this node answered.
+        ht(
+            &mut s,
+            "queen_process_transactions_total",
+            "Transaction requests answered by this process, by outcome",
+            "counter",
+        );
+        for o in TxnOutcome::ALL {
+            g(
+                &mut s,
+                "queen_process_transactions_total",
+                &format!("{{outcome=\"{}\"}}", o.label()),
+                self.txn_outcomes[o.index()]
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
+        }
+        // Client connections, per listener that serves on this node.
+        let conns = listeners(false);
+        if !conns.is_empty() {
+            let per_listener =
+                |s: &mut String, name: &str, value: fn(&ListenerReading) -> String| {
+                    for c in &conns {
+                        g(s, name, &format!("{{listener=\"{}\"}}", c.name), value(c));
+                    }
+                };
+            ht(
+                &mut s,
+                "queen_connections",
+                "Connections open now, by listener: broker = PORT (clients in the cluster and the other nodes' relays), proxy = the embedded proxy's own port",
+                "gauge",
+            );
+            per_listener(&mut s, "queen_connections", |c| c.open.to_string());
+            ht(
+                &mut s,
+                "queen_connections_max",
+                "Connections the listener serves at once (QUEEN_MAX_CONNECTIONS on PORT, the proxy's cap on its port)",
+                "gauge",
+            );
+            per_listener(&mut s, "queen_connections_max", |c| c.cap.to_string());
+            ht(
+                &mut s,
+                "queen_connections_accepted_total",
+                "Connections accepted since the process started, by listener",
+                "counter",
+            );
+            per_listener(&mut s, "queen_connections_accepted_total", |c| {
+                c.accepted.to_string()
+            });
+            ht(
+                &mut s,
+                "queen_connections_refused_total",
+                "Connections closed at accept because the listener's cap was reached",
+                "counter",
+            );
+            per_listener(&mut s, "queen_connections_refused_total", |c| {
+                c.refused.to_string()
+            });
         }
         // Pop path split (Phase 2): targeted hint-driven pops vs wildcard scans.
         ht(
@@ -2176,6 +2242,106 @@ pub fn global() -> Option<&'static Arc<Metrics>> {
     GLOBAL.get()
 }
 
+/// The client connections of PORT's listener (`serve_port` in main.rs).
+#[cfg(feature = "server")]
+pub static BROKER_CONNS: queen_proxy::harden::ListenerConns =
+    queen_proxy::harden::ListenerConns::new();
+
+/// The listeners [`listeners`] can name, in its order: the `listener` label
+/// on `/metrics` and the keys of the dashboard's `connections` family.
+pub const LISTENER_NAMES: [&str; 2] = ["broker", "proxy"];
+
+/// One listener's client connections, read for `/metrics` or the dashboard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ListenerReading {
+    /// The `listener` label: `broker` (PORT) or `proxy` (the embedded
+    /// proxy's public port, where clients outside the cluster connect).
+    pub name: &'static str,
+    pub open: i64,
+    /// The most open at once since the dashboard's last minute; `open` when
+    /// read without taking it.
+    pub peak: i64,
+    pub cap: u64,
+    pub accepted: u64,
+    pub refused: u64,
+}
+
+/// Every listener that serves client connections on this node. A listener
+/// that does not serve here is left out (its cap is 0), and a build without
+/// the HTTP server (the embedded library) has none. `take_peak` starts the
+/// next span of [`ListenerReading::peak`]: the dashboard collector's, once a
+/// minute; `/metrics` reads without it.
+pub fn listeners(take_peak: bool) -> Vec<ListenerReading> {
+    #[cfg(feature = "server")]
+    {
+        let conns = [&BROKER_CONNS, &queen_proxy::harden::EDGE_CONNS];
+        LISTENER_NAMES
+            .into_iter()
+            .zip(conns)
+            .filter_map(|(name, c)| {
+                let s = c.snapshot();
+                (s.cap > 0).then(|| ListenerReading {
+                    name,
+                    open: s.open,
+                    peak: if take_peak { c.take_peak() } else { s.open },
+                    cap: s.cap,
+                    accepted: s.accepted,
+                    refused: s.refused,
+                })
+            })
+            .collect()
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = take_peak;
+        Vec::new()
+    }
+}
+
+/// How a `POST /api/v1/transaction` ended, as its caller saw it: the
+/// `outcome` label of `queen_process_transactions_total`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxnOutcome {
+    /// It committed: every push, ack and KV write of it is in the log.
+    Committed,
+    /// A rollback verdict (HTTP 200, `success:false`): a lost KV
+    /// precondition, a refused ack, a duplicate gate.
+    RolledBack,
+    /// A body the wire refuses (HTTP 4xx) before anything is planned.
+    Refused,
+    /// No verdict: a standby, a scope denial, an internal error or a timeout.
+    Error,
+}
+
+impl TxnOutcome {
+    pub const ALL: [TxnOutcome; 4] = [
+        TxnOutcome::Committed,
+        TxnOutcome::RolledBack,
+        TxnOutcome::Refused,
+        TxnOutcome::Error,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TxnOutcome::Committed => "committed",
+            TxnOutcome::RolledBack => "rolled_back",
+            TxnOutcome::Refused => "refused",
+            TxnOutcome::Error => "error",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Count one transaction's outcome on the process metrics, when installed.
+pub fn count_transaction(outcome: TxnOutcome) {
+    if let Some(m) = global() {
+        m.txn_outcomes[outcome.index()].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 pub fn spawn_samplers(metrics: Arc<Metrics>) {
     // Scheduler-lag probe. sleep(100ms) resolving late == the runtime (or the
     // host) was too busy to run a ready timer — the same signal Node's
@@ -2213,6 +2379,59 @@ fn resident_bytes() -> u64 {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod work_tests {
+    use super::*;
+
+    #[test]
+    fn transactions_render_one_line_per_outcome() {
+        let m = Metrics::new();
+        m.txn_outcomes[TxnOutcome::Committed.index()].store(7, Ordering::Relaxed);
+        m.txn_outcomes[TxnOutcome::RolledBack.index()].store(2, Ordering::Relaxed);
+        m.txn_outcomes[TxnOutcome::Error.index()].store(1, Ordering::Relaxed);
+        let out = m.prometheus();
+        assert!(out.contains("# TYPE queen_process_transactions_total counter\n"));
+        for line in [
+            "queen_process_transactions_total{outcome=\"committed\"} 7\n",
+            "queen_process_transactions_total{outcome=\"rolled_back\"} 2\n",
+            "queen_process_transactions_total{outcome=\"refused\"} 0\n",
+            "queen_process_transactions_total{outcome=\"error\"} 1\n",
+        ] {
+            assert!(out.contains(line), "missing {line:?} in\n{out}");
+        }
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn connections_render_per_listener_that_serves() {
+        BROKER_CONNS.serving(20_000);
+        let held = BROKER_CONNS.opened();
+        let out = Metrics::new().prometheus();
+        for family in [
+            "# TYPE queen_connections gauge\n",
+            "# TYPE queen_connections_max gauge\n",
+            "# TYPE queen_connections_accepted_total counter\n",
+            "# TYPE queen_connections_refused_total counter\n",
+        ] {
+            assert!(out.contains(family), "missing {family:?} in\n{out}");
+        }
+        assert!(
+            out.contains("queen_connections_max{listener=\"broker\"} 20000\n"),
+            "{out}"
+        );
+        let open: i64 = out
+            .lines()
+            .find_map(|l| l.strip_prefix("queen_connections{listener=\"broker\"} "))
+            .expect("the broker's open line")
+            .parse()
+            .expect("a number");
+        assert!(open >= 1, "the connection held open counts: {out}");
+        // The proxy's port serves nowhere in this test: no line for it.
+        assert!(!out.contains("listener=\"proxy\""), "{out}");
+        drop(held);
+    }
 }
 
 #[cfg(test)]

@@ -1267,6 +1267,9 @@ pub(crate) fn local_node_json(
         // Raft RPC port by channel, the network, the disk. Null until the
         // first interval closes.
         "traffic":crate::rsm::dashboard::traffic().map_or(Value::Null, |t| t.to_json()),
+        // Commits, commands and transactions a second over the same interval,
+        // and the connections open now (dashboard/mod.rs work_json).
+        "work":crate::rsm::dashboard::work_json(),
         "replication":replication,
         "error":Value::Null
     })

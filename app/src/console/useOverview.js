@@ -23,6 +23,7 @@ import { rollupQueueOps } from '@/composables/overviewViews'
 import { trimIncompleteBuckets } from '@/composables/useApi'
 import { ackFailureSeverity, SEV_BAD, SEV_WARN } from '@/composables/useSeverity'
 import { acksText } from '@/composables/queueOps'
+import { workRows } from '@/composables/useBrokerStatus'
 import { rate, span } from './words.js'
 import { currentEpoch } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
@@ -403,6 +404,8 @@ export function useOverview(win, frame) {
     const dlqQueues = qrows.filter((q) => (q.messages?.deadLetter || 0) > 0).length
     const p = hero.value.partitions
     const rows = [
+      // Live first: the connections open now and the commits a second (the band's chip says the same).
+      ...workRows(frame?.cell?.value?.status?.work),
       { id: 'queues', label: 'Queues', value: fmt(qrows.length || o.queues), sub: `${nss.size} namespace${nss.size === 1 ? '' : 's'}`, to: '/queues' },
       { id: 'partitions', label: 'Partitions', value: fmt(o.partitions), sub: p.created || p.deleted ? `+${fmt(p.created)} −${fmt(p.deleted)}` : '', title: `Made and removed, ${win.value.long}`, to: '/queues' },
       { id: 'groups', label: 'Consumer groups', value: fmt(groups.length), sub: behindGroups ? `${behindGroups} behind` : 'none behind', to: { path: '/queues', query: { view: 'groups' } } },

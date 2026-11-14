@@ -1,7 +1,8 @@
 <script setup>
 // Each node over the window: the machine (CPU, memory, disk) on one row, what
-// moves (the network, the Raft port) on the next, then what the log and the
-// store hold. A line per node, white and grey told apart by dash; dragging
+// moves (the network, the Raft port) on the next, what it serves (its
+// connections, the log's commits, the transactions it answered) on the third,
+// then what the log and the store hold. A line per node, white and grey told apart by dash; dragging
 // across any chart zooms the whole console.
 import { computed } from 'vue'
 import QcChart from '../QcChart.vue'

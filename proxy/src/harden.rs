@@ -1616,6 +1616,99 @@ pub fn tls_server_config_from_pem(
     Ok(cfg)
 }
 
+/// The client connections of one listener, for `/metrics` and the dashboard:
+/// open now, the most open since the last [`take_peak`](Self::take_peak),
+/// and accepted and refused (the connection cap) since boot. A listener
+/// touches it when a connection opens and when it closes, never per request.
+pub struct ListenerConns {
+    open: std::sync::atomic::AtomicI64,
+    peak: std::sync::atomic::AtomicI64,
+    cap: std::sync::atomic::AtomicU64,
+    accepted: std::sync::atomic::AtomicU64,
+    refused: std::sync::atomic::AtomicU64,
+}
+
+/// What [`ListenerConns::snapshot`] reads. `cap` is 0 until the listener serves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConnsSnap {
+    pub open: i64,
+    pub cap: u64,
+    pub accepted: u64,
+    pub refused: u64,
+}
+
+/// One open connection: counted while it lives.
+pub struct ConnGuard(&'static ListenerConns);
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        self.0
+            .open
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl ListenerConns {
+    pub const fn new() -> Self {
+        use std::sync::atomic::{AtomicI64, AtomicU64};
+        Self {
+            open: AtomicI64::new(0),
+            peak: AtomicI64::new(0),
+            cap: AtomicU64::new(0),
+            accepted: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+        }
+    }
+
+    /// The listener serves, with this connection cap.
+    pub fn serving(&self, cap: usize) {
+        self.cap
+            .store(cap as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A connection was closed at accept: the cap was reached.
+    pub fn refused(&self) {
+        self.refused
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A connection was accepted; it counts as open until the guard drops.
+    pub fn opened(&'static self) -> ConnGuard {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.accepted.fetch_add(1, Relaxed);
+        let now = self.open.fetch_add(1, Relaxed) + 1;
+        self.peak.fetch_max(now, Relaxed);
+        ConnGuard(self)
+    }
+
+    /// The most connections open at once since the last call, which starts
+    /// the next span at what is open now.
+    pub fn take_peak(&self) -> i64 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let open = self.open.load(Relaxed);
+        self.peak.swap(open, Relaxed).max(open)
+    }
+
+    pub fn snapshot(&self) -> ConnsSnap {
+        use std::sync::atomic::Ordering::Relaxed;
+        ConnsSnap {
+            open: self.open.load(Relaxed),
+            cap: self.cap.load(Relaxed),
+            accepted: self.accepted.load(Relaxed),
+            refused: self.refused.load(Relaxed),
+        }
+    }
+}
+
+impl Default for ListenerConns {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The connections of [`serve`]'s listener: the proxy's public port.
+pub static EDGE_CONNS: ListenerConns = ListenerConns::new();
+
 #[derive(Clone, Copy, Debug)]
 pub struct ServeOptions {
     /// Slowloris bound: the whole request head must arrive within this.
@@ -1682,6 +1775,7 @@ pub async fn serve(
 ) {
     let acceptor = tls.map(tokio_rustls::TlsAcceptor::from);
     let conns = Arc::new(tokio::sync::Semaphore::new(opts.max_connections));
+    EDGE_CONNS.serving(opts.max_connections);
     let (shut_tx, shut_rx) = tokio::sync::watch::channel(false);
     let mut shutdown = std::pin::pin!(shutdown);
     loop {
@@ -1699,15 +1793,18 @@ pub async fn serve(
             }
         };
         let Ok(permit) = conns.clone().try_acquire_owned() else {
+            EDGE_CONNS.refused();
             tracing::warn!(target: "edge", peer = %peer, max = opts.max_connections, "connection cap reached; closing");
             continue;
         };
+        let open = EDGE_CONNS.opened();
         let _ = stream.set_nodelay(true);
         let acceptor = acceptor.clone();
         let app = app.clone();
         let mut shut_rx = shut_rx.clone();
         tokio::spawn(async move {
             let _permit = permit;
+            let _open = open;
             let meta = ConnMeta {
                 peer,
                 tls: acceptor.is_some(),
@@ -1859,6 +1956,41 @@ pub mod fuzz {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_listener_counts_its_open_connections_and_their_peak() {
+        static C: ListenerConns = ListenerConns::new();
+        assert_eq!(
+            C.snapshot(),
+            ConnsSnap::default(),
+            "nothing before it serves"
+        );
+        C.serving(3);
+        let a = C.opened();
+        let b = C.opened();
+        C.refused();
+        assert_eq!(
+            C.snapshot(),
+            ConnsSnap {
+                open: 2,
+                cap: 3,
+                accepted: 2,
+                refused: 1
+            }
+        );
+        drop(a);
+        drop(b);
+        assert_eq!(C.snapshot().open, 0, "a closed connection is not open");
+        assert_eq!(C.snapshot().accepted, 2, "accepted counts since boot");
+        // The peak is the most open at once since the last take, then
+        // starts again at what is open now.
+        assert_eq!(C.take_peak(), 2);
+        assert_eq!(C.take_peak(), 0);
+        let c = C.opened();
+        assert_eq!(C.take_peak(), 1);
+        assert_eq!(C.take_peak(), 1, "still open: the next span starts at 1");
+        drop(c);
+    }
     use axum::body::Body;
     use axum::routing::{get, post};
     use tower::ServiceExt;

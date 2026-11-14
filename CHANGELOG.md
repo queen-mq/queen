@@ -55,6 +55,16 @@ partitions no longer wait for one thread. Followers apply the entries as before:
 version, a rolling restart. Why: the control step was the transaction ceiling, about 70 µs a
 transaction on one thread whatever the machine's size.
 
+**Connections, commits and transactions a second.** Prometheus gets `queen_connections`,
+`queen_connections_max`, `queen_connections_accepted_total` and `queen_connections_refused_total`
+by `listener` (`broker` is `PORT`, `proxy` is the embedded proxy's own port),
+`queen_raft_committed_entries_total` (one log entry is one commit; take the `max` over the nodes,
+never the `sum`) and `queen_process_transactions_total` by `outcome` (`committed`, `rolled_back`,
+`refused`, `error`). The console's Cluster page charts the three for each node, the cluster chip in
+the band shows the commits a second, and the Overview lists commits and connections. Each node's
+entry in `GET /api/v1/raft/members` carries the same figures as `work`. Why: how many clients a
+node holds, and how many commits and transactions it does in a second, showed nowhere.
+
 **Fixed: `maxWaitTimeSeconds` and a short retention on a busy partition.** A partition that took
 more than 1,000 pushes inside its dedup window stopped removing messages when the queue said:
 `maxWaitTimeSeconds`, `retentionSeconds` and `completedRetentionSeconds` then removed a message

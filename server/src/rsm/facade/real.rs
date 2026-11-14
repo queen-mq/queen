@@ -1098,6 +1098,12 @@ impl RaftFacade {
                 });
                 let node_id = repl.cluster_view().map(|v| v.node_id).unwrap_or(1);
                 crate::rsm::dashboard::collector::spawn_once(dash, node_id, gauges);
+                // This group's commits, summed with the other groups' into
+                // the minute's commits a second.
+                let repl_c = Arc::downgrade(&repl);
+                crate::rsm::dashboard::collector::register_commit_reader(Arc::new(move || {
+                    Some(repl_c.upgrade()?.metrics().committed_index)
+                }));
                 // The backlog chart's samples: this group's tenants, read by
                 // its leader only (a follower holds the same state).
                 let (repl_b, store_b) = (Arc::downgrade(&repl), Arc::downgrade(&store));
@@ -2345,6 +2351,7 @@ impl RaftFacade {
         // refuses (wrong shape, server-owned field) answers a named 4xx.
         let answer = |status: u16, reason: &str, err: &str| super::TxnOut {
             status,
+            committed: false,
             body: serde_json::json!({
                 "transactionId": txn_id,
                 "success": false,
@@ -3113,6 +3120,7 @@ impl RaftFacade {
             return Ok(super::TxnOut {
                 status: 200,
                 body: body.to_string(),
+                committed: false,
             });
         }
 
@@ -3295,6 +3303,7 @@ impl RaftFacade {
         Ok(super::TxnOut {
             status: 200,
             body: body.to_string(),
+            committed: true,
         })
     }
 }
@@ -7367,6 +7376,15 @@ impl Rsm for RaftFacade {
         }
         out.push_str("# HELP queen_raft_inflight Entries committed or proposed but not applied\n# TYPE queen_raft_inflight gauge\n");
         out.push_str(&format!("queen_raft_inflight {}\n", repl.inflight));
+        // The committed index as a counter, so `rate()` reads the commits a
+        // second: one entry is one atomic commit (one fsync point) of a batch
+        // of commands. Every node of a group reports the same figure: take
+        // the `max` across nodes, not the `sum`.
+        out.push_str("# HELP queen_raft_committed_entries_total Raft log entries committed, as this node knows it (each is one atomic commit of a batch of commands)\n# TYPE queen_raft_committed_entries_total counter\n");
+        out.push_str(&format!(
+            "queen_raft_committed_entries_total {}\n",
+            repl.committed_index
+        ));
         out.push_str("# HELP queen_raft_proposals_total Proposals accepted since open\n# TYPE queen_raft_proposals_total counter\n");
         out.push_str(&format!("queen_raft_proposals_total {}\n", repl.proposals));
         out.push_str("# HELP queen_raft_log_storage Queue-log files and bytes\n# TYPE queen_raft_log_storage gauge\n");
@@ -7527,7 +7545,11 @@ impl Rsm for RaftFacade {
         ctx: ReqCtx,
         req: super::TxnReq,
     ) -> Result<super::TxnOut, RsmError> {
-        self.txn_impl(ctx, req).await
+        let out = self.txn_impl(ctx, req).await;
+        // Counted where the answer leaves, once per request, whichever exit
+        // of txn_impl it took.
+        crate::metrics::count_transaction(super::TxnOut::outcome_of(&out));
+        out
     }
 
     async fn renew(&self, ctx: ReqCtx, req: RenewReq) -> Result<RenewOut, RsmError> {

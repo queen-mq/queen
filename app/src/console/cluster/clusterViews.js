@@ -10,6 +10,7 @@
 import { describeApiError, CODE_ROUTE_BLOCKED } from '../../api/errors.js'
 import { describeRaftFailure, formatIndex, formatMapPct } from '../../composables/useRaftCluster.js'
 import { RAFT_CHANNELS, formatRate, rateUnit } from '../../composables/useTraffic.js'
+import { rate } from '../words.js'
 
 const num = (v) => {
   if (v === null || v === undefined || v === '') return null
@@ -395,6 +396,35 @@ const leafOf = (m, path) => {
   return num(at?.avg)
 }
 const sumOf = (...vs) => (vs.every((v) => v === null) ? null : vs.reduce((s, v) => s + (v || 0), 0))
+/** Every leaf under `m[key]` added: a node's connections over its listeners (broker, proxy). */
+const sumUnder = (m, key) => {
+  const o = m?.[key]
+  return o && typeof o === 'object' ? sumOf(...Object.keys(o).map((k) => leafOf(o, [k]))) : null
+}
+const perSecond = (v) => `${rate(v)} a second`
+/** A round figure (an axis top, a ratio): whole from 10 up, one decimal at most below: "5", "2.5". */
+const roundish = (v) => (Math.abs(v) >= 10 ? count(v) : String(parseFloat(v.toFixed(1))))
+
+/**
+ * The window's commands per commit: what the leaders put into the log over
+ * the entries it took in. Every node sees every commit, so the commits are
+ * the node that saw the most; only a leader plans, so the commands are every
+ * node's added. Null when no node counts its commands (QUEEN_RAFT_METRICS=0,
+ * or a broker from before it recorded them).
+ */
+export function commandsPerCommit(replicas) {
+  let commands = 0; let counted = false; let commits = 0
+  for (const r of replicas) {
+    let seen = 0
+    for (const p of r.timeSeries || []) {
+      const c = leafOf(p?.metrics, ['work', 'commands_per_sec'])
+      if (c !== null) { commands += c; counted = true }
+      seen += leafOf(p?.metrics, ['work', 'commits_per_sec']) || 0
+    }
+    if (seen > commits) commits = seen
+  }
+  return counted && commits > 0 ? commands / commits : null
+}
 
 /**
  * GET /api/v1/analytics/system-metrics → one small chart per measure, a line
@@ -428,6 +458,7 @@ export function chartsOf(metrics, status, { from, to, view = null } = {}) {
   const common = known.length && known.every((c) => c === known[0]) ? known[0] : null
   const cpusOf = (name) => num(byName.get(name)?.cpu?.cpus) ?? common
   const share = replicas.length > 0 && replicas.every((r) => cpusOf(r.hostname))
+  const perCommit = commandsPerCommit(replicas)
 
   const MEASURES = [
     {
@@ -456,6 +487,21 @@ export function chartsOf(metrics, status, { from, to, view = null } = {}) {
       id: 'raft', title: 'Raft port', sub: 'in and out', unit: 'rate',
       value: (m) => sumOf(leafOf(m, ['raft_traffic', 'received_bytes_per_sec']), leafOf(m, ['raft_traffic', 'sent_bytes_per_sec'])),
       none: status?.raft?.single ? 'One node: nothing crosses the Raft port.' : 'Not recorded by this broker.',
+    },
+    {
+      id: 'connections', title: 'Connections', sub: 'open, clients and other nodes', unit: 'count',
+      value: (m) => sumUnder(m, 'connections'),
+      none: 'Not recorded by this broker: a node records its connections from the release after 2.8.1.',
+    },
+    {
+      id: 'commits', title: 'Commits', sub: perCommit === null ? 'entries into the log' : `entries into the log, ${roundish(perCommit)} commands each`, unit: 'perSec',
+      value: (m) => leafOf(m, ['work', 'commits_per_sec']),
+      none: 'Not recorded by this broker: a node records its commits from the release after 2.8.1.',
+    },
+    {
+      id: 'transactions', title: 'Transactions', sub: 'committed, as each node answered', unit: 'perSec',
+      value: (m) => leafOf(m, ['work', 'transactions_per_sec']),
+      none: 'Not recorded by this broker: a node records its transactions from the release after 2.8.1.',
     },
     { id: 'log', title: 'Raft log', sub: 'size on its disk', unit: 'bytes', value: (m) => leafOf(m, ['raft', 'log_bytes']), none: 'No log samples in this window.' },
     {
@@ -491,6 +537,14 @@ export function chartsOf(metrics, status, { from, to, view = null } = {}) {
     } else if (meas.unit === 'bytes') {
       ({ top, text: topText } = scaleIn(BYTE_UNITS, max))
       format = size
+    } else if (meas.unit === 'count') {
+      top = niceTop(max, 10)
+      topText = `0 to ${count(top)}`
+      format = count
+    } else if (meas.unit === 'perSec') {
+      top = niceTop(max, 1)
+      topText = `0 to ${roundish(top)} a second`
+      format = perSecond
     } else {
       ({ top, text: topText } = scaleIn(RATE_UNITS, max, 1))
       format = formatRate

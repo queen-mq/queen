@@ -396,6 +396,12 @@ impl KindCounters {
     pub fn planned(&self, kind: CommandKind) -> u64 {
         self.planned[kind_index(kind)].load(Ordering::Relaxed)
     }
+
+    /// Commands of every kind planned so far by this process: what the
+    /// groups it leads put into their log entries. 0 with `QUEEN_RAFT_METRICS=0`.
+    pub fn planned_total(&self) -> u64 {
+        self.planned.iter().map(|c| c.load(Ordering::Relaxed)).sum()
+    }
 }
 
 /// Mirror of [`ApplyStats`] as atomics, republished by `apply::run` every

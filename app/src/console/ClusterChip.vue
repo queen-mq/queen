@@ -28,7 +28,7 @@ const others = computed(() => props.clusters.filter((c) => !c.on))
         <span class="qn-mono qn-cc-name" style="font-weight: 500">{{ name }}</span>
         <span v-if="mark && mark.words" :class="mark.tone" style="font-size: 12px">{{ mark.words }}</span>
         <span v-if="metrics.length" class="qn-cms">
-          <span v-for="m in metrics" :key="m.id" class="qn-cm" :title="m.title"><span class="qn-t3">{{ m.label }}</span><span class="qn-num" :class="m.tone">{{ m.value }}</span></span>
+          <span v-for="m in metrics" :key="m.id" class="qn-cm" :data-m="m.id" :title="m.title"><span class="qn-t3">{{ m.label }}</span><span class="qn-num" :class="m.tone">{{ m.value }}</span></span>
         </span>
         <QcIcon name="chevron" :size="12" />
       </button>
@@ -76,6 +76,10 @@ const others = computed(() => props.clusters.filter((c) => !c.on))
 .qn-cm { display: inline-flex; align-items: baseline; gap: 5px; }
 :global(.qn.tone .qn-cms) { border-left-color: var(--bg3); }
 @media (max-width: 1180px) { .qn-cms { display: none; } }
+/* The commits a second go first: the band keeps one line down to 1180 px with
+   the other four, and with the commits from 1360 px on a page whose path is a
+   queue (Overview: from about 1250 px). */
+@media (max-width: 1360px) { .qn-cm[data-m="commits"] { display: none; } }
 /* a phone: the chip shares its row, so a long name is cut; the panel's
    table keeps one line a node, Behind is on the Cluster page */
 @media (max-width: 640px) {

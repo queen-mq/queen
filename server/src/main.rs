@@ -587,6 +587,8 @@ async fn serve_port(
         "PORT serve loop"
     );
     let conns = std::sync::Arc::new(tokio::sync::Semaphore::new(max_conns));
+    let counted = &metrics::BROKER_CONNS;
+    counted.serving(max_conns);
     let (shut_tx, shut_rx) = tokio::sync::watch::channel(false);
     let mut shutdown = std::pin::pin!(shutdown);
     // Refusals are logged at most once a second, with their count.
@@ -608,6 +610,7 @@ async fn serve_port(
         };
         let Ok(permit) = conns.clone().try_acquire_owned() else {
             drop(stream);
+            counted.refused();
             refused += 1;
             if refused_logged.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
                 tracing::warn!(
@@ -622,11 +625,13 @@ async fn serve_port(
             }
             continue;
         };
+        let open = counted.opened();
         let _ = stream.set_nodelay(true);
         let app = app.clone();
         let mut shut_rx = shut_rx.clone();
         tokio::spawn(async move {
             let _permit = permit;
+            let _open = open;
             let svc = hyper_util::service::TowerToHyperService::new(app);
             let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
             builder

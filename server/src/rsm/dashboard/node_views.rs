@@ -376,6 +376,17 @@ fn gauge_metrics(s: &[GaugeSample]) -> Value {
             "sent_bytes_per_sec": g(&["network", "sent_bytes_per_sec"]),
         },
         "raft_traffic": raft_traffic_stats(s),
+        // The minute's work (collector.rs `Work`): commits into the log, the
+        // commands the leader planned, the transactions this node committed.
+        "work": {
+            "commits_per_sec": g(&["work", "commits_per_sec"]),
+            "commands_per_sec": g(&["work", "commands_per_sec"]),
+            "transactions_per_sec": g(&["work", "transactions_per_sec"]),
+        },
+        "connections": crate::metrics::LISTENER_NAMES
+            .iter()
+            .map(|name| (name.to_string(), g(&["connections", name])))
+            .collect::<Map<String, Value>>(),
     })
 }
 
@@ -1697,6 +1708,71 @@ mod tests {
     }
 
     // ------------------------------------------------------------- system metrics
+
+    #[test]
+    fn system_metrics_carry_the_work_and_each_listeners_connections() {
+        let now = t("2026-11-14T10:30:00Z");
+        let with = |commits: f64, trx: f64, open: f64, peak: f64| {
+            let mut m = raft_metrics(1000.0, 100.0, 2.0);
+            m["work"] = json!({
+                "commits_per_sec": gauge(commits),
+                "commands_per_sec": gauge(commits * 40.0),
+                "transactions_per_sec": gauge(trx),
+            });
+            m["connections"] = json!({
+                "broker": {"avg": open, "min": open, "max": peak, "last": open},
+            });
+            m
+        };
+        let a = sys(
+            "n1",
+            t("2026-11-14T10:05:10Z"),
+            30,
+            with(10.0, 2.0, 40.0, 55.0),
+        );
+        let b = sys(
+            "n1",
+            t("2026-11-14T10:05:40Z"),
+            30,
+            with(30.0, 4.0, 20.0, 41.0),
+        );
+        // A broker from before these families: its point has null leaves.
+        let old = sys(
+            "n2",
+            t("2026-11-14T10:05:10Z"),
+            60,
+            raft_metrics(1.0, 1.0, 1.0),
+        );
+        let v = system_metrics_json(&Map::new(), now, &[a, b, old]);
+        let point = |host: &str| {
+            v["replicas"]
+                .as_array()
+                .and_then(|r| r.iter().find(|r| r["hostname"] == host))
+                .map(|r| r["timeSeries"][0]["metrics"].clone())
+                .expect("the host's point")
+        };
+        let n1 = point("n1");
+        assert_eq!(n1["work"]["commits_per_sec"]["avg"], json!(20.0));
+        assert_eq!(n1["work"]["commands_per_sec"]["avg"], json!(800.0));
+        assert_eq!(n1["work"]["transactions_per_sec"]["avg"], json!(3.0));
+        let broker = &n1["connections"]["broker"];
+        assert_eq!(
+            broker["avg"],
+            json!(30.0),
+            "open, averaged over the flushes"
+        );
+        assert_eq!(
+            broker["max"],
+            json!(55.0),
+            "the most open at once in the bucket"
+        );
+        assert_eq!(broker["last"], json!(20.0));
+        let null_leaf = json!({"avg": null, "min": null, "max": null, "last": null});
+        assert_eq!(n1["connections"]["proxy"], null_leaf, "no proxy port on n1");
+        let n2 = point("n2");
+        assert_eq!(n2["work"]["commits_per_sec"], null_leaf);
+        assert_eq!(n2["connections"]["broker"], null_leaf);
+    }
 
     #[test]
     fn system_metrics_weights_avg_by_sample_count_and_keeps_min_max_last() {

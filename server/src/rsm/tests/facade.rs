@@ -4230,3 +4230,64 @@ async fn stream_queries_list_counts_windows_and_overdue() {
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `queen_process_transactions_total{outcome}` is read off the answer, never
+/// its body: a commit, a rollback verdict (HTTP 200, `success:false`) and a
+/// body the wire refuses (HTTP 400) each say which they are.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_transaction_answer_says_whether_it_committed() {
+    use crate::metrics::TxnOutcome;
+    use crate::rsm::facade::{TxnOut, TxnReq};
+    let dir = scratch("txn-outcome");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    let send = |body: Value| TxnReq {
+        raw: body.to_string().into_bytes(),
+    };
+
+    let ok = facade
+        .transaction(
+            ctx(),
+            send(serde_json::json!({
+                "operations": [{"type": "push", "items": [
+                    {"queue": "outcome-q", "payload": {"a": 1}, "transactionId": "outcome-1"}
+                ]}]
+            })),
+        )
+        .await;
+    let body = parse(&ok.as_ref().expect("commit").body);
+    assert_eq!(body["success"], true, "{body}");
+    assert_eq!(TxnOut::outcome_of(&ok), TxnOutcome::Committed, "{body}");
+
+    let lost = facade
+        .transaction(
+            ctx(),
+            send(serde_json::json!({
+                "operations": [{"type": "push", "items": [
+                    {"queue": "outcome-q", "payload": {"a": 2}, "transactionId": "outcome-2"}
+                ]}],
+                "kv": [{"op": "put", "ns": "outcome", "key": "k", "value": 1, "ttlSeconds": 600,
+                        "expect": 999999, "required": true}]
+            })),
+        )
+        .await;
+    let body = parse(&lost.as_ref().expect("rollback verdict").body);
+    assert_eq!(body["reason"], "kv_precondition", "{body}");
+    assert_eq!(lost.as_ref().map(|o| o.status).ok(), Some(200));
+    assert_eq!(TxnOut::outcome_of(&lost), TxnOutcome::RolledBack, "{body}");
+
+    let refused = facade
+        .transaction(
+            ctx(),
+            send(serde_json::json!({"operations": [{"type": "kv"}]})),
+        )
+        .await;
+    let out = refused.as_ref().expect("refused body");
+    assert_eq!(out.status, 400, "{}", out.body);
+    assert_eq!(TxnOut::outcome_of(&refused), TxnOutcome::Refused);
+
+    let gone: Result<TxnOut, ()> = Err(());
+    assert_eq!(TxnOut::outcome_of(&gone), TxnOutcome::Error);
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

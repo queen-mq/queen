@@ -109,6 +109,93 @@ pub fn traffic() -> Option<Traffic> {
     *TRAFFIC.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// What this node's log and clients did over the collector's last interval,
+/// a second: the entries committed (every node of a group sees the same),
+/// the commands the groups it leads planned (`None` with
+/// `QUEEN_RAFT_METRICS=0`), the transactions it answered as committed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WorkRates {
+    pub window_s: u64,
+    pub commits_per_sec: f64,
+    pub commands_per_sec: Option<f64>,
+    pub transactions_per_sec: f64,
+}
+
+static WORK: std::sync::Mutex<Option<WorkRates>> = std::sync::Mutex::new(None);
+
+/// Record the work the collector measured over its last interval.
+pub fn set_work(w: WorkRates) {
+    *WORK.lock().unwrap_or_else(|p| p.into_inner()) = Some(w);
+}
+
+/// The node status's `work` block (admin.rs, `GET /api/v1/raft/members`):
+/// the last interval's rates, null until it closes, and the connections open
+/// now on each listener this node serves (`connections` is empty in a build
+/// with no listener).
+pub fn work_json() -> serde_json::Value {
+    work_json_of(
+        *WORK.lock().unwrap_or_else(|p| p.into_inner()),
+        &crate::metrics::listeners(false),
+    )
+}
+
+fn work_json_of(
+    rates: Option<WorkRates>,
+    listeners: &[crate::metrics::ListenerReading],
+) -> serde_json::Value {
+    use serde_json::json;
+    let connections: serde_json::Map<String, serde_json::Value> = listeners
+        .iter()
+        .map(|l| (l.name.to_string(), json!(l.open)))
+        .collect();
+    json!({
+        "windowSeconds": rates.map(|r| r.window_s),
+        "commitsPerSec": rates.map(|r| r.commits_per_sec),
+        "commandsPerSec": rates.and_then(|r| r.commands_per_sec),
+        "transactionsPerSec": rates.map(|r| r.transactions_per_sec),
+        "connections": connections,
+    })
+}
+
+#[cfg(test)]
+mod work_json_tests {
+    use super::*;
+    use crate::metrics::ListenerReading;
+
+    #[test]
+    fn the_status_says_the_last_minutes_rates_and_the_connections_open_now() {
+        let open = |name, open| ListenerReading {
+            name,
+            open,
+            peak: open,
+            cap: 20_000,
+            ..Default::default()
+        };
+        let v = work_json_of(
+            Some(WorkRates {
+                window_s: 60,
+                commits_per_sec: 18.5,
+                commands_per_sec: Some(20.0),
+                transactions_per_sec: 3.0,
+            }),
+            &[open("broker", 12), open("proxy", 4)],
+        );
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "windowSeconds": 60, "commitsPerSec": 18.5, "commandsPerSec": 20.0,
+                "transactionsPerSec": 3.0, "connections": {"broker": 12, "proxy": 4},
+            })
+        );
+        // Before the collector's first interval closes: no rates, never a 0,
+        // and the connections still read live.
+        let v = work_json_of(None, &[open("broker", 2)]);
+        assert_eq!(v["commitsPerSec"], serde_json::Value::Null);
+        assert_eq!(v["transactionsPerSec"], serde_json::Value::Null);
+        assert_eq!(v["connections"]["broker"], 2);
+    }
+}
+
 /// The disk gate of this node's data directory: writes are refused once the
 /// filesystem is `high_pct` used and accepted again below `low_pct`.
 /// `enabled` is false where the gate is off (tests).

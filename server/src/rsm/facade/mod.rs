@@ -812,6 +812,23 @@ pub struct TxnOut {
     /// for a body the wire refuses before anything is planned.
     pub status: u16,
     pub body: String,
+    /// It committed (`success:true`): what `queen_process_transactions_total`
+    /// counts as `committed`, without reading the body back.
+    pub committed: bool,
+}
+
+impl TxnOut {
+    /// How a transaction request ended, as its caller sees it: the `outcome`
+    /// label of `queen_process_transactions_total`.
+    pub fn outcome_of<E>(r: &Result<TxnOut, E>) -> crate::metrics::TxnOutcome {
+        use crate::metrics::TxnOutcome;
+        match r {
+            Ok(o) if o.committed => TxnOutcome::Committed,
+            Ok(o) if o.status == 200 => TxnOutcome::RolledBack,
+            Ok(_) => TxnOutcome::Refused,
+            Err(_) => TxnOutcome::Error,
+        }
+    }
 }
 
 /// A renew outcome: the rendered response body.

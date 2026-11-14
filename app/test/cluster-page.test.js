@@ -219,7 +219,7 @@ test('the charts: a line per node, styled by node order, CPU as a share of its c
   assert.deepEqual(m.legend.map((l) => [l.name, l.ink, l.dashed]), [
     ['queen-mq-v2-0', 'in', false], ['queen-mq-v2-1', 'out', false], ['queen-mq-v2-2', 'in', true],
   ])
-  assert.deepEqual(m.charts.map((c) => c.id), ['cpu', 'memory', 'disk', 'network', 'raft', 'log', 'store'])
+  assert.deepEqual(m.charts.map((c) => c.id), ['cpu', 'memory', 'disk', 'network', 'raft', 'connections', 'commits', 'transactions', 'log', 'store'])
   const cpu = m.charts[0]
   assert.equal(cpu.sub, 'share of its cores')
   assert.ok(Math.abs(cpu.series[0].points[0][1] - 28.93 / 8) < 1e-9)
@@ -230,10 +230,65 @@ test('the charts: a line per node, styled by node order, CPU as a share of its c
   assert.equal(m.charts[1].topText, '0 to 1 GB')
   assert.equal(m.charts[2].topText, '0 to 10%')
   assert.equal(m.charts[3].topText, '0 to 500 KB/s')
-  assert.equal(m.charts[5].topText, '0 to 250 MB')   // the log on its disk
-  assert.equal(m.charts[6].topText, '0 to 10%')      // the store's map, a percentage already
-  assert.ok(Math.abs(m.charts[6].series[0].points[0][1] - 0.99) < 0.01)
-  assert.ok(m.charts.every((c) => c.has))
+  const chart = (id) => m.charts.find((c) => c.id === id)
+  assert.equal(chart('log').topText, '0 to 250 MB')   // the log on its disk
+  assert.equal(chart('store').topText, '0 to 10%')    // the store's map, a percentage already
+  assert.ok(Math.abs(chart('store').series[0].points[0][1] - 0.99) < 0.01)
+  // A 2.7 broker records no connections, commits or transactions: those
+  // three say so, every other chart has its lines.
+  const unrecorded = ['connections', 'commits', 'transactions']
+  assert.ok(m.charts.filter((c) => !unrecorded.includes(c.id)).every((c) => c.has))
+  for (const id of unrecorded) {
+    assert.equal(chart(id).has, false, id)
+    assert.match(chart(id).none, /^Not recorded by this broker/, id)
+  }
+  assert.equal(chart('commits').sub, 'entries into the log')
+})
+
+test('the charts: connections over both listeners, commits with commands per commit, transactions a second', () => {
+  const { status } = read(stage())
+  const work = (commits, commands, trx) => ({
+    commits_per_sec: { avg: commits },
+    ...(commands === null ? {} : { commands_per_sec: { avg: commands } }),
+    transactions_per_sec: { avg: trx },
+  })
+  // The leader plans every command; every node sees every commit.
+  const series = (h, leader) => [
+    point('2026-10-31T07:14:00.000Z', { work: work(20, leader ? 900 : 0, leader ? 0 : 4), connections: { broker: { avg: 30, max: 41 }, proxy: { avg: 12, max: 12 } } }),
+    point('2026-10-31T07:15:00.000Z', { work: work(30, leader ? 1100 : 0, leader ? 0 : 6), connections: { broker: { avg: 34, max: 34 } } }),
+  ]
+  const metrics = {
+    bucketMinutes: 1, nodesMissing: [],
+    replicas: [['queen-mq-v2-2', true], ['queen-mq-v2-0', false], ['queen-mq-v2-1', false]].map(([h, leader]) => ({ hostname: h, timeSeries: series(h, leader) })),
+  }
+  const m = chartsOf(metrics, status, {})
+  const chart = (id) => m.charts.find((c) => c.id === id)
+  const at = (id, host) => chart(id).series.find((s) => s.id === host).points.map((p) => p[1])
+
+  assert.deepEqual(at('connections', 'queen-mq-v2-0'), [42, 34], 'broker + proxy, open at each flush')
+  assert.equal(chart('connections').topText, '0 to 50')
+  assert.equal(chart('connections').format(42), '42')
+
+  assert.deepEqual(at('commits', 'queen-mq-v2-1'), [20, 30])
+  // 2,000 commands over 50 commits a second's worth of minutes: 40 each.
+  assert.equal(chart('commits').sub, 'entries into the log, 40 commands each')
+  assert.equal(chart('commits').topText, '0 to 40 a second')
+  assert.equal(chart('commits').format(12.5), '12.5 a second')
+  // A small top reads as a round figure, not "5.0".
+  const slow = { ...metrics, replicas: metrics.replicas.map((r) => ({ ...r, timeSeries: r.timeSeries.map((p) => ({ ...p, metrics: { ...p.metrics, work: work(4.2, r.hostname === 'queen-mq-v2-2' ? 4.6 : 0, 0.3) } })) })) }
+  const slowCharts = chartsOf(slow, status, {}).charts
+  assert.equal(slowCharts.find((c) => c.id === 'commits').topText, '0 to 5 a second')
+  assert.equal(slowCharts.find((c) => c.id === 'commits').sub, 'entries into the log, 1.1 commands each')
+  assert.equal(slowCharts.find((c) => c.id === 'transactions').topText, '0 to 1 a second')
+
+  assert.deepEqual(at('transactions', 'queen-mq-v2-0'), [4, 6])
+  assert.deepEqual(at('transactions', 'queen-mq-v2-2'), [0, 0])
+  assert.ok(['connections', 'commits', 'transactions'].every((id) => chart(id).has))
+
+  // A node that does not count its commands (QUEEN_RAFT_METRICS=0): the
+  // commits stand alone.
+  const quiet = { ...metrics, replicas: metrics.replicas.map((r) => ({ ...r, timeSeries: r.timeSeries.map((p) => ({ ...p, metrics: { ...p.metrics, work: work(p.metrics.work.commits_per_sec.avg, null, 0) } })) })) }
+  assert.equal(chartsOf(quiet, status, {}).charts.find((c) => c.id === 'commits').sub, 'entries into the log')
 })
 
 test('the charts: % of one core when a node does not say its cores and the others differ; a node that did not answer is named', () => {

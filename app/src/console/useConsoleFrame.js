@@ -5,7 +5,7 @@ import { computed } from 'vue'
 import { operator } from '@/api'
 import { useApi } from '@/composables/useApi'
 import { useAutoRefresh } from '@/composables/useRefresh'
-import { brokerStatus, cellIssues } from '@/composables/useBrokerStatus'
+import { brokerStatus, cellIssues, workChip } from '@/composables/useBrokerStatus'
 import { formatRate } from '@/composables/useTraffic'
 import { SEV_BAD, SEV_WARN } from '@/composables/useSeverity'
 import { useIdentity } from '@/stores/identity'
@@ -113,7 +113,8 @@ export function useConsoleFrame() {
       behindTone: n.unreachable ? 'red' : tone(n.lagSeverity),
     }))
     // The band's numbers, without opening the panel: CPU, memory and disk of
-    // the node that runs out first, and every node's network in and out.
+    // the node that runs out first, every node's network in and out, and the
+    // log's commits a second.
     const metrics = []
     const c = st.cpu.top; const m = st.mem.top; const d = st.disk.top
     if (c) metrics.push({ id: 'cpu', label: 'CPU', value: pct(c.share), tone: tone(st.cpu.sev), title: `CPU: ${c.name} is the busiest node, ${pct(c.share)} of the ${c.cpus} cores it may use` })
@@ -122,6 +123,9 @@ export function useConsoleFrame() {
     const net = st.nodes.reduce((sum, n) => (n.traffic?.network ? (sum ?? 0) + (n.traffic.network.received || 0) + (n.traffic.network.sent || 0) : sum), null)
     if (net != null) metrics.push({ id: 'net', label: 'Net', value: formatRate(net), tone: '', title: 'Network: every node, in and out, a second' })
     else if (st.raft.wire != null) metrics.push({ id: 'net', label: 'Raft', value: formatRate(st.raft.wire), tone: '', title: 'The Raft port, every node, a second (this broker does not measure its network)' })
+    // What the log takes in: commits a second over the last interval.
+    const commits = workChip(st.work)
+    if (commits) metrics.push(commits)
     // A problem a number already shows in colour needs no words beside it.
     const covered = worst && /:(cpu|memory|disk)(,|$)|^cell:(cpu|memory|disk):/.test(worst.key)
     return {

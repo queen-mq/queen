@@ -152,6 +152,57 @@ pub fn register_backlog_sampler(f: BacklogSampler) {
     SAMPLERS.lock().unwrap_or_else(|p| p.into_inner()).push(f);
 }
 
+/// One facade's committed index, or `None` once the facade is gone.
+pub type CommitReader = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
+
+/// Every facade's commit reader, in the order they registered (one per raft
+/// group): the minute's commits are the sum of each group's.
+static COMMIT_READERS: std::sync::Mutex<Vec<CommitReader>> = std::sync::Mutex::new(Vec::new());
+
+/// Add a facade's commit reader (whether or not it started the collector).
+pub fn register_commit_reader(f: CommitReader) {
+    COMMIT_READERS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(f);
+}
+
+/// Each registered group's committed index now, `None` for a facade gone.
+fn committed_indexes() -> Vec<Option<u64>> {
+    let readers = COMMIT_READERS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    readers.iter().map(|f| f()).collect()
+}
+
+/// Entries committed between two readings of [`committed_indexes`]: a group
+/// read both times adds what its index moved; a group first read now (it
+/// opened in between) or gone adds nothing, so a new group's whole history
+/// never lands in one minute.
+fn commits_between(prev: &[Option<u64>], now: &[Option<u64>]) -> u64 {
+    now.iter()
+        .enumerate()
+        .filter_map(|(i, n)| {
+            let (n, p) = ((*n)?, prev.get(i).copied().flatten()?);
+            Some(n.saturating_sub(p))
+        })
+        .sum()
+}
+
+/// The minute's work and connections, beside the raft gauges in a
+/// [`SystemRow`]: a rate a second over the flush, and per listener the
+/// connections open at flush time and the most open at once since the last.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Work {
+    pub commits_per_sec: f64,
+    /// `None` with `QUEEN_RAFT_METRICS=0` (nothing counts the commands).
+    pub commands_per_sec: Option<f64>,
+    pub transactions_per_sec: f64,
+    /// `(listener, open, peak)`.
+    pub connections: Vec<(&'static str, i64, i64)>,
+}
+
 /// The backlog rows of one flush.
 fn sample_backlog(now_us: i64, bucket_us: i64, at_us: i64) -> Vec<BacklogRow> {
     let samplers = SAMPLERS.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -223,6 +274,8 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
     let mut last_evl_sum = metrics.evl_sum_us.load(Ordering::Relaxed);
     let mut last_evl_cnt = metrics.evl_count.load(Ordering::Relaxed);
     let mut last_bytes = ByteCounters::read();
+    let mut last_commits = committed_indexes();
+    let mut last_commands = crate::rsm::timing::metrics().kinds.planned_total();
 
     loop {
         std::thread::sleep(interval);
@@ -300,6 +353,26 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
         // One statvfs per flush, of the directory the disk gate watches: the
         // history behind the dashboard's "disk used over time".
         let disk_space = super::disk_gate().and_then(|g| disk_usage(&g.dir));
+        let commits = committed_indexes();
+        let commands = crate::rsm::timing::metrics().kinds.planned_total();
+        let work = Work {
+            commits_per_sec: commits_between(&last_commits, &commits) as f64 / secs,
+            commands_per_sec: crate::rsm::timing::enabled()
+                .then(|| commands.saturating_sub(last_commands) as f64 / secs),
+            transactions_per_sec: d.transactions as f64 / secs,
+            connections: crate::metrics::listeners(true)
+                .into_iter()
+                .map(|c| (c.name, c.open, c.peak))
+                .collect(),
+        };
+        last_commits = commits;
+        last_commands = commands;
+        super::set_work(super::WorkRates {
+            window_s: secs.round() as u64,
+            commits_per_sec: work.commits_per_sec,
+            commands_per_sec: work.commands_per_sec,
+            transactions_per_sec: work.transactions_per_sec,
+        });
         let system = SystemRow {
             at_us,
             hostname: hostname.clone(),
@@ -314,6 +387,7 @@ fn run(store: Arc<DashStore>, node_id: u64, gauges: RaftGauges, interval: Durati
                 gauges(),
                 &traffic,
                 disk_space,
+                &work,
             )
             .to_string(),
         };
@@ -510,6 +584,7 @@ fn system_json(
     raft: Option<[f64; 5]>,
     traffic: &Traffic,
     disk_space: Option<(u64, u64)>,
+    work: &Work,
 ) -> Value {
     fn m(v: f64) -> Value {
         json!({ "avg": v, "min": v, "max": v, "last": v })
@@ -569,7 +644,36 @@ fn system_json(
     rt.insert("sent_bytes_per_sec".into(), m(sent));
     rt.insert("received_bytes_per_sec".into(), m(received));
     o.insert("raft_traffic".into(), Value::Object(rt));
+    // The minute's work: entries committed to the log (every node of a group
+    // says the same), the commands the leader put into them, and the
+    // transactions this node answered as committed.
+    let mut wk = serde_json::Map::new();
+    wk.insert("commits_per_sec".into(), m(work.commits_per_sec));
+    if let Some(c) = work.commands_per_sec {
+        wk.insert("commands_per_sec".into(), m(c));
+    }
+    wk.insert("transactions_per_sec".into(), m(work.transactions_per_sec));
+    o.insert("work".into(), Value::Object(wk));
+    // Connections per listener: open at flush time, and the most open at
+    // once since the last flush as the leaf's `max`. A node with no listener
+    // (the embedded library) leaves the family out.
+    // No total: two listeners' peaks fall at different moments, and their
+    // sum would overstate the most open at once.
+    if !work.connections.is_empty() {
+        let mut cn = serde_json::Map::new();
+        for &(name, open, peak) in &work.connections {
+            cn.insert(name.into(), conn_leaf(open, peak));
+        }
+        o.insert("connections".into(), Value::Object(cn));
+    }
     body
+}
+
+/// A connection count's leaf: `max` is the peak since the last flush, the
+/// rest the count at flush time.
+fn conn_leaf(open: i64, peak: i64) -> Value {
+    let (open, peak) = (open as f64, peak.max(open) as f64);
+    json!({ "avg": open, "min": open, "max": peak, "last": open })
 }
 
 /// The last bucket's conflated count per (tenant, queue): what
@@ -599,6 +703,66 @@ pub(crate) fn last_queue_lag() -> Vec<(String, String, i64, i64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commits_add_what_each_group_moved_and_skip_a_new_or_gone_group() {
+        assert_eq!(commits_between(&[Some(10)], &[Some(25)]), 15);
+        assert_eq!(
+            commits_between(&[Some(10), Some(100)], &[Some(12), Some(130)]),
+            32,
+            "two groups: the sum"
+        );
+        assert_eq!(
+            commits_between(&[Some(10)], &[Some(12), Some(5_000)]),
+            2,
+            "a group that opened in between brings none of its history"
+        );
+        assert_eq!(
+            commits_between(&[Some(10), Some(7)], &[None, Some(9)]),
+            2,
+            "a gone group adds nothing"
+        );
+        assert_eq!(
+            commits_between(&[Some(10)], &[Some(4)]),
+            0,
+            "never negative"
+        );
+    }
+
+    #[test]
+    fn the_minute_row_carries_the_work_and_the_connections() {
+        let t = Traffic::default();
+        let work = Work {
+            commits_per_sec: 12.5,
+            commands_per_sec: Some(400.0),
+            transactions_per_sec: 3.0,
+            connections: vec![("broker", 40, 52), ("proxy", 9, 9)],
+        };
+        let v = system_json(10, 1.0, 2.0, 3, None, &t, None, &work);
+        assert_eq!(v["work"]["commits_per_sec"]["avg"], 12.5);
+        assert_eq!(v["work"]["commands_per_sec"]["avg"], 400.0);
+        assert_eq!(v["work"]["transactions_per_sec"]["avg"], 3.0);
+        let broker = &v["connections"]["broker"];
+        assert_eq!(broker["avg"], 40.0, "open at flush time");
+        assert_eq!(broker["last"], 40.0);
+        assert_eq!(broker["max"], 52.0, "the most open at once in the minute");
+        assert_eq!(v["connections"]["proxy"]["avg"], 9.0);
+        assert!(
+            v["connections"].get("total").is_none(),
+            "no summed peak: {v}"
+        );
+
+        // Nothing counts the commands with QUEEN_RAFT_METRICS=0, and a node
+        // with no listener has no connections: both leaves are left out.
+        let quiet = Work {
+            commands_per_sec: None,
+            connections: vec![],
+            ..work
+        };
+        let v = system_json(10, 1.0, 2.0, 3, None, &t, None, &quiet);
+        assert!(v["work"].get("commands_per_sec").is_none(), "{v}");
+        assert!(v.get("connections").is_none(), "{v}");
+    }
 
     #[test]
     fn rates_are_per_second_over_the_time_between_the_reads() {
@@ -644,7 +808,7 @@ mod tests {
         };
         t.raft[0] = [100.0, 10.0];
         t.raft[1] = [5.0, 50.0];
-        let v = system_json(10, 1.0, 2.0, 3, None, &t, None);
+        let v = system_json(10, 1.0, 2.0, 3, None, &t, None, &Work::default());
         assert_eq!(v["disk"]["read_bytes_per_sec"]["last"], 1.0);
         assert_eq!(v["disk"]["written_bytes_per_sec"]["avg"], 2.0);
         assert!(
@@ -663,7 +827,16 @@ mod tests {
         );
         assert_eq!(v["raft_traffic"]["link"]["sent_bytes_per_sec"]["last"], 0.0);
         // The raft gauges keep their family beside it.
-        let with_gauges = system_json(10, 1.0, 2.0, 3, Some([1.0, 2.0, 3.0, 4.0, 5.0]), &t, None);
+        let with_gauges = system_json(
+            10,
+            1.0,
+            2.0,
+            3,
+            Some([1.0, 2.0, 3.0, 4.0, 5.0]),
+            &t,
+            None,
+            &Work::default(),
+        );
         assert_eq!(with_gauges["raft"]["log_files"]["last"], 4.0);
     }
 
@@ -677,7 +850,16 @@ mod tests {
             raft: [[0.0; 2]; 5],
         };
         let (used, total) = (400_000_000_000u64, 1_000_000_000_000u64);
-        let v = system_json(10, 1.0, 2.0, 3, None, &t, Some((used, total)));
+        let v = system_json(
+            10,
+            1.0,
+            2.0,
+            3,
+            None,
+            &t,
+            Some((used, total)),
+            &Work::default(),
+        );
         assert_eq!(v["disk"]["used_bytes"], leaf(4e11));
         assert_eq!(v["disk"]["total_bytes"], leaf(1e12));
         assert_eq!(
@@ -686,7 +868,7 @@ mod tests {
             "beside the rates"
         );
         // A failed statvfs: no space leaves (the view serves null), never 0.
-        let v = system_json(10, 1.0, 2.0, 3, None, &t, None);
+        let v = system_json(10, 1.0, 2.0, 3, None, &t, None, &Work::default());
         let disk = v["disk"].as_object().expect("the rates still");
         assert!(
             !disk.contains_key("used_bytes") && !disk.contains_key("total_bytes"),
@@ -694,14 +876,25 @@ mod tests {
         );
         // A platform without disk rates still records the space, alone.
         t.disk = None;
-        let v = system_json(10, 1.0, 2.0, 3, None, &t, Some((used, total)));
+        let v = system_json(
+            10,
+            1.0,
+            2.0,
+            3,
+            None,
+            &t,
+            Some((used, total)),
+            &Work::default(),
+        );
         let disk = v["disk"].as_object().expect("the space alone");
         assert_eq!(disk.len(), 2, "{disk:?}");
         assert_eq!(disk["used_bytes"]["last"], 4e11);
         // Neither measured: no `disk` family at all, as before.
-        assert!(system_json(10, 1.0, 2.0, 3, None, &t, None)
-            .get("disk")
-            .is_none());
+        assert!(
+            system_json(10, 1.0, 2.0, 3, None, &t, None, &Work::default())
+                .get("disk")
+                .is_none()
+        );
     }
 
     #[cfg(unix)]
