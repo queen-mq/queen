@@ -164,7 +164,7 @@ func (a *admin) warm(ctx context.Context) error {
 	return nil
 }
 
-// drain pops q (queue mode, autoAck) until want messages came out, or nothing came for 10 s.
+// drain pops q (queue mode, autoAck) until want messages came out, or nothing came for -warm-drain-idle (10 s).
 func (a *admin) drain(ctx context.Context, q string, want int64) (int64, error) {
 	var got atomic.Int64
 	var last atomic.Int64
@@ -189,13 +189,13 @@ func (a *admin) drain(ctx context.Context, q string, want int64) (int64, error) 
 			}
 		}()
 	}
-	for got.Load() < want && ctx.Err() == nil && time.Since(time.Unix(0, last.Load())) < 10*time.Second {
+	for got.Load() < want && ctx.Err() == nil && time.Since(time.Unix(0, last.Load())) < a.qf.warmIdle {
 		time.Sleep(50 * time.Millisecond)
 	}
 	cancel()
 	wg.Wait()
 	if got.Load() < want {
-		return got.Load(), fmt.Errorf("warm drain %s: %d of %d messages came out", q, got.Load(), want)
+		return got.Load(), fmt.Errorf("warm drain %s: %d of %d messages came out (nothing for %s)", q, got.Load(), want, a.qf.warmIdle)
 	}
 	return got.Load(), nil
 }

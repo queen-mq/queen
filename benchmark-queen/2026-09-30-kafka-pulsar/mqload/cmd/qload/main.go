@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -42,6 +43,7 @@ type queenFlags struct {
 	retryLimit int
 	configure  bool
 	warmConc   int
+	warmIdle   time.Duration
 	leaseWait  time.Duration
 	verifyConc int
 	pushWire   string
@@ -49,9 +51,14 @@ type queenFlags struct {
 	pushSpread int
 	txnWire    string
 	txnKV      bool
+	groups     int
+	groupWhere string
+	groupSub   string
+	stampK     int
 
-	url  string
-	list []string
+	url    string
+	list   []string
+	wheres []string // per group: its where ("" = a plain group)
 }
 
 func (q *queenFlags) register(fs *flag.FlagSet) {
@@ -64,6 +71,10 @@ func (q *queenFlags) register(fs *flag.FlagSet) {
 	fs.IntVar(&q.pushSpread, "push-spread", 1, "the messages of one push request in N consecutive partitions from the unit's own, in N runs (N > 1: one multi-partition request, which the broker plans as one multi-push)")
 	fs.StringVar(&q.txnWire, "txn-wire", "json", "-txn: transaction body: json | bin (the Go client's binary transaction body: the acks as JSON, the pushes framed and zstd-compressed here, answered with counts; needs a broker that accepts it)")
 	fs.BoolVar(&q.txnKV, "txn-kv", false, "-txn: every transaction also puts one KV key per input partition (ns wf, key <topic>/<partition>, ttl 1 h): a workflow step's entity state")
+	fs.IntVar(&q.groups, "groups", 0, "plain mode: consumers in N consumer groups g0..g<N-1> instead of queue mode, global consumer i in group i % N (each group gets every message it takes: fan-out); 0 = queue mode")
+	fs.StringVar(&q.groupWhere, "group-where", "", "plain mode: the groups' wheres, ';'-separated, group i takes the i-th (filtered groups; an empty one = a plain group); sets -groups when that is 0. E.g. \"data.k < 30;data.k >= 30 and data.k < 60\"")
+	fs.StringVar(&q.groupSub, "group-sub", "", "subscriptionMode of the groups' first pop (\"all\"; empty = the broker's default, new)")
+	fs.IntVar(&q.stampK, "stamp-k", 0, "every load message also carries \"k\":<j % N> (j its index in the push), so a where on data.k takes an exact share; 0 = off")
 	fs.IntVar(&q.conns, "conns", 2048, "HTTP keep-alive connections kept per broker (MaxIdleConnsPerHost, goload's -idle-conns)")
 	core.DurationVar(fs, &q.timeout, "timeout", 30*time.Second, "request timeout")
 	fs.IntVar(&q.popWidth, "pop-width", 10, "partitions claimed per pop (workers and readers; the 09-30 grid's pop width)")
@@ -76,6 +87,7 @@ func (q *queenFlags) register(fs *flag.FlagSet) {
 	fs.IntVar(&q.retryLimit, "retry-limit", 1000000, "configure: retryLimit (a redelivered input never goes to the DLQ)")
 	fs.BoolVar(&q.configure, "configure", true, "with -create: configure the queues (POST /api/v1/configure)")
 	fs.IntVar(&q.warmConc, "warm-conc", 16, "-warm: push/drain requests in flight")
+	core.DurationVar(fs, &q.warmIdle, "warm-drain-idle", 10*time.Second, "-warm: the drain gives up after this long with no message out (ten million partitions: the first pops take over a minute, give it 300s)")
 	core.DurationVar(fs, &q.leaseWait, "verify-lease-wait", 0, "-verify: wait until this long after the verifier started before reading the unprocessed rest of <topic>-in, so leases of stopped workers ran out (0 = -lease + 2s)")
 	fs.IntVar(&q.verifyConc, "verify-conc", 16, "-verify: parallel poppers per scan")
 }
@@ -96,7 +108,33 @@ func (q *queenFlags) finalize(cfg *core.Config) error {
 	if q.leaseWait <= 0 {
 		q.leaseWait = time.Duration(q.lease+2) * time.Second
 	}
+	if q.groupWhere != "" {
+		for _, w := range strings.Split(q.groupWhere, ";") {
+			q.wheres = append(q.wheres, strings.TrimSpace(w))
+		}
+		if q.groups == 0 {
+			q.groups = len(q.wheres)
+		}
+		if len(q.wheres) > q.groups {
+			return fmt.Errorf("-group-where has %d wheres for -groups %d", len(q.wheres), q.groups)
+		}
+	}
+	if q.groups < 0 || q.stampK < 0 {
+		return fmt.Errorf("-groups and -stamp-k must be >= 0")
+	}
+	for len(q.wheres) < q.groups {
+		q.wheres = append(q.wheres, "")
+	}
 	return nil
+}
+
+// group is global consumer i's consumer group and where ("", "" = queue mode).
+func (q *queenFlags) group(i int) (string, string) {
+	if q.groups == 0 {
+		return "", ""
+	}
+	g := i % q.groups
+	return "g" + strconv.Itoa(g), q.wheres[g]
 }
 
 func fatal(format string, a ...any) {
@@ -139,7 +177,15 @@ func main() {
 	if err != nil {
 		fatal("%v", err)
 	}
+	run.Pool.KeyMod = qf.stampK
+	if tx.On && qf.groups > 0 {
+		fatal("-groups and -group-where are for plain mode, not -txn")
+	}
 	mode := "plain: consumers pop+ack the queue"
+	if qf.groups > 0 {
+		mode = fmt.Sprintf("plain: consumers in %d groups pop+ack the queue (wheres %q, subscriptionMode %q, stamp-k %d)",
+			qf.groups, qf.wheres, qf.groupSub, qf.stampK)
+	}
 	if tx.On {
 		mode = fmt.Sprintf("txn: %s -> workers (txn-size %d, linger %v, one /transaction = acks with leases + pushes) -> %s, %d read-committed readers",
 			core.InTopic(cfg), tx.Size, tx.Linger, core.OutTopic(cfg), tx.Readers)

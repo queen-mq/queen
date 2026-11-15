@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -119,6 +120,7 @@ type popReq struct {
 	queue     string
 	group     string // "" = queue mode
 	subMode   string // subscriptionMode for a new group cursor ("all")
+	where     string // a filtered group's where, on every pop of the group
 	batch     int
 	width     int
 	wait      bool
@@ -156,6 +158,10 @@ func (p popReq) path() string {
 	if p.subMode != "" {
 		b.WriteString("&subscriptionMode=")
 		b.WriteString(p.subMode)
+	}
+	if p.where != "" {
+		b.WriteString("&where=")
+		b.WriteString(url.QueryEscape(p.where))
 	}
 	if popFrames {
 		b.WriteString("&frames=true")

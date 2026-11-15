@@ -80,6 +80,10 @@ type PayloadPool struct {
 	AvgRaw float64
 	// AvgStamped is the mean message size (bytes) as sent.
 	AvgStamped float64
+	// KeyMod > 0 (qload -stamp-k): every message also carries `"k":<j % KeyMod>` after "src", j its index in the
+	// unit, so a filter on data.k takes an exact share of the stream (with -batch a multiple of KeyMod). Set it
+	// before the first Stamp.
+	KeyMod int
 }
 
 // NewPayloadPool pre-marshals PoolBatches*maxUnit events of ~size bytes.
@@ -126,6 +130,9 @@ func (p *PayloadPool) Stamp(schedMicros int64, n int) [][]byte {
 	h := append(hb[:0], `{"ts":`...)
 	h = strconv.AppendInt(h, schedMicros, 10)
 	h = append(h, p.srcPart...)
+	if p.KeyMod > 0 {
+		return p.stampKeyed(h, raws[:n])
+	}
 	slab := make([]byte, n*len(h)+p.cum[b][n])
 	out := make([][]byte, n)
 	off := 0
@@ -137,6 +144,26 @@ func (p *PayloadPool) Stamp(schedMicros int64, n int) [][]byte {
 		copy(m[len(h):], r[1:])
 		out[j] = m
 		off += l
+	}
+	return out
+}
+
+// stampKeyed is Stamp with KeyMod: `{"ts":..,"src":..,` + `"k":<j % KeyMod>,` + the event's fields.
+func (p *PayloadPool) stampKeyed(h []byte, raws [][]byte) [][]byte {
+	size := 0
+	for _, r := range raws {
+		size += len(h) + len(`"k":,`) + 20 + len(r)
+	}
+	slab := make([]byte, 0, size)
+	out := make([][]byte, len(raws))
+	for j, r := range raws {
+		start := len(slab)
+		slab = append(slab, h...)
+		slab = append(slab, `"k":`...)
+		slab = strconv.AppendInt(slab, int64(j%p.KeyMod), 10)
+		slab = append(slab, ',')
+		slab = append(slab, r[1:]...)
+		out[j] = slab[start:len(slab):len(slab)]
 	}
 	return out
 }
