@@ -569,15 +569,24 @@
     (pop-and-ack! client test op (:reader op) reader-group nil)
 
     :make-reader
-    (let [res (make-reader! client test op (some #(when (= (:reader op) (:queue %)) %) readers))]
+    (let [; The ask is on its way: the generator stops offering it. It is
+          ; marked here, where the op really runs, and not where it is
+          ; generated (see reading-workload).
+          _   (when-let [a (:asked client)] (reset! a true))
+          res (make-reader! client test op (some #(when (= (:reader op) (:queue %)) %) readers))]
       ; From now on it is popped (it is not before: a pop would make it an
       ; ordinary queue).
       (when (and (= :ok (:type res)) (:made client))
         (swap! (:made client) conj (:reader op)))
-      ; Not made (a kill, a 503): ask again (rt-reading-lz-kill 2026-11-14:
-      ; the one ask failed, the reader was made only at the final catch-up,
-      ; and :make-reader never answered :ok).
-      (when (and (not= :ok (:type res)) (:asked client))
+      ; Not made (a kill, a 503): ask again, a second later (rt-reading-lz-kill
+      ; 2026-11-14: the one ask failed, the reader was made only at the final
+      ; catch-up, and :make-reader never answered :ok). A refusal the broker
+      ; decided (400, 404, 409) is not asked again: it would be refused for
+      ; ever, and :make-reader without an :ok is then the finding.
+      (when (and (not= :ok (:type res)) (:asked client)
+                 (not (#{400 404 409} (second (:error res)))))
+        (when-let [t (:again client)]
+          (reset! t (+ (System/nanoTime) 1000000000)))
         (reset! (:asked client) false))
       res)
 
@@ -773,16 +782,28 @@
         ; gen/phases inside gen/any waited for every thread to be free, which
         ; the mix never left them, and the op often never ran.
         t0    (atom nil)
+        ; True from the moment a :make-reader runs until it fails, and for
+        ; good once it answered :ok. The generator only READS it: the
+        ; interpreter asks for an op, drops it when its time has not come
+        ; (gen/stagger puts it in the future) and asks again, so a
+        ; generator that marked the ask as made lost it. The gate of
+        ; 2026-11-14 sent :make-reader in 6 of 13 reading runs and made the
+        ; reader mid-test in 3; the others made it only at the final catch-up.
         asked (atom false)
+        ; Not before this instant (nanoTime): one ask a second after a failed
+        ; one, not one per generated op while a fault lasts.
+        again (atom 0)
         due?  (fn []
                 (let [now (System/nanoTime)]
                   (compare-and-set! t0 nil now)
                   (and (<= (* 1000000000 mid) (- now (long @t0)))
-                       (compare-and-set! asked false true))))]
+                       (not @asked)
+                       (<= (long @again) now))))]
     {:client          (map->Client {:invoke-fn reading-invoke!
                                     :setup-fn  reading-setup!
                                     :made      made
-                                    :asked     asked})
+                                    :asked     asked
+                                    :again     again})
      :checker         (checker/compose {:readers (reading-checker), :framed (framed-checker)})
      :generator       (gen/mix [(enqueue-gen ["jepsen-0" "jepsen-1"])
                                 (fn [] (if (due?)

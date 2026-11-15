@@ -3,6 +3,7 @@
   history per planted bug, each caught by the rule it breaks. No cluster."
   (:require [clojure.test :refer :all]
             [jepsen [checker :as checker]
+                    [client :as client]
                     [history :as h]
                     [util :as util]]
             [jepsen.queen.workload.routing :as r]))
@@ -342,3 +343,66 @@
     (reset! r/pad-bytes 0)
     (is (= {:v 3, :kind "a", :cust "c1"} (r/payload 3)))
     (finally (reset! r/pad-bytes 0))))
+
+;; ---------------------------------------------------------------------------
+;; W16: the ask for the mid-test reader
+
+(defn- reader-ask
+  "The reading workload's dequeue / :make-reader branch (the second generator
+  of its mix): the function the interpreter calls for an op."
+  [w]
+  (second (:gens (:generator w))))
+
+(defn- make-reader-op
+  []
+  {:type :invoke, :f :make-reader, :value nil, :reader "jepsen-r3", :process 0})
+
+(deftest w16-mid-test-reader-ask
+  ; :time-limit 0: the reader is due from the first op. The broker's answer
+  ; is planted; everything else is the workload's own code.
+  (let [answer (atom nil)
+        during (atom nil)
+        ask!   (atom nil)]
+    (with-redefs [r/make-reader! (fn [_client _test op _r]
+                                   (reset! during (:f (@ask!)))
+                                   (merge op @answer))]
+      (testing "an op the interpreter dropped is offered again"
+        ; jepsen.generator.interpreter/run! asks for an op and, when its
+        ; :time has not come, keeps the generator it had and asks again.
+        ; gen/stagger puts nearly every op in the future. The gate of
+        ; 2026-11-14 sent :make-reader in 6 of 13 reading runs.
+        (let [ask (reader-ask (r/reading-workload {:time-limit 0}))]
+          (is (= :make-reader (:f (ask))))
+          (is (= :make-reader (:f (ask))))
+          (is (= :make-reader (:f (ask))))))
+
+      (testing "a 503 is asked again, a second later, and not while it runs"
+        (let [w   (r/reading-workload {:time-limit 0})
+              ask (reader-ask w)]
+          (reset! ask! ask)
+          (reset! answer {:type :info, :error [:configure 503 {:error "no quorum-ack lease; retry"}]})
+          (is (= :info (:type (client/invoke! (:client w) test-map (make-reader-op)))))
+          (is (= :dequeue @during) "offered while the ask ran")
+          (is (= :dequeue (:f (ask))) "offered again at once: one per generated op while a fault lasts")
+          (Thread/sleep 1100)
+          (is (= :make-reader (:f (ask))))))
+
+      (testing "a refusal the broker decided is not asked again"
+        (let [w   (r/reading-workload {:time-limit 0})
+              ask (reader-ask w)]
+          (reset! ask! ask)
+          (reset! answer {:type :fail, :error [:configure 400 {:error "holds messages"}]})
+          (is (= :fail (:type (client/invoke! (:client w) test-map (make-reader-op)))))
+          (Thread/sleep 1100)
+          (is (= :dequeue (:f (ask))))))
+
+      (testing "made: it is popped from then on, and never asked again"
+        (let [w   (r/reading-workload {:time-limit 0})
+              ask (reader-ask w)]
+          (reset! ask! ask)
+          (is (not (contains? @(:made (:client w)) "jepsen-r3")))
+          (reset! answer {:type :ok, :catching-up false})
+          (is (= :ok (:type (client/invoke! (:client w) test-map (make-reader-op)))))
+          (is (contains? @(:made (:client w)) "jepsen-r3"))
+          (Thread/sleep 1100)
+          (is (= :dequeue (:f (ask)))))))))
