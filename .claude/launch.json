@@ -301,6 +301,89 @@
       ],
       "port": 4011,
       "autoPort": false
+    },
+    {
+      "name": "queen-feed-single",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "/private/tmp/claude-502/-Users-alice-Work-queen/67934fd1-5f73-47c0-977e-764068a6c0a8/scratchpad/feed-e2e/single.sh"
+      ],
+      "port": 17852,
+      "autoPort": false
+    },
+    {
+      "name": "queen-feed-cluster",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "/private/tmp/claude-502/-Users-alice-Work-queen/67934fd1-5f73-47c0-977e-764068a6c0a8/scratchpad/feed-e2e/cluster.sh"
+      ],
+      "port": 17853,
+      "autoPort": false
+    },
+    {
+      "name": "queen-feed-demo",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "/private/tmp/claude-502/-Users-alice--claude-spares-spare-KjJxKY/fbd3c860-6e1a-42e4-9913-70dab5aeef33/scratchpad/gh-demo/broker.sh"
+      ],
+      "port": 17862,
+      "autoPort": false
+    },
+    {
+      "name": "gh-demo-page",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd examples/feed-github && exec node page.mjs"
+      ],
+      "port": 4390,
+      "autoPort": false
+    },
+    {
+      "name": "sdk-feed-single",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "/private/tmp/claude-502/-Users-alice-Work-queen/7bb0a252-eb9f-4393-bd11-72639e08b500/scratchpad/sdkfeed/single-280.sh"
+      ],
+      "port": 17872,
+      "autoPort": false
+    },
+    {
+      "name": "sdk-feed-cluster",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "/private/tmp/claude-502/-Users-alice-Work-queen/7bb0a252-eb9f-4393-bd11-72639e08b500/scratchpad/sdkfeed/cluster-280.sh"
+      ],
+      "port": 17873,
+      "autoPort": false
+    },
+    {
+      "name": "slides-draft",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/alice/Work/queen/webdoc && exec python3 -m http.server 4395 --bind 127.0.0.1"
+      ],
+      "port": 4395,
+      "autoPort": false
+    },
+    {
+      "name": "queen-streams-local",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "QUEEN_RAFT_DIR=${TMPDIR:-/tmp}/queen-dev/6650 QUEEN_RAFT_DISK_HIGH_PCT=99.5 QUEEN_RAFT_DISK_LOW_PCT=99 QUEEN_BIND_ADDR=127.0.0.1 PORT=6650 exec server/target/release/queen"
+      ],
+      "port": 6650
+    },
+    {
+      "name": "queen-app-streams-local",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:6650 exec npx vite --port 4012 --strictPort"
+      ],
+      "port": 4012
     }
   ]
 }
