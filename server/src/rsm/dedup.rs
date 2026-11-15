@@ -1100,13 +1100,42 @@ const FRONT_SHARDS: usize = 1024;
 const FRONT_SWEEP_TICK: std::time::Duration = std::time::Duration::from_millis(10);
 const FRONT_SWEEP_SHARDS_PER_TICK: usize = FRONT_SHARDS / 100;
 
-/// Default global cap in MiB (`QUEEN_RAFT_DEDUP_FRONT_MB`). 4 GiB fronts ~1 G
-/// in-window hashes of hot partitions at 4 B each
-/// ([`FRONT_BITS_PER_HASH_HOT`]), or a million quiet partitions with a few
-/// minimum generations each, before any partition falls back. It was 2 GiB
-/// while every generation was sized at 2 B per hash: the cap went up with the
-/// hot generations' bits so that it is met at the same number of hashes.
+/// The floor of the default global cap in MiB (`QUEEN_RAFT_DEDUP_FRONT_MB`,
+/// [`default_cap_mb`]). 4 GiB fronts ~1 G in-window hashes of hot partitions
+/// at 4 B each ([`FRONT_BITS_PER_HASH_HOT`]), or a million quiet partitions
+/// with a few minimum generations each, before any partition falls back. It
+/// was 2 GiB while every generation was sized at 2 B per hash: the cap went up
+/// with the hot generations' bits so that it is met at the same number of
+/// hashes.
 pub const FRONT_DEFAULT_CAP_MB: usize = 4096;
+
+/// The default global cap in MiB when `QUEEN_RAFT_DEDUP_FRONT_MB` is not set:
+/// a quarter of the memory this process may use (`mem_limit_bytes`: its
+/// cgroup's limit, else the machine's RAM), and never under
+/// [`FRONT_DEFAULT_CAP_MB`].
+///
+/// Why a quarter: every in-window message costs 16 B of txns rows on every
+/// node, and at most 8 B of front on its leader (4 B a hash in a hot
+/// generation, and a generation is allocated whole before it fills). So the
+/// front needs at most half of what the txns rows take, and a quarter of the
+/// memory lasts until those rows fill half of it, where the node is short of
+/// memory anyway. A fixed cap ran out long before memory did: on 2026-11-15,
+/// 3 raft groups at 4M msg/s with a 900 s dedup window on 90 GB nodes, each
+/// leader's front reached 4 GiB after about 8.5 minutes with 45 GB in use; its
+/// hot partitions fell back to scanning their whole window for every message
+/// (about 0.5 s a push), and the cluster went from 4M msg/s to none, for good,
+/// since a fallback partition recovers only after a whole window with no
+/// message.
+pub(crate) fn default_cap_mb(mem_limit_bytes: Option<u64>) -> usize {
+    let quarter_mb = mem_limit_bytes.map_or(0, |b| (b / 4) >> 20);
+    usize::try_from(quarter_mb)
+        .unwrap_or(usize::MAX)
+        .max(FRONT_DEFAULT_CAP_MB)
+}
+
+/// The shortest time between two warnings of the front falling back for its
+/// cap ([`DedupFront::insert`]): one line a minute names the setting.
+const FRONT_CAP_WARN_EVERY_US: i64 = 60_000_000;
 /// The most hashes one first-touch seed scan of a pre-existing partition will
 /// read before giving up and marking it FALLBACK. Bounds the one-off planning
 /// stall a large preloaded partition can cause; fresh partitions are born
@@ -1442,6 +1471,9 @@ pub struct DedupFront {
     /// (under the shard lock), so [`DedupFront::stats`] never walks the map.
     n_parts: AtomicU64,
     n_fallback: AtomicU64,
+    /// The planning stamp of the last warning that the cap sent a partition to
+    /// fallback (`i64::MIN`: none yet).
+    cap_warned_us: AtomicI64,
 }
 
 /// One shard of the front: its partitions and the per-message counters of the
@@ -1516,6 +1548,7 @@ impl DedupFront {
             recovered: AtomicU64::new(0),
             n_parts: AtomicU64::new(0),
             n_fallback: AtomicU64::new(0),
+            cap_warned_us: AtomicI64::new(i64::MIN),
         }
     }
 
@@ -1656,6 +1689,7 @@ impl DedupFront {
 
     /// Resolve from the environment (WP-1.7 style). `QUEEN_RAFT_DEDUP_FRONT`
     /// (default 1) is the kill switch; `QUEEN_RAFT_DEDUP_FRONT_MB` (default
+    /// [`default_cap_mb`]: a quarter of the memory, at least
     /// [`FRONT_DEFAULT_CAP_MB`]) is the global cap.
     pub fn from_env() -> DedupFront {
         let enabled = match std::env::var("QUEEN_RAFT_DEDUP_FRONT") {
@@ -1669,7 +1703,7 @@ impl DedupFront {
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .filter(|v| *v > 0)
-            .unwrap_or(FRONT_DEFAULT_CAP_MB);
+            .unwrap_or_else(|| default_cap_mb(crate::syscollect::memory_limit_bytes()));
         DedupFront::new(enabled, mb << 20)
     }
 
@@ -2048,7 +2082,8 @@ impl DedupFront {
             if self.total_bytes.load(Ordering::Relaxed) + pf.next_gen_bytes() as u64 > cap {
                 let freed = pf.mark_fallback();
                 self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
-                self.n_fallback.fetch_add(1, Ordering::Relaxed);
+                let n = self.n_fallback.fetch_add(1, Ordering::Relaxed) + 1;
+                self.warn_cap(pid, created_us, n);
                 return;
             }
         }
@@ -2057,6 +2092,32 @@ impl DedupFront {
             self.total_bytes.fetch_add(added as u64, Ordering::Relaxed);
         }
         parts.inserts += 1;
+    }
+
+    /// Say, at most once a minute, that the cap sent a partition to fallback:
+    /// every push to it now scans its whole dedup window, so a busy partition
+    /// slows its planner down and stays that way while it is written to.
+    /// Without this line nothing showed it (2026-11-15: the cluster went to
+    /// 0 msg/s and only a profile of the planner told why).
+    fn warn_cap(&self, pid: Pid, created_us: i64, fallback_partitions: u64) {
+        let last = self.cap_warned_us.load(Ordering::Relaxed);
+        if created_us.saturating_sub(last) < FRONT_CAP_WARN_EVERY_US
+            || self
+                .cap_warned_us
+                .compare_exchange(last, created_us, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
+        tracing::warn!(
+            target: "rsm",
+            partition = pid,
+            cap_mb = self.byte_cap >> 20,
+            fallback_partitions,
+            "dedup front full: a partition now scans its whole dedup window for every \
+             message it is pushed; raise QUEEN_RAFT_DEDUP_FRONT_MB or shorten the \
+             queue's dedupWindowSeconds"
+        );
     }
 
     /// A snapshot of the counters and the resident footprint.
@@ -2481,6 +2542,38 @@ mod tests {
         assert!(
             s.fallback_recovered > 0,
             "the cap never forced a recovery: {s:?}"
+        );
+    }
+
+    /// The default cap follows the memory: a quarter of it, never under the
+    /// 4 GiB floor. On the 90 GB broker of 2026-11-15 the fixed 4 GiB ran out
+    /// at 4M msg/s with a 900 s window and stopped the cluster; a quarter is
+    /// 22,624 MiB there.
+    #[test]
+    fn default_cap_is_a_quarter_of_memory_never_under_the_floor() {
+        assert_eq!(
+            default_cap_mb(None),
+            FRONT_DEFAULT_CAP_MB,
+            "no memory known"
+        );
+        assert_eq!(
+            default_cap_mb(Some(8 << 30)),
+            FRONT_DEFAULT_CAP_MB,
+            "a quarter of 8 GiB is under the floor"
+        );
+        assert_eq!(
+            default_cap_mb(Some(16 << 30)),
+            4096,
+            "16 GiB: the floor exactly"
+        );
+        assert_eq!(
+            default_cap_mb(Some(94_893_740_032)),
+            22_624,
+            "the 11-15 broker"
+        );
+        assert_eq!(
+            default_cap_mb(Some(u64::MAX)),
+            (u64::MAX / 4 >> 20) as usize
         );
     }
 

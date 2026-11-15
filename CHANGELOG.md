@@ -120,6 +120,15 @@ reported the failed write on stderr, that write failed too, and the failure coun
 the Jepsen disk-full tests 13 of the 21 nodes a full disk took out had died this way, with no
 acknowledged write lost (in 2.8.1 too).
 
+**Fixed: a busy broker with a long dedup window no longer stops after a few minutes.** The memory
+the leader gives to finding duplicates fast (`QUEEN_RAFT_DEDUP_FRONT_MB`) now defaults to a quarter
+of the broker's memory (its cgroup limit, else the machine's RAM), never under the 4 GiB it was
+before, and the broker logs a warning, at most once a minute, when that memory runs out. Why: past
+4 GiB a busy partition checked every message it was pushed against its whole dedup window, about
+half a second a push, and stayed that way while it was written to. Three raft groups at 4 million
+messages a second with a 15-minute window, on 90 GB nodes, went from 4 million messages a second to
+none after 8.5 minutes, with 45 GB in use and nothing in the log (in 2.8.1 too).
+
 ## 2.8.1 - 2026-11-11
 
 **Upgrading from 2.8.0: a rolling restart, nothing else.** Nothing in the raft log or on disk
