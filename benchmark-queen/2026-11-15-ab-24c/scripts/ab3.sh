@@ -14,6 +14,10 @@
 # CONFIGURE=1 (push only): the step's queue is configured at create, deduplication off and completed messages kept
 # CRET s (1800), so nothing is deleted while a step runs: the partitions matrix of 2026-10-13 (grid3.sh). Default 0:
 # the queue as the first push creates it (the 11-12/13 ladders).
+# TEN=3 (push only; her ask 11-15, the layout of 2026-10-12 mrun.sh): three tenants (x-queen-tenant), each with its
+# own queue b<k> of PARTS/3 partitions, loader l driving tenant l through all three brokers (its PROCS processes are
+# one load of their own); RG = QUEEN_RAFT_GROUPS (1), with RG > 1 tenant t in group t and each group led by the
+# member it prefers (group g: member g), so no n1-leader step then.
 # Env: PARTS (200), TXN_SIZE (10), CONS (workers or consumers a process: 15), PROCS (a loader: 3), KV (0), BATCH (100),
 # PAYLOAD (256), SPREAD (1), EXTRA_ENV (broker settings), FORMS (default: the binary forms, transactions included).
 # Results: /root/ctl/runs/<tag>/<total>/ (every process's json and log, the brokers' samples), run.log.
@@ -28,6 +32,16 @@ CONFIGURE=${CONFIGURE:-0}; CRET=${CRET:-1800}; WARM_IDLE=${WARM_IDLE:-10s}   # q
 CREATE_CFG="-configure=false"; [ "$CONFIGURE" = 1 ] && CREATE_CFG="-configure=true -dedup-window 0 -completed-retention $CRET"
 NL=${#LP[@]}; NP=$((NL * PROCS))
 EXTRA="QUEEN_RAFT_TXN_WINDOW_MIN_S=60 QUEEN_KV_TXN_WRITE_RATE=10000000 ${EXTRA_ENV:-}"
+TEN=${TEN:-0}; RG=${RG:-1}
+T=(00000000-0000-4000-8000-000000000000 00000001-0000-4000-8000-000000000000 00000002-0000-4000-8000-000000000000)
+if [ "$TEN" = 3 ]; then
+  [ "$MODE" = push ] && [ "$NL" = 3 ] || { echo "TEN=3 needs push mode and three loaders"; exit 1; }
+  EXTRA="$EXTRA QUEEN_TENANCY_HEADER=1 QUEEN_KV_TRUSTED_PROXY=1 QUEEN_RAFT_GROUPS=$RG"
+  [ "$RG" -gt 1 ] && EXTRA="$EXTRA QUEEN_TENANT_GROUPS=${T[0]}=0,${T[1]}=1,${T[2]}=2"
+  TL=("${T[@]}"); PP=$((PARTS / 3))
+else
+  TL=(""); PP=$PARTS
+fi
 FORMS=${FORMS--push-wire bin -push-zstd -ack-counts -pop-frames}
 [ "$MODE" = txn ] && [ "$KV" = 0 ] && FORMS="$FORMS -txn-wire bin"
 [ "$KV" = 1 ] && FORMS="$FORMS -txn-kv"
@@ -43,12 +57,12 @@ for i in 0 1 2; do $SSH root@${BP[$i]} "/root/p3/qc.sh sample-stop; /root/p3/qc.
 on_loaders "pkill -x qload; true"; wait
 for i in 0 1 2; do start_node $i & done; wait
 all_healthy || { log "FAILED: the cluster did not become healthy"; exit 1; }
-for try in 1 2 3 4 5 6; do
+[ "$RG" = 1 ] && for try in 1 2 3 4 5 6; do   # several groups: each led by the member it prefers
   [ "$(role 0 | cut -d' ' -f2)" = leader ] && break
   for i in 1 2; do if [ "$(role $i | cut -d' ' -f2)" = leader ]; then $SSH root@${BP[$i]} "/root/p3/qc.sh stop"; sleep 2; start_node $i; fi; done
   all_healthy
 done
-log "run $TAG: build $QBIN, $MODE, $PARTS partitions, steps of ${DUR}s at: $* | TXN_SIZE=$TXN_SIZE KV=$KV CONS=$CONS PROCS=$PROCS x $NL loaders BATCH=$BATCH SPREAD=$SPREAD | GROUPS_ARGS=$GROUPS_ARGS SHARE=$SHARE CONFIGURE=$CONFIGURE | EXTRA=$EXTRA | FORMS=$FORMS | roles: n1 $(role 0) | n2 $(role 1) | n3 $(role 2)"
+log "run $TAG: build $QBIN, $MODE, $PARTS partitions, steps of ${DUR}s at: $* | TXN_SIZE=$TXN_SIZE KV=$KV CONS=$CONS PROCS=$PROCS x $NL loaders BATCH=$BATCH SPREAD=$SPREAD | GROUPS_ARGS=$GROUPS_ARGS SHARE=$SHARE CONFIGURE=$CONFIGURE TEN=$TEN RG=$RG | EXTRA=$EXTRA | FORMS=$FORMS | roles: n1 $(role 0) | n2 $(role 1) | n3 $(role 2)"
 URLS=http://${BV[0]}:6632,http://${BV[1]}:6632,http://${BV[2]}:6632
 K=0
 for TOTAL in "$@"; do
@@ -58,12 +72,17 @@ for TOTAL in "$@"; do
     COMMON="-urls $URLS -pop-width 10 -pop-batch 1000 -lease 10 -topic b$K -partitions $PARTS -txn -txn-size $TXN_SIZE -txn-linger 1s -payload $PAYLOAD $FORMS"
     CR=$($SSH root@${LP[0]} "ulimit -n 1048576; /root/p3/bin/qload $COMMON -create-only -warm -warm-drain-idle $WARM_IDLE -tag $ST-create 2>&1 | grep -E 'warm|create|FATAL|rror' | tail -3")
   else
-    COMMON="-urls $URLS -topic b$K -topics 1 -partitions $PARTS -mode batch -batch $BATCH -push-spread $SPREAD -payload $PAYLOAD -pop-batch 1000 -pop-width 10 -pop-timeout 2s -ack async -ack-inflight 256 $FORMS"
-    CR=$($SSH root@${LP[0]} "ulimit -n 1048576; /root/p3/bin/qload $COMMON -create=true $CREATE_CFG -create-only -warm -warm-conc 256 -warm-drain-idle $WARM_IDLE -consumers 0 -rate 0 -tag $ST-create 2>&1 | grep -E 'warm|create|FATAL|rror' | tail -3")
+    COMMON="-urls $URLS -topic b$K -topics 1 -partitions $PP -mode batch -batch $BATCH -push-spread $SPREAD -payload $PAYLOAD -pop-batch 1000 -pop-width 10 -pop-timeout 2s -ack async -ack-inflight 256 $FORMS"
+    CR=""
+    for ten in "${TL[@]}"; do
+      TA=""; [ -n "$ten" ] && TA="-tenant $ten"
+      CR="$CR$($SSH root@${LP[0]} "ulimit -n 1048576; /root/p3/bin/qload $COMMON $TA -create=true $CREATE_CFG -create-only -warm -warm-conc 256 -warm-drain-idle $WARM_IDLE -consumers 0 -rate 0 -tag $ST-create 2>&1 | grep -E 'warm|create|FATAL|rror' | tail -3")
+"
+    done
   fi
   echo "$CR" | cut -c1-200 >> "$LOG"
   # a warm-up that did not drain leaves its messages in the queue and they leak into the step: no step then
-  if echo "$CR" | grep -q -E 'FATAL|rror' || ! echo "$CR" | grep -q -E '^ *\[create\] done'; then
+  if echo "$CR" | grep -q -E 'FATAL|rror' || [ "$(echo "$CR" | grep -c -E '^ *\[create\] done')" -lt "${#TL[@]}" ]; then
     log "$(printf '%9s' "$(printf "%'d" $TOTAL)"): warm-up FAILED, no step | stopping at $TOTAL"; break
   fi
   for i in 0 1 2; do $SSH root@${BP[$i]} "/root/p3/qc.sh sample-stop; /root/p3/qc.sh sample-start $ST" & done; wait
@@ -74,8 +93,10 @@ for TOTAL in "$@"; do
       PER="-create=false -rate $((TOTAL / NP)) -ramp 5s -duration ${DUR}s -report 10s -drain 40s -idle-exit 3s -max-inflight 5000 -batch 100 -consumers $CONS -cons-total $((NP * CONS)) -loaders $NP -local-src $P0-$P1"
       LAUNCH="for p in \$(seq $P0 $P1); do nohup /root/p3/bin/qload $COMMON $PER -cons-offset \$((p * $CONS)) -loader-index \$p -start-at $START -out p\$p.json -tag $ST-p\$p > p\$p.log 2>&1 </dev/null & done"
     else
-      PER="-create=false -configure=false -rate $((TOTAL / NP)) -ramp 10 -duration $DUR -drain 10 -max-inflight 5000 -report 10 -consumers $CONS -cons-total $((NP * CONS)) -loaders $NP -local-src $P0-$P1"
-      LAUNCH="G=\$(echo $G64 | base64 -d); for p in \$(seq $P0 $P1); do eval \"nohup /root/p3/bin/qload $COMMON $PER \$G -cons-offset \$((p * $CONS)) -loader-index \$p -start-at $START -out q\$p.json -tag $ST-q\$p\" > q\$p.log 2>&1 </dev/null & done"
+      if [ "$TEN" = 3 ]; then IX0=$P0; LDS="-tenant ${T[$l]} -loaders $PROCS -cons-total $((PROCS * CONS)) -local-src 0-$((PROCS - 1))"
+      else IX0=0; LDS="-loaders $NP -cons-total $((NP * CONS)) -local-src $P0-$P1"; fi
+      PER="-create=false -configure=false -rate $((TOTAL / NP)) -ramp 10 -duration $DUR -drain 10 -max-inflight 5000 -report 10 -consumers $CONS $LDS"
+      LAUNCH="G=\$(echo $G64 | base64 -d); for p in \$(seq $P0 $P1); do eval \"nohup /root/p3/bin/qload $COMMON $PER \$G -cons-offset \$(((p - $IX0) * $CONS)) -loader-index \$((p - $IX0)) -start-at $START -out q\$p.json -tag $ST-q\$p\" > q\$p.log 2>&1 </dev/null & done"
     fi
     $SSH root@${LP[$l]} "ulimit -n 1048576; cd $R; ($LAUNCH; wait; echo done > done) > /dev/null 2>&1 </dev/null &" &
   done

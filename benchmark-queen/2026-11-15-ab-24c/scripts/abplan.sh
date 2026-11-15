@@ -8,6 +8,9 @@
 #   f3: three filtered groups splitting the stream by data.k: < 34, 34..66, >= 67 (SHARE 1) new only
 #   single (not in the default ONLY; her ask 11-15): push + pop with ONE message a push request (BATCH=1, so
 #           msg/s = push requests/s), 1000 partitions, the same consumers and forms as push: the request ceiling
+#   rg3, rg1t (not in the default ONLY; her ask 11-15 "a ceiling test on multiraft with QUEEN_RAFT_GROUPS=3"): the push
+#           ladder as three tenants of 333 partitions, one a loader (ab3.sh TEN=3), in three raft groups (rg3: tenant
+#           t in group t, group g led by member g) and, on new only, in one group (rg1t: what the tenants alone change)
 #   t10x, t10wx (not in the default ONLY; her ask 11-15): t10 and t10w on new only, from the top of the first ladders
 #           (new carried 320k and 360k there without failing) up, to find the ceiling
 # Every ladder stops at its first step not carried. Lines to runs/abplan.out as they land.
@@ -32,6 +35,9 @@ main() {
                 one t10x   $b PARTS=200 TXN_SIZE=10 KV=0 CONS=22  -- txn 320000 360000 400000 450000 500000 550000 600000 ;;
         t10wx)  [ $b = 281 ] && continue
                 one t10wx  $b PARTS=900 TXN_SIZE=10 KV=0 CONS=49  -- txn 360000 400000 450000 500000 550000 600000 700000 ;;
+        rg3)    one rg3    $b PARTS=1000 CONS=15 SPREAD=1 TEN=3 RG=3 -- push 4000000 5000000 6000000 7000000 8000000 9000000 10000000 ;;
+        rg1t)   [ $b = 281 ] && continue
+                one rg1t   $b PARTS=1000 CONS=15 SPREAD=1 TEN=3 RG=1 -- push 3500000 4000000 4500000 5000000 ;;
         g1)     one g1   $b PARTS=1000 CONS=15 SPREAD=1 GROUPS_ARGS="-groups 1" SHARE=1 -- push 1000000 2000000 2500000 3000000 3500000 4000000 ;;
         g3)     one g3     $b PARTS=1000 CONS=15 SPREAD=1 GROUPS_ARGS="-groups 3" SHARE=3 -- push 250000 500000 1000000 1500000 2000000 2500000 ;;
         f1)     [ $b = 281 ] && continue
