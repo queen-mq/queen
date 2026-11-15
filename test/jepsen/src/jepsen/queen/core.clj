@@ -25,6 +25,7 @@
                                    [kafka :as kafka-w]
                                    [routing :as routing]
                                    [txnmix :as txnmix]
+                                   [txnelle :as txnelle]
                                    [feedstream :as feedstream]
                                    [ephemeral :as ephemeral]
                                    [tenants :as tenants]
@@ -78,7 +79,8 @@
    :pgsource connectors/pgsource-workload ; W28, the PostgreSQL source (services on the control node)
    :pgsink   connectors/pgsink-workload   ; W29, the PostgreSQL sink
    :s3sink   connectors/s3sink-workload   ; W30, the S3 sink
-   :duppush  duppush/workload}) ; W31, copies of one push sent together (dedup in flight)
+   :duppush  duppush/workload   ; W31, copies of one push sent together (dedup in flight)
+   :txnelle  txnelle/workload}) ; W32, Elle over /api/v1/transaction
 
 (def all-faults
   #{:pause :kill :partition :clock :pause-kill :part-kill :bridge :leader-deaf
@@ -729,7 +731,7 @@
    [nil "--encrypt" "QUEEN_ENCRYPTION_KEY on every node and encryptionEnabled on the test queues; the encryption checker proves every node started its encryption service."
     :default false]
 
-   [nil "--require-planner-spread" "Fail the test unless the footprint scheduler's log lines show transactions planned by shares (spread > 0): for the tests that exist to drive that path (txnmix with QUEEN_PLANNER_THREADS above 1)."
+   [nil "--require-planner-spread" "Fail the test unless the footprint scheduler's log lines show transactions planned by shares (spread > 0): for the tests that exist to drive that path (txnmix and txnelle with QUEEN_PLANNER_THREADS above 1)."
     :default false]
 
    [nil "--feed-sdks SDKS" "feedstream workload: the SDKs whose runners run the queries, spread over the nodes (js, python, go, rust)."
@@ -853,7 +855,7 @@
     :parse-fn #(mapv keyword (remove str/blank? (str/split % #",")))
     :validate [#(every? #{:push :multi :multi-twice :txn} %) "push, multi, multi-twice, txn"]]
 
-   ["-w" "--workload NAME" "Workload: log (W1), queue (W2), register (W3), counter (W3b), claim (W3c), elle (W4), pipeline (W5), dedup (W6), dlq (W7), retention (W8), streams (W9), timers (W10), locks (W11), semaphore (W11b), failover (W12), feed (W13), kafka (W14), filtered (W15), reading (W16), link (W17), txnmix (W18), feedstream (W19), ephemeral (W20), tenants (W21), scoped (W22), dlqops (W23), queueopts (W24), kvttl (W25), seek (W26), lifecycle (W27), pgsource (W28), pgsink (W29), s3sink (W30), duppush (W31)."
+   ["-w" "--workload NAME" "Workload: log (W1), queue (W2), register (W3), counter (W3b), claim (W3c), elle (W4), pipeline (W5), dedup (W6), dlq (W7), retention (W8), streams (W9), timers (W10), locks (W11), semaphore (W11b), failover (W12), feed (W13), kafka (W14), filtered (W15), reading (W16), link (W17), txnmix (W18), feedstream (W19), ephemeral (W20), tenants (W21), scoped (W22), dlqops (W23), queueopts (W24), kvttl (W25), seek (W26), lifecycle (W27), pgsource (W28), pgsink (W29), s3sink (W30), duppush (W31), txnelle (W32)."
     :default :log
     :parse-fn keyword
     :validate [workloads (cli/one-of workloads)]]])

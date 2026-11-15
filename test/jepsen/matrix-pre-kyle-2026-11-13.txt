@@ -83,6 +83,21 @@ tm1-none                          --workload txnmix --nemesis none --time-limit 
 tm1-kill                          --workload txnmix --nemesis kill --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=1
 tm1-part                          --workload txnmix --nemesis partition --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=1
 
+# W32 txnelle: Elle over /api/v1/transaction (KV reads and writes, pushes as lists, losers), planner threads 8 (and 1)
+te8-none                          --workload txnelle --nemesis none --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-kill                          --workload txnelle --nemesis kill --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-part                          --workload txnelle --nemesis partition --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-pause                         --workload txnelle --nemesis pause --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-clock                         --workload txnelle --nemesis clock --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-deaf                          --workload txnelle --nemesis leader-deaf --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-restart                       --workload txnelle --nemesis restart --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-member                        --workload txnelle --nemesis membership --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-lz-kill                       --workload txnelle --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-packet                        --workload txnelle --nemesis packet --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te1-none                          --workload txnelle --nemesis none --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=1
+te1-kill                          --workload txnelle --nemesis kill --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=1
+te1-part                          --workload txnelle --nemesis partition --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=1
+
 # W19 feedstream: the SDK runners under faults (--nemesis runner kills and pauses the active one)
 fs-runner-js-go                   --workload feedstream --nemesis runner --feed-sdks js,go --time-limit 300 --rate 200 --nemesis-interval 20
 fs-runner-py-rust                 --workload feedstream --nemesis runner --feed-sdks python,rust --time-limit 300 --rate 200 --nemesis-interval 20
