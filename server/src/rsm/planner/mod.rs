@@ -869,10 +869,13 @@ pub fn placeholder_parts(n: u64) -> (u32, u64) {
     (((n & !PLACEHOLDER) >> 32) as u32, n & PLACEHOLDER_ORDINAL)
 }
 
-/// How many shards an overlay's partition state is split into, by pid. The
-/// footprint scheduler gives each planning thread whole shards for a run, to
-/// plan its groups in place, and a cycle's landing works shard by shard on the
-/// planning threads too.
+/// How many shards an overlay's partition state is split into, by pid. A pid's
+/// shard comes from its name and never changes ([`homes::Homes`]); each shard
+/// has one planning thread, its home, always the same
+/// ([`homes::home_of_shard`]), which plans in it in place and lands its rows at
+/// the start of its job. The count is fixed while the thread count is a knob
+/// (`QUEEN_PLANNER_THREADS`, at most this many): the layout is the same with
+/// one thread or eight, and a set of shards is one [`ShardMask`].
 pub(crate) const PART_SHARDS: usize = 64;
 
 /// The map after the shards: the partitions a group created this cycle, under
