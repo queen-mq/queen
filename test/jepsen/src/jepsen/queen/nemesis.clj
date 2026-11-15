@@ -26,6 +26,7 @@
             [jepsen.nemesis.combined :as nc]
             [jepsen.nemesis.file :as nf]
             [jepsen.queen [db :as qdb]
+                          [http :as qh]
                           [membership :as qm]]))
 
 (defn- roles
@@ -663,36 +664,108 @@
       {:filled-bytes size
        :left         (str/trim (c/exec :df :-B1 :--output=avail "/opt/queen"))})))
 
+(def full-disk-stop-line
+  "What a node logs when a write to its raft log fails for lack of space and
+  it stops: the stop manage/recovery.mdx describes (\"At 100% it logs `No
+  space left on device` and stops\"). \"poisoned\" is the log writer's state
+  here, not a panic and not a poisoned lock."
+  #"raft log writer poisoned; node stops why=raft log write failed: No space left on device")
+
+(defn full-disk-stop-line?
+  "Is `line` of a queen.log the stop a full disk causes, in a test whose
+  faults fill disks? Only there is it no finding for the panic checker."
+  [faults line]
+  (boolean (and (contains? (set faults) :disk-full)
+                (re-find full-disk-stop-line line)
+                (not (re-find #"panicked at|NA-QLOG-I1" line)))))
+
+(defn disk-full-restart
+  "Whether a node is restarted once the fills are removed, and why: :dead
+  (its process is gone), :stopped (it runs and reports the raft role
+  `stopped`), or nil (it is left alone).
+
+  A node whose disk was full stops for good: the documented remedy is \"Grow
+  its volume and restart it\" (manage/recovery.mdx). The process of a stopped
+  node stays up, run.sh restarts the binary only on exit 75, and nothing else
+  in a test starts it. Without this restart the gate of 2026-11-14 lost its
+  majority 65 and 85 s into diskfull-log and diskfull-queue and never got it
+  back: the final reads met refusals and timeouts, and the messages
+  acknowledged just before were reported lost and unseen.
+
+  Only a node this nemesis filled is touched: `ever?` at any time in the test
+  (a stop), `recent?` since the last :free-disk (a death; a process another
+  fault took down is not this nemesis's to start)."
+  [{:keys [recent? ever? running? role]}]
+  (cond (and recent? (not running?))            :dead
+        (and ever? running? (= "stopped" role)) :stopped
+        :else                                   nil))
+
+(defn- restart-after-full!
+  "On the bound node, once its fill is removed: restarts it when
+  disk-full-restart says so. Returns :dead, :stopped or nil."
+  [test node filled]
+  (when (or (:recent? filled) (:ever? filled))
+    (let [running? (qdb/running?)
+          role     (when running?
+                     (get-in (qh/health (qh/client) node 2000) [:raft :role]))
+          why      (disk-full-restart (assoc filled :running? running?, :role role))]
+      (when why
+        ; Not a power loss under --lazyfs: an operator restarts the process.
+        (when running? (qdb/kill-node! (dissoc test :lazyfs) node))
+        (qdb/start-node! test node))
+      why)))
+
 (defn disk-full-nemesis
   "  :fill-disk  fill the disk under the data directory of the nodes in
                 :value (a node spec, resolved like the kill nemesis's), to the
                 last free block but --disk-full-keep bytes;
-     :free-disk  remove the fill on every node.
+     :free-disk  remove the fill on every node, and restart the nodes the
+                full disk stopped or killed (disk-full-restart): a node's
+                value is then {:freed true, :restarted :stopped|:dead}.
   A full disk must cost availability, never an acknowledged write: a node
-  that cannot write refuses or stops, and once the disk has room again the
-  cluster goes on. A panic is reported by the panic checker like any other."
+  that cannot write refuses or stops, and once the disk has room again and
+  the node is restarted the cluster goes on. A panic is reported by the panic
+  checker like any other; the stop itself is not one (full-disk-stop-line?)."
   [db]
-  (reify
-    n/Reflection
-    (fs [_] #{:fill-disk :free-disk})
+  (let [recent (atom #{})    ; filled since the last :free-disk
+        ever   (atom #{})]   ; filled at some point in this test
+    (reify
+      n/Reflection
+      (fs [_] #{:fill-disk :free-disk})
 
-    n/Nemesis
-    (setup! [this test]
-      (c/with-test-nodes test (free-disk!))
-      this)
+      n/Nemesis
+      (setup! [this test]
+        (c/with-test-nodes test (free-disk!))
+        this)
 
-    (invoke! [this test op]
-      (case (:f op)
-        :fill-disk
-        (let [nodes (vec (nc/db-nodes test db (:value op)))]
-          (assoc op :value (c/on-nodes test nodes
-                                       (fn [test node]
-                                         (fill-disk! (:disk-full-keep test 0))))))
-        :free-disk
-        (assoc op :value (c/on-nodes test (fn [test node] (free-disk!))))))
+      (invoke! [this test op]
+        (case (:f op)
+          :fill-disk
+          (let [nodes (vec (nc/db-nodes test db (:value op)))]
+            ; Before the fill: one that fails on a node (fallocate exits 1
+            ; when the last block is taken) still filled it.
+            (swap! recent into nodes)
+            (swap! ever into nodes)
+            (assoc op :value (c/on-nodes test nodes
+                                         (fn [test node]
+                                           (fill-disk! (:disk-full-keep test 0))))))
+          :free-disk
+          (let [was-recent @recent
+                was-ever   @ever]
+            (reset! recent #{})
+            (assoc op :value
+                   (c/on-nodes test
+                               (fn [test node]
+                                 (free-disk!)
+                                 (if-let [why (restart-after-full!
+                                                test node
+                                                {:recent? (contains? was-recent node)
+                                                 :ever?   (contains? was-ever node)})]
+                                   {:freed true, :restarted why}
+                                   :freed)))))))
 
-    (teardown! [this test]
-      (c/with-test-nodes test (free-disk!)))))
+      (teardown! [this test]
+        (c/with-test-nodes test (free-disk!))))))
 
 (defn disk-full-package
   [{:keys [faults interval db kill]}]
@@ -881,6 +954,15 @@
                                 frequencies)
          :member-final     (:after (:value (last (filter #(= :member-heal (:f %)) members))))
          :disk-fills       (count (filter #(= :fill-disk (:f %)) done))
+         ; Nodes restarted after a :free-disk, by why: :stopped is the
+         ; documented stop at 100%, :dead a process that did not survive it.
+         :disk-full-restarts (->> done
+                                  (filter #(= :free-disk (:f %)))
+                                  (map :value)
+                                  (filter map?)
+                                  (mapcat vals)
+                                  (keep :restarted)
+                                  frequencies)
          :upgrades         (->> done
                                 (filter #(#{:upgrade-node :downgrade-node} (:f %)))
                                 (map (comp (juxt :from :to :rc) :value))

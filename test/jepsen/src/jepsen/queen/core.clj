@@ -205,7 +205,12 @@
   boot on them. A NA-QLOG-I1 line the nemesis recorded as the :why of a
   :refused trial on that node is listed under :excused and does not fail the
   test. One anywhere else (at runtime, after a restore, on another node) does,
-  and so does a panic or a poisoned lock on any node."
+  and so does a panic or a poisoned lock on any node.
+
+  A second exception, with --nemesis disk-full only: the line of a node that
+  stops because its raft log could not be written for lack of space
+  (qn/full-disk-stop-line?). It says \"poisoned\" of the log writer, and it is
+  the stop the docs promise at 100%, not a panic."
   []
   (reify checker/Checker
     (check [this test history opts]
@@ -232,7 +237,9 @@
                                   (doall (filter #(re-find #"panicked at|NA-QLOG-I1|poison" %)
                                                  (line-seq r))))]
                        {:node node, :line line})
-            {excused true, matches false} (group-by (comp boolean refused?) found)]
+            excused? (fn [m] (or (refused? m)
+                                 (qn/full-disk-stop-line? (:faults test) (:line m))))
+            {excused true, matches false} (group-by (comp boolean excused?) found)]
         {:valid?  (empty? matches)
          :count   (count matches)
          :matches (vec matches)

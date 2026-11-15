@@ -737,6 +737,54 @@
       (is (= {true 1} (:corrupt-late-rejoined r))))))
 
 ;; ---------------------------------------------------------------------------
+;; The disk-full nemesis
+
+(deftest disk-full-offline
+  (testing "once the fills are removed: who is restarted, and why"
+    ; The gate of 2026-11-14: three nodes stopped one after another and no
+    ; test restarted them, so the majority never came back.
+    (is (= :stopped (qn/disk-full-restart {:recent? true, :ever? true, :running? true, :role "stopped"})))
+    (is (= :stopped (qn/disk-full-restart {:recent? false, :ever? true, :running? true, :role "stopped"}))
+        "a stop that shows after an earlier fill")
+    (is (= :dead (qn/disk-full-restart {:recent? true, :ever? true, :running? false, :role nil})))
+    (is (nil? (qn/disk-full-restart {:recent? true, :ever? true, :running? true, :role "follower"})))
+    (is (nil? (qn/disk-full-restart {:recent? true, :ever? true, :running? true, :role nil}))
+        "a node that does not answer /health is left alone")
+    (is (nil? (qn/disk-full-restart {:recent? false, :ever? true, :running? false, :role nil}))
+        "a process down since before the last fill is another fault's")
+    (is (nil? (qn/disk-full-restart {:recent? false, :ever? false, :running? true, :role "stopped"}))
+        "a node this nemesis never filled"))
+  (testing "the stop of a full disk is no panic, in a disk-full test only"
+    (let [stop  (str "2026-11-14T21:53:27.406333627Z ERROR rsm: raft log writer poisoned; node stops "
+                     "why=raft log write failed: No space left on device (os error 28)")
+          lock  "2026-11-14T21:53:27.4Z ERROR panic: poisoned lock: aborting (shared state left mid-update): PoisonError"
+          panic (str "thread 'main' panicked at src/x.rs:1:1: raft log writer poisoned; node stops "
+                     "why=raft log write failed: No space left on device")
+          other "ERROR rsm: raft log writer poisoned; node stops why=raft log write failed: Input/output error (os error 5)"]
+      (is (true? (qn/full-disk-stop-line? #{:disk-full} stop)))
+      (is (true? (qn/full-disk-stop-line? [:disk-full :kill] stop)))
+      (is (false? (qn/full-disk-stop-line? #{:kill} stop)) "not in a test that fills no disk")
+      (is (false? (qn/full-disk-stop-line? #{:disk-full} lock)) "a poisoned lock stays a finding")
+      (is (false? (qn/full-disk-stop-line? #{:disk-full} panic)) "a panic stays a finding")
+      (is (false? (qn/full-disk-stop-line? #{:disk-full} other)) "a write that failed for another reason")))
+  (testing "the restarts are counted, by why"
+    (let [r (checker/check
+              (qn/fault-summary-checker) test-map
+              (hist [{:process :nemesis, :type :info, :f :fill-disk, :value :one}
+                     {:process :nemesis, :type :info, :f :fill-disk, :value {"n4" {:filled-bytes 1}}}
+                     {:process :nemesis, :type :info, :f :free-disk, :value nil}
+                     {:process :nemesis, :type :info, :f :free-disk
+                      :value {"n1" :freed
+                              "n2" {:freed true, :restarted :dead}
+                              "n4" {:freed true, :restarted :stopped}}}
+                     {:process :nemesis, :type :info, :f :free-disk, :value nil}
+                     {:process :nemesis, :type :info, :f :free-disk
+                      :value {"n1" :freed, "n4" {:freed true, :restarted :stopped}}}])
+              {})]
+      (is (= {:stopped 2, :dead 1} (:disk-full-restarts r)))
+      (is (= 1 (:disk-fills r))))))
+
+;; ---------------------------------------------------------------------------
 ;; W13: the tenant feed
 
 (defn w13-checker [] (feed/feed-checker))
