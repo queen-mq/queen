@@ -5,6 +5,7 @@
             [jepsen [checker :as checker]
                     [history :as h]
                     [util :as util]]
+            [jepsen.queen.http :as qh]
             [jepsen.queen.workload.connectors :as w]))
 
 (def tm {:name "conn", :start-time (util/local-time), :nodes ["n1"]})
@@ -102,3 +103,23 @@
     (is (= ["s3"] (:failed-written (s3 (s3-with [(rec 1 "p0" 0) (rec 2 "p0" 1) (rec 3 "p0" 2)]))))))
   (testing "a payload that is not what was pushed"
     (is (seq (:payload-mismatch (s3 (s3-with [(rec 1 "p0" 0 :payload {:v 9}) (rec 2 "p0" 1)])))))))
+
+;; ---------------------------------------------------------------------------
+;; W28: waiting for the source to stream
+
+(deftest a-source-streams-when-one-node-says-so
+  ; A connector's status is the answering node's own: `streaming` on the one
+  ; node that holds its lease, `standby` on the others. The gate of
+  ; 2026-11-14 asked the first node only: five of six pgsource runs timed
+  ; out in setup while another node streamed.
+  (let [phase-of {"n1" "standby", "n2" "streaming", "n3" :refused}]
+    (with-redefs [qh/base-url (fn [node] (str "http://" node ":6632"))
+                  qh/request! (fn [_c _method url & _]
+                                (let [p (phase-of (second (re-find #"//(n\d+):" url)))]
+                                  (if (= :refused p)
+                                    (throw (ex-info "refused" {:type ::qh/refused}))
+                                    {:status 200, :body {:status {:phase p}}})))]
+      (let [waited (future (#'w/await-streaming! {:nodes ["n1" "n2" "n3"]} "jepsen-src"))
+            got    (deref waited 5000 :still-waiting)]
+        (future-cancel waited)
+        (is (= {"n1" "standby", "n2" "streaming", "n3" nil} got))))))

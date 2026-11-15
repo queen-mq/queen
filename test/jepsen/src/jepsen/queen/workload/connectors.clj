@@ -71,22 +71,36 @@
     (info "connector" name (:body r))
     r))
 
+(defn- node-phase
+  "The phase `node` reports for connector `name`: its own, not the
+  cluster's. nil when the node does not answer."
+  [node name]
+  (try
+    (get-in (qh/request! (qh/client) :get (str (qh/base-url node) "/api/v1/connectors/" name)
+                         nil 10000)
+            [:body :status :phase])
+    (catch Exception _ nil)))
+
 (defn- await-streaming!
   "Waits until source connector `name` reports phase streaming. Within a few
   seconds of its creation a source makes its publication and slot, copies
   the rows already there and then streams (integrations/postgres.mdx): a
   change committed before that is not streamed, only its row copied.
   pgsource 2026-11-14: all five runs began writing at once and missed
-  exactly their first 1 to 12 s of changes."
+  exactly their first 1 to 12 s of changes.
+
+  Every node is asked: a connector's status is the answering node's own,
+  `streaming` on the one node that holds its lease and `standby` on the
+  others (the gate of 2026-11-14 asked the first node only, and five of
+  six pgsource runs timed out here while another node streamed). Returns
+  each node's phase."
   [test name]
   (util/await-fn
     (fn []
-      (let [r     (qh/request! (qh/client) :get (str (qh/base-url (first (:nodes test))) "/api/v1/connectors/" name)
-                               nil 10000)
-            phase (get-in r [:body :status :phase])]
-        (when-not (= "streaming" phase)
-          (throw (ex-info "connector not streaming yet" {:name name, :phase phase, :status (:status r)})))
-        phase))
+      (let [phases (into {} (map (fn [node] [node (node-phase node name)]) (:nodes test)))]
+        (when-not (some #{"streaming"} (vals phases))
+          (throw (ex-info "connector not streaming yet" {:name name, :phases phases})))
+        phases))
     {:log-message (str "waiting for connector " name " to stream"), :timeout 120000, :retry-interval 500}))
 
 (defn- read-queue-feed
