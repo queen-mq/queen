@@ -40,7 +40,8 @@
                           [services :as svc]]
             [jepsen.queen.workload.log :as log]
             [next.jdbc :as jdbc])
-  (:import (com.github.luben.zstd Zstd)))
+  (:import (com.github.luben.zstd ZstdInputStream)
+           (java.io ByteArrayInputStream ByteArrayOutputStream)))
 
 (def relay {"x-queen-feed-relay" "1"})
 
@@ -312,6 +313,19 @@
 
 (defn s3-queue [test] (str "jepsen-s3-" (quot (or (:start-ms test) 0) 1000)))
 
+(defn- unzstd
+  "A zstd object's content, read as a stream, as a zstd decoder reads a file:
+  every frame, whether or not its header says how big its content is. The
+  sink compresses a data file as a stream, so its frame does not say; asking
+  for that size (Zstd/decompressedSize) threw \"Original size should not be
+  negative\" on every file, and the 8 s3sink tests of campaigns 1 and 2 read
+  no record at all. A file that is not zstd still throws here."
+  ^bytes [^bytes raw]
+  (with-open [in (ZstdInputStream. (ByteArrayInputStream. raw))]
+    (let [out (ByteArrayOutputStream.)]
+      (.transferTo in out)
+      (.toByteArray out))))
+
 (defn- s3-records
   "Every record of the test queue's data files: [{:key :partition :offset
   :txn :payload}]."
@@ -322,9 +336,7 @@
                               (re-find #"\.jsonl(\.zst)?$" %))))]
     (vec (for [k ks
                :let [raw   (svc/s3-get test k)
-                     bytes (if (str/ends-with? k ".zst")
-                             (Zstd/decompress raw (int (Zstd/decompressedSize raw)))
-                             raw)]
+                     bytes (if (str/ends-with? k ".zst") (unzstd raw) raw)]
                line (str/split-lines (String. ^bytes bytes "UTF-8"))
                :when (not (str/blank? line))
                :let [r (json/read-str line :key-fn keyword)]]

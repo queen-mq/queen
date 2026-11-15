@@ -6,7 +6,10 @@
                     [history :as h]
                     [util :as util]]
             [jepsen.queen.http :as qh]
-            [jepsen.queen.workload.connectors :as w]))
+            [jepsen.queen.services :as svc]
+            [jepsen.queen.workload.connectors :as w])
+  (:import (com.github.luben.zstd ZstdOutputStream)
+           (java.io ByteArrayOutputStream)))
 
 (def tm {:name "conn", :start-time (util/local-time), :nodes ["n1"]})
 
@@ -103,6 +106,27 @@
     (is (= ["s3"] (:failed-written (s3 (s3-with [(rec 1 "p0" 0) (rec 2 "p0" 1) (rec 3 "p0" 2)]))))))
   (testing "a payload that is not what was pushed"
     (is (seq (:payload-mismatch (s3 (s3-with [(rec 1 "p0" 0 :payload {:v 9}) (rec 2 "p0" 1)])))))))
+
+;; ---------------------------------------------------------------------------
+;; W30: reading the sink's data files
+
+(deftest a-streamed-zstd-file-reads-whole
+  ; The sink compresses a data file as a stream: its zstd frame does not say
+  ; how big its content is. The reader asked for that size and threw on
+  ; every file ("Original size should not be negative"), so the 8 s3sink
+  ; tests of campaigns 1 and 2 read no record: 14,850 acknowledged, all
+  ; missing, with no fault at all.
+  (let [lines (str "{\"partition\":\"p0\",\"offset\":0,\"transactionId\":\"s1\",\"payload\":{\"v\":1}}\n"
+                   "{\"partition\":\"p0\",\"offset\":1,\"transactionId\":\"s2\",\"payload\":{\"v\":2}}\n")
+        bos   (ByteArrayOutputStream.)
+        _     (with-open [z (ZstdOutputStream. bos)] (.write z (.getBytes lines "UTF-8")))
+        raw   (.toByteArray bos)
+        k     "queen/queue=jepsen-s3-0/partition=p0/0-1.jsonl.zst"]
+    (with-redefs [svc/s3-list (fn [_ _] [k])
+                  svc/s3-get  (fn [_ _] raw)]
+      (is (= [{:key k, :partition "p0", :offset 0, :txn "s1", :payload {:v 1}}
+              {:key k, :partition "p0", :offset 1, :txn "s2", :payload {:v 2}}]
+             (#'w/s3-records {:start-ms 0}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; W28: waiting for the source to stream
