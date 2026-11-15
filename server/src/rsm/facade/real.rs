@@ -5630,15 +5630,18 @@ fn render_pop_body(
                             static LOGGED: std::sync::atomic::AtomicU64 =
                                 std::sync::atomic::AtomicU64::new(0);
                             if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 {
-                                eprintln!(
-                                "RENDER_GAP pid={} off={off} claim={}..={} attempt={} recovered={} | {before} || after: {}",
-                                claim.pid,
-                                claim.start_offset,
-                                claim.end_offset,
-                                claim.delivery_attempt,
-                                got.is_some(),
-                                ql.describe(qid, claim.pid, off)
-                            );
+                                // Through the logger, not `eprintln!`: that
+                                // macro panics when stderr cannot be written.
+                                tracing::warn!(
+                                    target: "pop",
+                                    "RENDER_GAP pid={} off={off} claim={}..={} attempt={} recovered={} | {before} || after: {}",
+                                    claim.pid,
+                                    claim.start_offset,
+                                    claim.end_offset,
+                                    claim.delivery_attempt,
+                                    got.is_some(),
+                                    ql.describe(qid, claim.pid, off)
+                                );
                             }
                             match got {
                                 Some(r) => {

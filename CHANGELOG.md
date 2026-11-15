@@ -102,6 +102,14 @@ leaves its pop running. Why: such a pop went on waiting, took the next messages 
 nobody, and their partitions stayed leased until the lease ran out: 60 seconds of nothing written
 for a sink after a restart (found by the Jepsen tests, in 2.8.1 too).
 
+**Fixed: a log line that cannot be written no longer kills the broker.** When the broker's output
+could not be written (its log file on a disk that filled up, a pipe whose reader was gone), the
+process aborted at its next log line and left no message. Such a line is now dropped and the broker
+goes on; a node whose disk is full stops the way the recovery page says. Why: the logging library
+reported the failed write on stderr, that write failed too, and the failure counted as a crash. In
+the Jepsen disk-full tests 13 of the 21 nodes a full disk took out had died this way, with no
+acknowledged write lost (in 2.8.1 too).
+
 ## 2.8.1 - 2026-11-11
 
 **Upgrading from 2.8.0: a rolling restart, nothing else.** Nothing in the raft log or on disk

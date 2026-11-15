@@ -11,10 +11,14 @@ pub fn init() {
     let json = std::env::var("QUEEN_LOG_JSON")
         .map(|v| v == "true")
         .unwrap_or(false);
+    // A line that cannot be written is dropped, as in the broker's obs.rs:
+    // the library's default reports it with `eprintln!`, which panics when
+    // stderr cannot be written either.
+    let builder = fmt().with_env_filter(filter).log_internal_errors(false);
     if json {
-        fmt().with_env_filter(filter).json().init();
+        builder.json().init();
     } else {
-        fmt().with_env_filter(filter).init();
+        builder.init();
     }
     std::panic::set_hook(Box::new(|info| {
         tracing::error!(target: "panic", "{info}");

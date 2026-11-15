@@ -56,7 +56,15 @@ pub fn init() {
     let builder = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_timer(UtcTime::rfc_3339())
-        .with_target(true);
+        .with_target(true)
+        // A line that cannot be written is dropped. The library's default
+        // reports the failed write with `eprintln!`, and that macro panics
+        // when stderr fails too (the same full disk, the same closed pipe);
+        // the panic hook then logs, panics inside the hook, and the process
+        // aborts at its next log line (Jepsen diskfull-*, 2026-11-15). A
+        // broker that cannot log goes on serving, and a node whose disk is
+        // full stops the way its storage decides, not the way its logger does.
+        .log_internal_errors(false);
     if json {
         builder.json().flatten_event(true).init();
     } else {

@@ -296,7 +296,13 @@ pub fn install_with(policy: Policy) {
         prev(info);
         if core || poisoned {
             // Past `prev`, so the message and backtrace are already out.
-            eprintln!("queen: {verdict} (thread {thread}, {location})");
+            // Not `eprintln!`: it panics when stderr cannot be written, and
+            // this is the panic hook.
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "queen: {verdict} (thread {thread}, {location})"
+            );
             std::process::abort();
         }
     }));
@@ -717,5 +723,64 @@ mod tests {
         );
         assert_aborted(status, &stderr);
         assert!(stderr.contains("injected planner panic"), "{stderr}");
+    }
+
+    /// Point stdout and stderr at a pipe nobody reads: from here on every
+    /// write to them fails (EPIPE; Rust ignores SIGPIPE), as it does with
+    /// ENOSPC when the log file sits on a full disk.
+    #[cfg(feature = "server")]
+    fn make_output_unwritable() {
+        // SAFETY: plain descriptor calls on descriptors this child owns.
+        unsafe {
+            let mut fds = [0 as libc::c_int; 2];
+            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+            libc::close(fds[0]);
+            assert!(libc::dup2(fds[1], 1) >= 0);
+            assert!(libc::dup2(fds[1], 2) >= 0);
+            libc::close(fds[1]);
+        }
+    }
+
+    /// A log line that cannot be written is dropped, and the process goes on.
+    ///
+    /// Jepsen diskfull-log and diskfull-queue, 2026-11-14 and 11-15: the
+    /// broker's output went to a file on the disk the test filled, and 13 of
+    /// the 21 nodes a full disk took out had died at their next log line
+    /// instead of stopping. The logging library reported the failed write
+    /// with `eprintln!`, which panics when stderr fails too; the hook then
+    /// logged that panic, which panicked inside the hook, and that aborts.
+    #[cfg(feature = "server")]
+    #[test]
+    fn a_log_line_that_cannot_be_written_stops_nothing() {
+        if child_case().as_deref() == Some("unwritable") {
+            make_output_unwritable();
+            crate::obs::init();
+            install();
+            // 1. A line from an ordinary thread.
+            tracing::info!(target: "test", "a line nobody can write");
+            // 2. A line from a core thread, where a panic aborts: the stop a
+            //    full disk causes is logged from one.
+            std::thread::Builder::new()
+                .name("queen-rsm-apply".into())
+                .spawn(|| tracing::error!(target: "test", "apply refused: this node stops here"))
+                .unwrap()
+                .join()
+                .expect("the core thread logged and returned");
+            // 3. A task panics: the hook reports it, and only the task dies.
+            let r = std::thread::spawn(|| injected("injected task panic")).join();
+            assert!(r.is_err());
+            // 4. And the process still logs.
+            tracing::warn!(target: "test", "still here");
+            std::process::exit(0);
+        }
+        if child_case().is_some() {
+            return;
+        }
+        let (status, stderr) = run_child(
+            "a_log_line_that_cannot_be_written_stops_nothing",
+            "unwritable",
+            &[],
+        );
+        assert_survived(status, &stderr);
     }
 }
