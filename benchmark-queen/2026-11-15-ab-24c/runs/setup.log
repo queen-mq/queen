@@ -1,0 +1,6 @@
+loader 2: 24 cpu, chrony active
+loader 3: 24 cpu, chrony active
+loader 1: 24 cpu, chrony active
+broker 2: 24 cpu, /dev/md0  1.4T, chrony active, cargo 1.100.0 (3acc79c0c 2026-11-05)
+broker 3: 24 cpu, /dev/md0  1.4T, chrony active, cargo 1.100.0 (3acc79c0c 2026-11-05)
+broker 1: 24 cpu, /dev/md0  1.4T, chrony active, cargo 1.100.0 (3acc79c0c 2026-11-05)

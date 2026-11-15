@@ -1,0 +1,5 @@
+# The binaries and source tarballs (about 34 MB) and the rig's addresses stay out of git.
+bin/
+scripts/hosts.env
+scripts/hosts-mac.env
+scripts/__pycache__/

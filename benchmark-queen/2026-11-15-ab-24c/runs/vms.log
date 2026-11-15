@@ -1,0 +1,9 @@
+brokers: c4-standard-24-lssd in europe-west1-b
+loaders: c4-highcpu-24 in europe-west1-b
+NAME    ZONE            MACHINE_TYPE         NETWORK_IP    NAT_IP          STATUS
+qab-b1  europe-west1-b  c4-standard-24-lssd  10.250.0.27   34.38.207.144   RUNNING
+qab-b2  europe-west1-b  c4-standard-24-lssd  10.250.0.28   207.175.132.75  RUNNING
+qab-b3  europe-west1-b  c4-standard-24-lssd  10.250.0.239  34.38.247.255   RUNNING
+qab-l1  europe-west1-b  c4-highcpu-24        10.250.0.242  34.140.177.173  RUNNING
+qab-l2  europe-west1-b  c4-highcpu-24        10.250.0.240  34.62.149.155   RUNNING
+qab-l3  europe-west1-b  c4-highcpu-24        10.250.0.241  34.78.97.206    RUNNING

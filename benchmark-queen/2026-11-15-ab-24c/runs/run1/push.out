@@ -1,0 +1,16 @@
+[09:20:26] abplan start: push spread t10 t100 t10kv t10w g1 g3 f1 f3 | builds 281 new
+[09:20:26] == push on 281
+push-281 [09:21:30] 3,000,000: offered 2,999,923 | pushed 2,999,833 | consumed 2,999,843 | shed 0 errors 0 | push p50 3.4 p99 14.2 | e2e p50 7.0 p99 27.1 | cores 13.0 / 5.8 / 6.1 | loader 17.0c  OK 
+push-281 [09:22:34] 3,500,000: offered 3,499,937 | pushed 3,500,287 | consumed 3,500,180 | shed 0 errors 0 | push p50 4.4 p99 52.7 | e2e p50 9.7 p99 80.9 | cores 14.4 / 6.5 / 6.8 | loader 19.7c  OK 
+push-281 [09:23:37] 4,000,000: offered 3,999,909 | pushed 4,011,569 | consumed 4,018,400 | shed 0 errors 0 | push p50 6.3 p99 57.9 | e2e p50 15.1 p99 95.2 | cores 15.8 / 7.1 / 7.5 | loader 22.3c  OK 
+push-281 [09:24:58] 4,500,000: offered 4,500,014 | pushed 4,252,163 | consumed 4,258,053 | shed 3,113,400 errors 3266900 | push p50 10.0 p99 139.3 | e2e p50 27.4 p99 176.1 | cores 17.5 / 7.9 / 8.4 | loader 24.6c  NOT CARRIED 
+push-281 [09:24:58] stopping at 4500000
+[09:25:01] == push on new
+push-new [09:26:15] 3,000,000: offered 2,999,956 | pushed 2,999,942 | consumed 2,999,906 | shed 0 errors 0 | push p50 3.5 p99 20.0 | e2e p50 7.3 p99 34.3 | cores 12.8 / 5.9 / 6.2 | loader 17.1c  OK 
+push-new [09:27:18] 3,500,000: offered 3,499,965 | pushed 3,499,885 | consumed 3,500,252 | shed 0 errors 0 | push p50 4.4 p99 49.2 | e2e p50 9.7 p99 77.8 | cores 14.1 / 6.4 / 6.8 | loader 19.6c  OK 
+push-new [09:28:21] 4,000,000: offered 3,999,921 | pushed 4,014,591 | consumed 4,019,434 | shed 0 errors 0 | push p50 6.0 p99 88.1 | e2e p50 14.3 p99 117.8 | cores 15.5 / 7.2 / 7.6 | loader 22.2c  OK 
+push-new [09:29:43] 4,500,000: offered 4,499,896 | pushed 4,247,947 | consumed 4,253,572 | shed 3,113,400 errors 3297900 | push p50 8.6 p99 139.3 | e2e p50 23.0 p99 184.3 | cores 17.0 / 8.0 / 8.5 | loader 24.7c  NOT CARRIED 
+push-new [09:29:43] stopping at 4500000
+[09:29:45] == spread on 281
+
+[exited with code 0]

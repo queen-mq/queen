@@ -1,0 +1,14 @@
+spread-281 [09:30:54] 1,000,000: offered 1,000,020 | pushed 999,973 | consumed 1,000,011 | shed 0 errors 0 | push p50 2.8 p99 6.0 | e2e p50 6.3 p99 13.8 | cores 11.1 / 4.7 / 4.9 | loader 9.2c  OK 
+spread-281 [09:31:55] 1,500,000: offered 1,500,022 | pushed 1,500,028 | consumed 1,499,875 | shed 0 errors 0 | push p50 3.6 p99 9.9 | e2e p50 9.3 p99 23.6 | cores 12.7 / 5.5 / 5.8 | loader 12.9c  OK 
+spread-281 [09:32:55] 2,000,000: offered 1,999,960 | pushed 1,999,893 | consumed 1,999,845 | shed 0 errors 0 | push p50 4.9 p99 18.2 | e2e p50 14.0 p99 42.0 | cores 14.4 / 6.1 / 6.4 | loader 16.8c  OK 
+spread-281 [09:33:58] 2,500,000: offered 2,499,924 | pushed 2,499,854 | consumed 2,499,577 | shed 0 errors 0 | push p50 9.1 p99 145.4 | e2e p50 30.5 p99 219.1 | cores 15.8 / 7.0 / 7.4 | loader 20.4c  OK 
+spread-281 [09:35:02] 3,000,000: offered 2,999,941 | pushed 2,524,619 | consumed 2,523,296 | shed 9,798,400 errors 0 | push p50 1703.9 p99 1982.5 | e2e p50 1753.1 p99 2048.0 | cores 18.4 / 10.1 / 9.3 | loader 22.3c  NOT CARRIED 
+spread-281 [09:35:02] stopping at 3000000
+spread-new [09:36:13] 1,000,000: offered 999,989 | pushed 999,962 | consumed 999,901 | shed 0 errors 0 | push p50 2.8 p99 6.4 | e2e p50 6.3 p99 14.7 | cores 10.9 / 4.8 / 5.0 | loader 9.2c  OK 
+spread-new [09:37:13] 1,500,000: offered 1,499,977 | pushed 1,499,990 | consumed 1,500,078 | shed 0 errors 0 | push p50 3.6 p99 10.8 | e2e p50 9.3 p99 26.6 | cores 12.5 / 5.5 / 5.8 | loader 12.9c  OK 
+spread-new [09:38:17] 2,000,000: offered 1,999,991 | pushed 2,000,118 | consumed 1,999,974 | shed 0 errors 0 | push p50 4.9 p99 49.2 | e2e p50 13.8 p99 99.3 | cores 14.2 / 6.2 / 6.5 | loader 16.9c  OK 
+spread-new [09:39:20] 2,500,000: offered 2,499,968 | pushed 2,499,805 | consumed 2,500,003 | shed 0 errors 0 | push p50 7.8 p99 139.3 | e2e p50 25.9 p99 200.7 | cores 15.9 / 7.3 / 7.7 | loader 20.8c  OK 
+spread-new [09:40:23] 3,000,000: offered 2,999,997 | pushed 2,569,182 | consumed 2,564,239 | shed 8,507,200 errors 0 | push p50 1441.8 p99 2719.7 | e2e p50 1572.9 p99 3014.7 | cores 18.5 / 11.5 / 12.7 | loader 22.5c  NOT CARRIED 
+spread-new [09:40:23] stopping at 3000000
+
+[exited with code 0]
