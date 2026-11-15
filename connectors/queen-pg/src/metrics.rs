@@ -9,14 +9,18 @@
 //! (gauge), `queen_pg_sink_applied_total`, `queen_pg_sink_skipped_total`,
 //! `queen_pg_sink_dlq_total`, `queen_pg_sink_batches_total`,
 //! `queen_pg_connector_errors_total`, `queen_pg_connector_owner` (gauge: 1
-//! while this node runs the connector's work).
+//! while this node runs the connector's work). A MySQL source reports
+//! `queen_mysql_source_transactions_total`, `queen_mysql_source_messages_total`,
+//! `queen_mysql_source_bundles_total`, `queen_mysql_source_snapshot_rows_total`,
+//! `queen_mysql_source_lag_seconds` (gauge), `queen_mysql_connector_errors_total`
+//! and `queen_mysql_connector_owner` instead.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::config::Kind;
+use crate::config::{Engine, Kind};
 
 /// One connector's series. Engines update the atomics directly.
 #[derive(Debug, Default)]
@@ -26,6 +30,9 @@ pub struct ConnMetrics {
     pub bundles: AtomicU64,
     pub snapshot_rows: AtomicU64,
     pub slot_lag_bytes: AtomicI64,
+    /// MySQL: seconds from the commit of the last source transaction in Queen
+    /// to now, 0 once the stream has read to the end of the binlog.
+    pub lag_seconds: AtomicI64,
     pub pointer_lsn: AtomicU64,
     pub applied: AtomicU64,
     pub skipped: AtomicU64,
@@ -37,11 +44,13 @@ pub struct ConnMetrics {
 
 /// `(tenant label, connector)`: `None` is the default tenant.
 type SeriesKey = (Option<String>, String);
+/// A series' kind, engine and counters.
+type Series = (Kind, Engine, Arc<ConnMetrics>);
 
 /// The node's registry.
 #[derive(Debug, Default)]
 pub struct Metrics {
-    series: Mutex<BTreeMap<SeriesKey, (Kind, Arc<ConnMetrics>)>>,
+    series: Mutex<BTreeMap<SeriesKey, Series>>,
 }
 
 /// One metric family: its name, help, type, which connectors carry it
@@ -51,6 +60,7 @@ struct Family {
     help: &'static str,
     gauge: bool,
     kind: Option<Kind>,
+    engine: Engine,
     read: fn(&ConnMetrics) -> String,
 }
 
@@ -68,6 +78,7 @@ const FAMILIES: &[Family] = &[
         help: "Source transactions committed into Queen.",
         gauge: false,
         kind: Some(Kind::Source),
+        engine: Engine::Postgres,
         read: |m| n(&m.transactions),
     },
     Family {
@@ -75,6 +86,7 @@ const FAMILIES: &[Family] = &[
         help: "Messages the source pushed (stream and snapshot).",
         gauge: false,
         kind: Some(Kind::Source),
+        engine: Engine::Postgres,
         read: |m| n(&m.messages),
     },
     Family {
@@ -82,6 +94,7 @@ const FAMILIES: &[Family] = &[
         help: "Queen transactions the source committed (each carries the WAL pointer).",
         gauge: false,
         kind: Some(Kind::Source),
+        engine: Engine::Postgres,
         read: |m| n(&m.bundles),
     },
     Family {
@@ -89,6 +102,7 @@ const FAMILIES: &[Family] = &[
         help: "Rows the source's snapshot pushed.",
         gauge: false,
         kind: Some(Kind::Source),
+        engine: Engine::Postgres,
         read: |m| n(&m.snapshot_rows),
     },
     Family {
@@ -96,6 +110,7 @@ const FAMILIES: &[Family] = &[
         help: "WAL the replication slot retains: pg_current_wal_lsn() - confirmed_flush_lsn.",
         gauge: true,
         kind: Some(Kind::Source),
+        engine: Engine::Postgres,
         read: |m| i(&m.slot_lag_bytes),
     },
     Family {
@@ -103,6 +118,7 @@ const FAMILIES: &[Family] = &[
         help: "The WAL position (LSN, as a number) of the source pointer stored in Queen.",
         gauge: true,
         kind: Some(Kind::Source),
+        engine: Engine::Postgres,
         read: |m| n(&m.pointer_lsn),
     },
     Family {
@@ -110,6 +126,7 @@ const FAMILIES: &[Family] = &[
         help: "Messages the sink applied to PostgreSQL.",
         gauge: false,
         kind: Some(Kind::Sink),
+        engine: Engine::Postgres,
         read: |m| n(&m.applied),
     },
     Family {
@@ -117,6 +134,7 @@ const FAMILIES: &[Family] = &[
         help: "Redelivered messages the sink dropped as already applied.",
         gauge: false,
         kind: Some(Kind::Sink),
+        engine: Engine::Postgres,
         read: |m| n(&m.skipped),
     },
     Family {
@@ -124,6 +142,7 @@ const FAMILIES: &[Family] = &[
         help: "Messages the sink dead-lettered.",
         gauge: false,
         kind: Some(Kind::Sink),
+        engine: Engine::Postgres,
         read: |m| n(&m.dlq),
     },
     Family {
@@ -131,6 +150,7 @@ const FAMILIES: &[Family] = &[
         help: "Batches the sink committed.",
         gauge: false,
         kind: Some(Kind::Sink),
+        engine: Engine::Postgres,
         read: |m| n(&m.batches),
     },
     Family {
@@ -138,6 +158,7 @@ const FAMILIES: &[Family] = &[
         help: "Errors the connector recorded.",
         gauge: false,
         kind: None,
+        engine: Engine::Postgres,
         read: |m| n(&m.errors),
     },
     Family {
@@ -145,6 +166,63 @@ const FAMILIES: &[Family] = &[
         help: "1 while this node runs the connector's work, else 0.",
         gauge: true,
         kind: None,
+        engine: Engine::Postgres,
+        read: |m| i(&m.owner),
+    },
+    Family {
+        name: "queen_mysql_source_transactions_total",
+        help: "MySQL transactions committed into Queen.",
+        gauge: false,
+        kind: Some(Kind::Source),
+        engine: Engine::Mysql,
+        read: |m| n(&m.transactions),
+    },
+    Family {
+        name: "queen_mysql_source_messages_total",
+        help: "Messages the MySQL source pushed (stream and snapshot).",
+        gauge: false,
+        kind: Some(Kind::Source),
+        engine: Engine::Mysql,
+        read: |m| n(&m.messages),
+    },
+    Family {
+        name: "queen_mysql_source_bundles_total",
+        help: "Queen transactions the MySQL source committed (each carries the GTID pointer).",
+        gauge: false,
+        kind: Some(Kind::Source),
+        engine: Engine::Mysql,
+        read: |m| n(&m.bundles),
+    },
+    Family {
+        name: "queen_mysql_source_snapshot_rows_total",
+        help: "Rows the MySQL source's snapshot pushed.",
+        gauge: false,
+        kind: Some(Kind::Source),
+        engine: Engine::Mysql,
+        read: |m| n(&m.snapshot_rows),
+    },
+    Family {
+        name: "queen_mysql_source_lag_seconds",
+        help: "Seconds from the commit of the last MySQL transaction in Queen to now; 0 at the end of the binlog.",
+        gauge: true,
+        kind: Some(Kind::Source),
+        engine: Engine::Mysql,
+        read: |m| i(&m.lag_seconds),
+    },
+    Family {
+        name: "queen_mysql_connector_errors_total",
+        help: "Errors the MySQL connector recorded.",
+        gauge: false,
+        kind: None,
+        engine: Engine::Mysql,
+        read: |m| n(&m.errors),
+    },
+    Family {
+        name: "queen_mysql_connector_owner",
+        help: "1 while this node runs the MySQL connector's work, else 0.",
+        gauge: true,
+        kind: None,
+        engine: Engine::Mysql,
         read: |m| i(&m.owner),
     },
 ];
@@ -169,7 +247,7 @@ impl Metrics {
         Arc::new(Metrics::default())
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<SeriesKey, (Kind, Arc<ConnMetrics>)>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<SeriesKey, Series>> {
         self.series.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -182,12 +260,25 @@ impl Metrics {
     /// of the other kind), the series keeps its counters and reports the
     /// families of the new kind from then on.
     pub fn handle(&self, tenant: Option<&str>, connector: &str, kind: Kind) -> Arc<ConnMetrics> {
+        self.handle_of(tenant, connector, kind, Engine::Postgres)
+    }
+
+    /// [`Metrics::handle`] for a connector of `engine`: its families are
+    /// that engine's (`queen_pg_*` or `queen_mysql_*`).
+    pub fn handle_of(
+        &self,
+        tenant: Option<&str>,
+        connector: &str,
+        kind: Kind,
+        engine: Engine,
+    ) -> Arc<ConnMetrics> {
         let mut g = self.lock();
         let e = g
             .entry((tenant.map(str::to_string), connector.to_string()))
-            .or_insert_with(|| (kind, Arc::new(ConnMetrics::default())));
+            .or_insert_with(|| (kind, engine, Arc::new(ConnMetrics::default())));
         e.0 = kind;
-        Arc::clone(&e.1)
+        e.1 = engine;
+        Arc::clone(&e.2)
     }
 
     /// Drop a removed connector's series.
@@ -207,7 +298,7 @@ impl Metrics {
         for f in FAMILIES {
             let mut lines = g
                 .iter()
-                .filter(|(_, (k, _))| f.kind.is_none_or(|fk| fk == *k))
+                .filter(|(_, (k, e, _))| f.engine == *e && f.kind.is_none_or(|fk| fk == *k))
                 .peekable();
             if lines.peek().is_none() {
                 continue;
@@ -219,7 +310,7 @@ impl Metrics {
                 f.name,
                 if f.gauge { "gauge" } else { "counter" }
             );
-            for ((tenant, connector), (_, m)) in lines {
+            for ((tenant, connector), (_, _, m)) in lines {
                 out.push_str(f.name);
                 out.push('{');
                 if let Some(t) = tenant {
@@ -270,7 +361,7 @@ mod tests {
         let text = m.prometheus();
 
         // One HELP and one TYPE per family, never twice.
-        for f in FAMILIES {
+        for f in FAMILIES.iter().filter(|f| f.engine == Engine::Postgres) {
             assert_eq!(
                 text.matches(&format!("# TYPE {} ", f.name)).count(),
                 1,
@@ -307,6 +398,23 @@ mod tests {
             assert!(series.ends_with('}'), "{line}");
             assert!(value.parse::<f64>().is_ok(), "{line}");
         }
+    }
+
+    #[test]
+    fn a_mysql_source_reports_its_own_families_only() {
+        let m = Metrics::new();
+        let my = m.handle_of(None, "shop", Kind::Source, Engine::Mysql);
+        my.messages.store(4, Ordering::Relaxed);
+        my.lag_seconds.store(2, Ordering::Relaxed);
+        m.handle(None, "pg", Kind::Source);
+        let text = m.prometheus();
+        assert!(text.contains("queen_mysql_source_messages_total{connector=\"shop\"} 4\n"));
+        assert!(text.contains("queen_mysql_source_lag_seconds{connector=\"shop\"} 2\n"));
+        assert!(text.contains("queen_mysql_connector_owner{connector=\"shop\"} 0\n"));
+        assert!(!text.contains("queen_pg_source_messages_total{connector=\"shop\"}"));
+        assert!(!text.contains("queen_pg_connector_owner{connector=\"shop\"}"));
+        assert!(!text.contains("queen_mysql_source_messages_total{connector=\"pg\"}"));
+        assert!(text.contains("queen_pg_source_messages_total{connector=\"pg\"} 0\n"));
     }
 
     #[test]

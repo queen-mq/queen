@@ -24,6 +24,15 @@ pub enum Error {
         message: String,
         transient: bool,
     },
+    /// MySQL refused or failed. `code` is the server's error number when it
+    /// sent one; `transient` is the classification of
+    /// `crate::mysql::conn::classify` (connection loss, lock wait timeout,
+    /// deadlock, too many connections, server shutdown: true).
+    Mysql {
+        code: Option<u16>,
+        message: String,
+        transient: bool,
+    },
     /// The broker answered an error (or could not be reached in-process).
     Queen(QueenError),
     /// Another owner moved the state this node was writing (the source
@@ -61,6 +70,7 @@ impl Error {
         match self {
             Error::Config(_) | Error::Fatal { .. } | Error::Stopped => false,
             Error::Pg { transient, .. } => *transient,
+            Error::Mysql { transient, .. } => *transient,
             Error::Queen(q) => q.is_retryable(),
             Error::Fenced(_) => true,
             Error::Io(_) => true,
@@ -72,6 +82,7 @@ impl Error {
         match self {
             Error::Config(_) => "config",
             Error::Pg { .. } => "postgres",
+            Error::Mysql { .. } => "mysql",
             Error::Queen(_) => "queen",
             Error::Fenced(_) => "fenced",
             Error::Fatal { code, .. } => code,
@@ -91,6 +102,12 @@ impl fmt::Display for Error {
                 ..
             } => write!(f, "postgres {s}: {message}"),
             Error::Pg { message, .. } => write!(f, "postgres: {message}"),
+            Error::Mysql {
+                code: Some(c),
+                message,
+                ..
+            } => write!(f, "mysql {c}: {message}"),
+            Error::Mysql { message, .. } => write!(f, "mysql: {message}"),
             Error::Queen(q) => write!(f, "queen: {q}"),
             Error::Fenced(m) => write!(f, "fenced: {m}"),
             Error::Fatal { code, message } => write!(f, "{code}: {message}"),

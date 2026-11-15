@@ -3,7 +3,8 @@
 //!
 //! The `queen-pg` library runs INSIDE this broker process, on every node: a
 //! **source** streams committed changes of PostgreSQL tables into queues
-//! (logical replication), a **sink** applies a queue to a table (a consumer
+//! (logical replication) or of MySQL tables (the binlog, `"engine":
+//! "mysql"`), a **sink** applies a queue to a PostgreSQL table (a consumer
 //! group the broker runs). Both give exactly-once effects with one rule: the
 //! progress marker commits in the same transaction as the data, on the side
 //! where the data lands. Nothing here decides anything about that rule; this

@@ -415,11 +415,16 @@ jobs:
   # open, a role that may replicate, and a database it owns (it creates and
   # drops its own tables, publications and slots). Without QUEEN_PG_TEST_DSN
   # those tests skip, which is how they run on a developer's machine.
+  #
+  # The same crate holds the MySQL source (src/mysql); its live tests
+  # (tests/mysql_live.rs) need a MySQL 8 with GTIDs and full row metadata, so
+  # one runs here too, and QUEEN_MYSQL_TEST_URL turns them on.
   pg-connectors:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       QUEEN_PG_TEST_DSN: postgres://queen_test:queen_test@127.0.0.1:55432/queen_test
+      QUEEN_MYSQL_TEST_URL: mysql://root:queen_test@127.0.0.1:53306/queen_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -447,6 +452,22 @@ jobs:
           docker exec pg17 psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE queen_test LOGIN REPLICATION PASSWORD 'queen_test'" \
             -c "CREATE DATABASE queen_test OWNER queen_test"
+      - name: MySQL 8.4 with GTIDs and full row metadata
+        # Ready means the final server answers on TCP: the image's init phase
+        # runs a temporary server without networking.
+        run: |
+          docker run -d --name my84 -p 53306:3306 \
+            -e MYSQL_ROOT_PASSWORD=queen_test \
+            mysql:8.4 \
+            --gtid-mode=ON --enforce-gtid-consistency=ON --binlog-row-metadata=FULL --server-id=1
+          for _ in $(seq 1 120); do
+            if docker exec my84 mysql -uroot -pqueen_test -h127.0.0.1 -P3306 -e 'SELECT 1' >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec my84 mysql -uroot -pqueen_test -h127.0.0.1 -P3306 \
+            -e 'SELECT @@gtid_mode, @@binlog_row_metadata'
       - name: cargo test
         run: cargo test --manifest-path connectors/queen-pg/Cargo.toml --locked
       - name: rustfmt
@@ -458,6 +479,9 @@ jobs:
       - name: PostgreSQL log on failure
         if: failure()
         run: docker logs pg17 2>&1 | tail -200
+      - name: MySQL log on failure
+        if: failure()
+        run: docker logs my84 2>&1 | tail -200
 
   # `rust-version` in the client's Cargo.toml is a promise to anyone on an older
   # toolchain. Every other job runs current stable, so without this the promise

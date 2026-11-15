@@ -120,3 +120,36 @@ test('bytes read in the unit that fits', () => {
   assert.equal(bytes(73 * 1024 ** 3), '73 GB')
   assert.equal(bytes(null), '–')
 })
+
+test('a MySQL source says how far behind it is in seconds and keeps its place in GTIDs', () => {
+  const gtids = 'c013ad95-de73-11f1-bb13-3215ccb915f6:1-42'
+  const my = {
+    name: 'shop-src', kind: 'source', engine: 'mysql', enabled: true,
+    connection: { ...conn, port: 3306, database: 'shop', user: 'repl' },
+    source: { tables: [{ table: 'shop.orders', queue: 'orders' }] },
+    status: {
+      phase: 'streaming', engine: 'mysql', messages: 12, transactions: 5, bundles: 3, lagSeconds: 0,
+      binlog: { file: 'binlog.000002', position: 4123 }, pointerGtids: gtids,
+      serverUuid: 'c013ad95-de73-11f1-bb13-3215ccb915f6', serverVersion: '8.4.13', serverId: 2918571043,
+      lastCommitAt: '2026-11-03T07:29:58Z',
+    },
+    state: { lease: { node: 'queen-ebca5594' }, pointer: { gtids } },
+  }
+  const r = rowOf(my, NOW)
+  assert.equal(r.kind, 'Source')
+  assert.equal(r.label, 'MySQL source')
+  assert.equal(r.engine, 'MySQL')
+  assert.equal(rowOf(source(), NOW).engine, 'PostgreSQL')
+  assert.equal(r.behind, '0 s')
+  assert.equal(r.database, '127.0.0.1:3306/shop')
+  const d = detailOf(my, NOW)
+  assert.deepEqual(d.work.map((f) => f.k), ['Server', 'Replica id', 'Messages', 'Lag', 'Pointer', 'Last commit'])
+  assert.equal(d.work.find((f) => f.k === 'Lag').sub, 'at binlog.000002:4123')
+  assert.equal(d.work.find((f) => f.k === 'Replica id').v, '2918571043')
+  // Standing by: the pointer as the owner last committed it, no counters.
+  const standby = { ...my, status: { phase: 'standby', engine: 'mysql', owner: 'n2' } }
+  assert.deepEqual(detailOf(standby, NOW).work.map((f) => f.k), ['Pointer'])
+  assert.equal(rowOf(standby, NOW).behind, '–')
+  // A Postgres source still says its slot lag in bytes.
+  assert.equal(rowOf(source(), NOW).behind, '952 B')
+})

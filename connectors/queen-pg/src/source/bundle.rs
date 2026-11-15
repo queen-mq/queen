@@ -26,7 +26,7 @@ use crate::error::{Error, Result};
 use crate::queen::{KvOp, QueenApi, QueenError};
 
 use super::events::Item;
-use super::pointer::{self, Held, Pointer, Position};
+use super::pointer::{self, Doc, Held, Pointer, Position};
 
 /// The flush limits (`maxBundleMessages`, `maxBundleBytes`, `lingerMs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,12 +36,14 @@ pub struct Limits {
     pub linger: Duration,
 }
 
-/// A run of events that commits whole, with the position it reaches.
+/// A run of events that commits whole, with the position it reaches. `P` is
+/// the engine's position (Postgres: [`Position`]; MySQL:
+/// `crate::mysql::pointer::MyPosition`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Unit {
+pub struct Unit<P = Position> {
     pub items: Vec<Item>,
     pub bytes: usize,
-    pub cover: Position,
+    pub cover: P,
     /// Source transactions this unit completes (counters).
     pub txns: u64,
     pub snapshot_rows: u64,
@@ -51,8 +53,8 @@ pub struct Unit {
     pub force: bool,
 }
 
-impl Unit {
-    pub fn new(items: Vec<Item>, cover: Position) -> Unit {
+impl<P> Unit<P> {
+    pub fn new(items: Vec<Item>, cover: P) -> Unit<P> {
         let bytes = items.iter().map(Item::wire_len).sum();
         Unit {
             items,
@@ -68,9 +70,9 @@ impl Unit {
 
 /// What one `/transaction` carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Bundle {
+pub struct Bundle<P = Position> {
     pub items: Vec<Item>,
-    pub cover: Position,
+    pub cover: P,
     pub txns: u64,
     pub bytes: usize,
     pub snapshot_rows: u64,
@@ -79,15 +81,15 @@ pub struct Bundle {
 
 /// The queue of units waiting for a bundle.
 #[derive(Debug)]
-pub struct Bundler {
-    units: VecDeque<(Unit, Instant)>,
+pub struct Bundler<P = Position> {
+    units: VecDeque<(Unit<P>, Instant)>,
     items: usize,
     bytes: usize,
     limits: Limits,
 }
 
-impl Bundler {
-    pub fn new(limits: Limits) -> Bundler {
+impl<P: Default> Bundler<P> {
+    pub fn new(limits: Limits) -> Bundler<P> {
         Bundler {
             units: VecDeque::new(),
             items: 0,
@@ -103,7 +105,7 @@ impl Bundler {
     /// Queue `u`. A position change with no events directly after another one
     /// replaces it (the later position covers the earlier), so a stream of
     /// unmapped transactions costs one unit, not one each.
-    pub fn push(&mut self, u: Unit, now: Instant) {
+    pub fn push(&mut self, u: Unit<P>, now: Instant) {
         if u.items.is_empty() && !u.force {
             if let Some((last, _)) = self.units.back_mut() {
                 if last.items.is_empty() && !last.force {
@@ -161,7 +163,7 @@ impl Bundler {
     /// The next bundle: whole units from the front until the next one would
     /// pass a limit (always at least one), plus any position-only units that
     /// follow (free progress).
-    pub fn take(&mut self) -> Option<Bundle> {
+    pub fn take(&mut self) -> Option<Bundle<P>> {
         let mut n = 0usize;
         let (mut items, mut bytes) = (0usize, 0usize);
         for (u, _) in &self.units {
@@ -182,7 +184,7 @@ impl Bundler {
         }
         let mut b = Bundle {
             items: Vec::with_capacity(items),
-            cover: Position::default(),
+            cover: P::default(),
             txns: 0,
             bytes,
             snapshot_rows: 0,
@@ -280,7 +282,7 @@ pub enum Verdict {
     Moved,
 }
 
-pub fn judge(read: Option<&Held>, cover: &Pointer, held: i64) -> Verdict {
+pub fn judge<D: Doc>(read: Option<&Held<D>>, cover: &D, held: i64) -> Verdict {
     match read {
         Some(h) if h.doc.same_place(cover) => Verdict::Committed(h.version),
         Some(h) if h.version == held => Verdict::NotApplied,
@@ -289,25 +291,25 @@ pub fn judge(read: Option<&Held>, cover: &Pointer, held: i64) -> Verdict {
 }
 
 /// One bundle's commit: send, and settle every answer.
-pub struct Commit {
+pub struct Commit<D = Pointer> {
     pub api: Arc<dyn QueenApi>,
     pub key: String,
     pub body: String,
     /// The pointer this bundle writes.
-    pub cover: Pointer,
+    pub cover: D,
     /// The version it expects.
     pub held: i64,
 }
 
-impl Commit {
+impl<D: Doc> Commit<D> {
     /// Build the commit of `items` moving the pointer to `cover`.
     pub fn new(
         api: Arc<dyn QueenApi>,
         key: String,
         items: &[Item],
-        cover: Pointer,
+        cover: D,
         held: i64,
-    ) -> Commit {
+    ) -> Commit<D> {
         let op = KvOp::fence(key.clone(), cover.to_value(), held);
         Commit {
             api,
@@ -429,9 +431,9 @@ impl Commit {
 
     /// The pointer, read until the broker answers (retryable failures back
     /// off; anything else ends the commit).
-    async fn read(&self, backoff: &mut Backoff) -> Result<Option<Held>> {
+    async fn read(&self, backoff: &mut Backoff) -> Result<Option<Held<D>>> {
         loop {
-            match pointer::read(self.api.as_ref(), &self.key).await {
+            match pointer::read_doc::<D>(self.api.as_ref(), &self.key).await {
                 Ok(r) => return Ok(r),
                 Err(Error::Queen(e)) if e.is_retryable() => {
                     tokio::time::sleep(backoff.after(&e)).await;

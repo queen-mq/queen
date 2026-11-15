@@ -21,6 +21,7 @@ pub mod config;
 mod config_validate;
 pub mod error;
 pub mod metrics;
+pub mod mysql;
 pub mod pg;
 pub mod queen;
 pub mod repl;

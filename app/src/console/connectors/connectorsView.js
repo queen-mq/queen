@@ -1,6 +1,7 @@
 // The Connectors page, in words (queen-mq/queen#155): each PostgreSQL source
-// and sink of the tenant, what it moves where, whether it runs, and what it
-// has moved, from GET /api/v1/connectors (server/src/handlers/connectors.rs).
+// and sink and each MySQL source of the tenant, what it moves where, whether
+// it runs, and what it has moved, from GET /api/v1/connectors
+// (server/src/handlers/connectors.rs).
 //
 // Each entry is the stored document, redacted by the broker (never the
 // password), plus `status`: what THE NODE THAT ANSWERED knows of it. Every
@@ -75,11 +76,15 @@ export function databaseOf(c) {
   return `${host}${k.port ? `:${k.port}` : ''}/${k.database || '?'}`
 }
 
+/** `mysql` for a MySQL source, else `postgres` (a document without one). */
+export const engineOf = (c) => (c?.engine === 'mysql' ? 'mysql' : 'postgres')
+
 /**
  * One connector as the table draws it. `moved` is what it has moved on the
  * node that runs it (a source's messages, a sink's applied rows), `behind`
- * a source's WAL the slot still holds (bytes the database keeps for it), and
- * `last` its last commit or apply.
+ * how far a source trails its database (Postgres: the WAL its slot still
+ * holds; MySQL: seconds since the last transaction it has not sent, 0 at the
+ * end of the binlog), and `last` its last commit or apply.
  */
 export function rowOf(c, now = Date.now()) {
   const st = c?.status || {}
@@ -88,6 +93,7 @@ export function rowOf(c, now = Date.now()) {
   const phase = phaseOf(phaseKey)
   const owner = c?.state?.lease?.node || st.owner || null
   const source = c?.kind !== 'sink'
+  const mysql = engineOf(c) === 'mysql'
   const elsewhere = phaseKey === 'standby'
   const moved = source ? num(st.messages) : num(st.applied)
   const last = at(source ? st.lastCommitAt : st.lastAppliedAt)
@@ -96,6 +102,8 @@ export function rowOf(c, now = Date.now()) {
     key: c?.name || '',
     name: c?.name || '',
     kind: source ? 'Source' : 'Sink',
+    engine: mysql ? 'MySQL' : 'PostgreSQL',
+    label: source ? (mysql ? 'MySQL source' : 'Source') : 'Sink',
     phase: phaseKey,
     word: phase.word,
     tone: phase.tone,
@@ -106,7 +114,9 @@ export function rowOf(c, now = Date.now()) {
     database: databaseOf(c),
     moved: elsewhere || moved == null ? '–' : count(moved),
     movedTitle: source ? 'Messages it pushed to its queues since it started on this node' : 'Messages it applied to its table since it started on this node',
-    behind: source && !elsewhere && num(st.slotLagBytes) != null ? bytes(st.slotLagBytes) : '–',
+    behind: !source || elsewhere ? '–'
+      : mysql ? (num(st.lagSeconds) != null ? `${count(st.lagSeconds)} s` : '–')
+        : num(st.slotLagBytes) != null ? bytes(st.slotLagBytes) : '–',
     last: elsewhere || last == null ? '' : ago(last, now),
     // The broker's message starts with its code ("table_missing: the table …"): said once.
     error: err ? { code: err.code || '', message: unprefixed(err), at: at(err.at) } : null,
@@ -139,7 +149,7 @@ export function detailOf(c, now = Date.now()) {
   const st = c.status || {}
   const k = c.connection || {}
   const facts = [
-    { k: 'Kind', v: r.kind === 'Source' ? 'Source: a table’s changes into a queue' : 'Sink: a queue into a table' },
+    { k: 'Kind', v: r.kind === 'Sink' ? 'Sink: a queue into a table' : r.engine === 'MySQL' ? 'Source: a MySQL table’s changes into a queue, from the binlog' : 'Source: a table’s changes into a queue' },
     { k: 'State', v: r.word + (st.since ? `, since ${ago(at(st.since), now)}` : ''), tone: r.tone },
   ]
   if (r.owner) facts.push({ k: 'Runs on', v: r.owner, mono: true })
@@ -149,7 +159,18 @@ export function detailOf(c, now = Date.now()) {
   if (num(st.restarts)) facts.push({ k: 'Restarts', v: count(st.restarts) })
 
   const work = []
-  if (r.kind === 'Source') {
+  if (r.kind === 'Source' && r.engine === 'MySQL') {
+    if (st.serverUuid) work.push({ k: 'Server', v: st.serverUuid, mono: true, sub: st.serverVersion ? `MySQL ${st.serverVersion}` : '' })
+    if (num(st.serverId) != null) work.push({ k: 'Replica id', v: String(st.serverId), mono: true })
+    if (!r.elsewhere) {
+      if (num(st.messages) != null) work.push({ k: 'Messages', v: count(st.messages), sub: `${count(st.transactions)} transactions, ${count(st.bundles)} pushes` })
+      if (num(st.lagSeconds) != null) work.push({ k: 'Lag', v: `${count(st.lagSeconds)} s`, sub: st.binlog?.file ? `at ${st.binlog.file}:${st.binlog.position}` : '' })
+      if (st.pointerGtids) work.push({ k: 'Pointer', v: st.pointerGtids, mono: true, sub: 'the GTIDs in Queen' })
+      if (st.lastCommitAt) work.push({ k: 'Last commit', v: ago(at(st.lastCommitAt), now) })
+    } else if (c.state?.pointer?.gtids) {
+      work.push({ k: 'Pointer', v: c.state.pointer.gtids, mono: true, sub: 'as the owner last committed it' })
+    }
+  } else if (r.kind === 'Source') {
     const s = c.source || {}
     if (st.slot || s.slot) work.push({ k: 'Slot', v: st.slot || s.slot, mono: true })
     if (st.publication || s.publication) work.push({ k: 'Publication', v: st.publication || s.publication, mono: true })

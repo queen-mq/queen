@@ -191,10 +191,33 @@ impl Pointer {
     }
 }
 
+/// What the bundler ([`super::bundle`]) needs of a source's pointer
+/// document: its JSON both ways, and the test of "my bundle committed". The
+/// Postgres [`Pointer`] and the MySQL one (`crate::mysql::pointer`) are the
+/// two documents.
+pub trait Doc: Clone + std::fmt::Debug + Send + Sync + 'static {
+    fn to_value(&self) -> serde_json::Value;
+    fn from_value(v: &serde_json::Value) -> Result<Self>;
+    /// Exactly this position in the same epoch (I5).
+    fn same_place(&self, other: &Self) -> bool;
+}
+
+impl Doc for Pointer {
+    fn to_value(&self) -> serde_json::Value {
+        Pointer::to_value(self)
+    }
+    fn from_value(v: &serde_json::Value) -> Result<Pointer> {
+        Pointer::from_value(v)
+    }
+    fn same_place(&self, other: &Pointer) -> bool {
+        Pointer::same_place(self, other)
+    }
+}
+
 /// The pointer and the version this owner holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Held {
-    pub doc: Pointer,
+pub struct Held<D = Pointer> {
+    pub doc: D,
     pub version: i64,
 }
 
@@ -208,13 +231,18 @@ pub fn result_at(results: &[KvResult], index: usize) -> Option<&KvResult> {
 
 /// One linearizable read of the pointer: `None` when absent.
 pub async fn read(api: &dyn QueenApi, key: &str) -> Result<Option<Held>> {
+    read_doc(api, key).await
+}
+
+/// [`read`] of any pointer document.
+pub async fn read_doc<D: Doc>(api: &dyn QueenApi, key: &str) -> Result<Option<Held<D>>> {
     let a = api.kv(vec![KvOp::get(key)]).await?;
     let Some(r) = result_at(&a.results, 0) else {
         return Err(Error::io(format!("the KV read of {key} answered nothing")));
     };
     match r.value_if_found() {
         Some(v) => Ok(Some(Held {
-            doc: Pointer::from_value(v)?,
+            doc: D::from_value(v)?,
             version: r.version,
         })),
         None => Ok(None),
@@ -223,7 +251,7 @@ pub async fn read(api: &dyn QueenApi, key: &str) -> Result<Option<Held>> {
 
 /// The first write: the key must not exist (`expect: 0`, required). Losing it
 /// means another owner created the pointer in between: [`Error::Fenced`].
-pub async fn create(api: &dyn QueenApi, key: &str, doc: &Pointer) -> Result<i64> {
+pub async fn create<D: Doc>(api: &dyn QueenApi, key: &str, doc: &D) -> Result<i64> {
     let op = KvOp::Put {
         key: key.to_string(),
         value: doc.to_value(),
@@ -236,7 +264,7 @@ pub async fn create(api: &dyn QueenApi, key: &str, doc: &Pointer) -> Result<i64>
 }
 
 /// A fenced replacement outside a bundle (resync): `expect` the version held.
-pub async fn replace(api: &dyn QueenApi, key: &str, doc: &Pointer, expect: i64) -> Result<i64> {
+pub async fn replace<D: Doc>(api: &dyn QueenApi, key: &str, doc: &D, expect: i64) -> Result<i64> {
     let a = api
         .kv(vec![KvOp::fence(key, doc.to_value(), expect)])
         .await?;
