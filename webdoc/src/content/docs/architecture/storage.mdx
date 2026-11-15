@@ -37,6 +37,7 @@ sourceOfTruth:
 # names gain headers, link frames, reading queues, filtered groups and `link`. frames.rs gains two
 # frame flags, headers (8) and link (16); a reading queue's record holds link frames
 # (writing-applications/routing.mdx). The page's frame section names them.
+# sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): apply.rs, planner/txn.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 ---
 
 A message is written once, in its queue's log files, and that write is what makes it durable: there is no second copy. We built it this way on purpose. An earlier design wrote every message twice, first in a consensus log and then in a segment file. Now the bytes that make a message durable are the bytes a pop reads back.

@@ -10,6 +10,14 @@
 //! before any later command's effect, and leaves it here for the receiver to
 //! take. The read bytes never enter the log (D7).
 //!
+//! A transaction whose KV rider reads registers the same way (2026-11-15):
+//! its reads, read off the state once its entry had applied, saw the writes
+//! of commands planned after it (Jepsen W32: 141 G1c in a run with no
+//! faults). Every such transaction logs a no-op last (`TxnCommand::reads`),
+//! so it has a position even when nothing else of it is logged, and apply
+//! renders its rider there as its receiver did (no ttl judgment: the
+//! transaction committed, and says so).
+//!
 //! A call with a put that sets a ttl registers too, whether it reads or not
 //! (2026-11-14): the expiry of ITS write can only be read from the row at its
 //! own position — later, the row may be another write's — and the receiver

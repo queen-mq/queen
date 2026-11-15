@@ -12,6 +12,7 @@ sourceOfTruth:
   - server/src/kafka_inproc.rs
   - server/src/rsm/planner/timers.rs
   - server/src/rsm/facade/remote.rs
+# sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): facade/real.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 ---
 
 A message can carry headers: a map of strings, stored beside its payload.

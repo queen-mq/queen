@@ -22,7 +22,7 @@ use crate::rsm::planner::{KvCommand, KvOp, Plan};
 use crate::rsm::store::rows::KvRow;
 use crate::rsm::store::{Keyspace, Reads, Store, TypedReads};
 
-use super::planner_harness::{rid, Cell, Cmd, BASE_US, TENANT};
+use super::planner_harness::{rid, txn, Cell, Cmd, BASE_US, TENANT};
 
 const SEC: i64 = 1_000_000;
 /// LMDB's default key ceiling, what the store reports.
@@ -1894,6 +1894,150 @@ fn a_writing_calls_reads_see_nothing_planned_after_it() {
     // Nothing is left waiting once the calls are done.
     drop((ra, rb));
     assert!(reads.call(&rid(ida)).is_none() && reads.call(&rid(idb)).is_none());
+}
+
+/// A transaction's KV rider, validated as the transaction wire validates it.
+fn txn_ops(v: &Value) -> Vec<KvOp> {
+    parse_ops(
+        v.as_array().expect("an op array"),
+        TENANT,
+        true,
+        MAX_KEY,
+        MAX_VALUE_BYTES_DEFAULT,
+    )
+    .unwrap_or_else(|e| panic!("invalid ops {v}: {e:?}"))
+}
+
+/// A transaction of KV ops alone.
+fn kv_txn(id: u64, ops: Vec<KvOp>) -> Cmd {
+    let mut t = txn(id);
+    t.kv = ops;
+    Cmd::Txn(t)
+}
+
+/// Jepsen W32 (2026-11-15: 141 G1c cycles in a 60 s run with no faults; two
+/// transactions sent together, each reading the key the other writes, both
+/// saw the other's write in 243 of 300 pairs): the fix above, for a
+/// transaction's KV rider. Two transactions planned into ONE entry. Their
+/// reads, rendered at their own positions (`kv_reads`): the first sees nothing
+/// of the second, the second sees the first's write. Read off the state once
+/// the entry has applied, as the receiver read them before, each sees the
+/// other's write.
+#[test]
+fn a_transactions_reads_see_nothing_planned_after_it() {
+    let mut c = Cell::new("txn-read-position");
+    let (ida, idb) = (0x3232_0001u64, 0x3232_0002u64);
+    let a = txn_ops(&json!([
+        {"op":"get","ns":"w32","key":"y"},
+        {"op":"put","ns":"w32","key":"x","value":"a","forever":true},
+    ]));
+    let b = txn_ops(&json!([
+        {"op":"get","ns":"w32","key":"x"},
+        {"op":"put","ns":"w32","key":"y","value":"b","forever":true},
+    ]));
+    let reads = crate::rsm::kv_reads::global();
+    let ra = reads
+        .register(rid(ida), TENANT, &a, false)
+        .expect("register a");
+    let rb = reads
+        .register(rid(idb), TENANT, &b, false)
+        .expect("register b");
+    let cycle = c.run(&[kv_txn(ida, a.clone()), kv_txn(idb, b.clone())]);
+    assert!(cycle.logged, "both transactions write");
+    let got_a = ra.take().expect("a rendered at its position").expect("a");
+    let got_b = rb.take().expect("b rendered at its position").expect("b");
+    assert_eq!(
+        got_a[0]["found"], false,
+        "a read b's later write: {got_a:?}"
+    );
+    assert_eq!(got_b[0]["found"], true, "b reads a's write: {got_b:?}");
+    assert_eq!(got_b[0]["value"], "a", "{got_b:?}");
+    assert!(applied(&got_a[1]) && applied(&got_b[1]));
+
+    // What the receiver answered before: the state once the entry applied,
+    // where each reads the other's write, a cycle no serial order explains.
+    let pre_a = crate::rsm::batcher::TxnOutcome::from_outcome(&cycle.outcome(0))
+        .expect("a transaction outcome")
+        .kv
+        .results;
+    let now = c.now();
+    let late_a = c
+        .node
+        .store()
+        .read(|r| render_call(r, TENANT, &a, &pre_a, now))
+        .expect("render");
+    assert_eq!(late_a[0]["found"], true, "{late_a:?}");
+    assert_eq!(late_a[0]["value"], "b", "{late_a:?}");
+
+    drop((ra, rb));
+    assert!(reads.call(&rid(ida)).is_none() && reads.call(&rid(idb)).is_none());
+}
+
+/// A transaction that only reads (or whose writes all lost a precondition
+/// that was not required) would log nothing, and so have no position for
+/// apply to render its reads at: its receiver would wait for a rendering
+/// that never comes. Every transaction that reads logs one no-op, last.
+#[test]
+fn a_transaction_that_reads_logs_a_noop_as_its_position() {
+    let mut c = Cell::new("txn-read-noop");
+    let put = c.run(&[kv_cmd(
+        0x3232_0010,
+        json!([{"op":"put","ns":"w32","key":"r","value":"v","forever":true}]),
+    )]);
+    assert!(put.logged);
+
+    let id = 0x3232_0011u64;
+    let ops = txn_ops(&json!([
+        {"op":"get","ns":"w32","key":"r"},
+        {"op":"getMany","ns":"w32","keys":["r","none"]},
+        // Not required: it loses, and logs nothing of its own.
+        {"op":"putIfAbsent","ns":"w32","key":"r","value":"w","forever":true},
+    ]));
+    let reads = crate::rsm::kv_reads::global();
+    let reg = reads
+        .register(rid(id), TENANT, &ops, false)
+        .expect("register");
+    let cycle = c.run(&[kv_txn(id, ops)]);
+    assert!(cycle.logged, "a transaction that reads has a position");
+    match &cycle.results[0] {
+        Ok(Plan::Logged { effects, .. }) => assert_eq!(effects, &vec![Effect::Noop]),
+        other => panic!("planned {other:?}"),
+    }
+    let got = reg.take().expect("rendered at its position").expect("read");
+    assert_eq!(got[0]["found"], true, "{got:?}");
+    assert_eq!(got[0]["value"], "v", "{got:?}");
+    assert_eq!(got[1]["missing"], json!(["none"]), "{got:?}");
+    assert_eq!(got[2]["applied"], false, "{got:?}");
+
+    // A transaction that writes ends with it too, after everything else.
+    let id2 = 0x3232_0012u64;
+    let ops2 = txn_ops(&json!([
+        {"op":"get","ns":"w32","key":"r"},
+        {"op":"put","ns":"w32","key":"s","value":"w","forever":true},
+    ]));
+    let reg2 = reads
+        .register(rid(id2), TENANT, &ops2, false)
+        .expect("register");
+    let cycle = c.run(&[kv_txn(id2, ops2)]);
+    match &cycle.results[0] {
+        Ok(Plan::Logged { effects, .. }) => {
+            assert_eq!(effects.len(), 2, "{effects:?}");
+            assert!(matches!(effects[0], Effect::KvPut { .. }), "{effects:?}");
+            assert_eq!(effects[1], Effect::Noop);
+        }
+        other => panic!("planned {other:?}"),
+    }
+    assert!(reg2.take().is_some(), "rendered at its position");
+
+    // One that does not read logs nothing more than its writes.
+    let cycle = c.run(&[kv_txn(
+        0x3232_0013,
+        txn_ops(&json!([{"op":"put","ns":"w32","key":"t","value":"w","forever":true}])),
+    )]);
+    match &cycle.results[0] {
+        Ok(Plan::Logged { effects, .. }) => assert_eq!(effects.len(), 1, "{effects:?}"),
+        other => panic!("planned {other:?}"),
+    }
 }
 
 /// Jepsen W25 (2026-11-14, two holders of one claim): the expiry of a put is

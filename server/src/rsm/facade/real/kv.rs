@@ -45,11 +45,11 @@ use crate::rsm::store::{Reads, Store, TypedReads};
 use super::super::{KvFailure, KvListReq, KvOut, KvReq, ReqCtx, RsmError};
 use super::{reply_error, wall_micros, RaftFacade};
 
-/// The answer apply rendered for a registered call, waiting for this node's
-/// apply to pass the call's entry: at once when the reply came from that apply
-/// (`at: Some`), a little later after a request-id hit. `None` when the
-/// deadline passes first.
-async fn rendered(
+/// The answer apply rendered for a registered call (a KV call, or a
+/// transaction's KV rider), waiting for this node's apply to pass the call's
+/// entry: at once when the reply came from that apply (`at: Some`), a little
+/// later after a request-id hit. `None` when the deadline passes first.
+pub(super) async fn rendered(
     reg: &crate::rsm::kv_reads::Registration,
     ctx: &ReqCtx,
 ) -> Option<Result<Vec<serde_json::Value>, String>> {

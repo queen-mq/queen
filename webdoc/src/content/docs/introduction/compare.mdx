@@ -23,6 +23,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
 # names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): planner/txn.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 ---
 
 Two questions separate these systems more than any feature list: how you keep order per entity when there are millions of entities, and what one commit covers when a service handles an event. QueenMQ's answers are a partition per entity, created by its first message, and one transaction that writes the ack, the state, the next events and the timers as one entry. Every system below answers differently, and each one is better than QueenMQ at something. Laravel teams on Horizon have their own comparison: [QueenMQ or Horizon](/integrations/laravel/queen-vs-horizon/).

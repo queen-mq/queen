@@ -1779,9 +1779,10 @@ impl<'s, S: Store> Applier<'s, S> {
         }
     }
 
-    /// The KV calls of `c` a receiver in this process waits on
-    /// ([`crate::rsm::kv_reads`]), keyed by the ordinal of each one's last
-    /// effect. Empty (one atomic load) when nobody waits.
+    /// The KV calls and transactions of `c` a receiver in this process waits
+    /// on ([`crate::rsm::kv_reads`]), keyed by the ordinal of each one's last
+    /// effect (a transaction that reads ends with a no-op for it). Empty (one
+    /// atomic load) when nobody waits.
     fn kv_render_points(&self, c: &Committed) -> HashMap<u32, Vec<usize>> {
         let reads = crate::rsm::kv_reads::global();
         let mut at: HashMap<u32, Vec<usize>> = HashMap::new();
@@ -1789,10 +1790,12 @@ impl<'s, S: Store> Applier<'s, S> {
             return at;
         }
         for (i, cmd) in c.entry.commands.iter().enumerate() {
-            if matches!(cmd.outcome, Outcome::Kv(_))
-                && cmd.effect_count > 0
-                && reads.call(&cmd.request_id).is_some()
-            {
+            let renders = match &cmd.outcome {
+                Outcome::Kv(_) => true,
+                Outcome::Placeholder(p) => p.tag() == crate::rsm::planner::txn::TXN_OUTCOME_TAG,
+                _ => false,
+            };
+            if renders && cmd.effect_count > 0 && reads.call(&cmd.request_id).is_some() {
                 at.entry(cmd.first_effect + cmd.effect_count - 1)
                     .or_default()
                     .push(i);
@@ -1810,21 +1813,34 @@ impl<'s, S: Store> Applier<'s, S> {
         let reads = crate::rsm::kv_reads::global();
         for &i in cmds {
             let cmd = &c.entry.commands[i];
-            let Outcome::Kv(o) = &cmd.outcome else {
-                continue;
-            };
             let Some((tenant, ops, raw)) = reads.call(&cmd.request_id) else {
                 continue;
             };
-            let answer = crate::rsm::planner::kv::render_answer(
-                &self.writes,
-                &tenant,
-                &ops,
-                &o.results,
-                c.entry.now_us,
-                raw,
-            )
-            .map_err(|e| e.to_string());
+            let answer = match &cmd.outcome {
+                Outcome::Kv(o) => crate::rsm::planner::kv::render_answer(
+                    &self.writes,
+                    &tenant,
+                    &ops,
+                    &o.results,
+                    c.entry.now_us,
+                    raw,
+                )
+                .map_err(|e| e.to_string()),
+                // A transaction's KV rider, rendered as its receiver renders
+                // it: its puts are not judged against their ttl (the
+                // transaction committed, and says so).
+                other => match crate::rsm::planner::txn::TxnOutcome::from_outcome(other) {
+                    Some(t) => crate::rsm::planner::kv::render_call(
+                        &self.writes,
+                        &tenant,
+                        &ops,
+                        &t.kv.results,
+                        c.entry.now_us,
+                    )
+                    .map_err(|e| e.to_string()),
+                    None => Err("a registered command with no kv outcome".to_string()),
+                },
+            };
             reads.answer(&cmd.request_id, answer);
         }
     }

@@ -432,6 +432,39 @@ impl Workload {
     }
 
     fn transaction(&mut self) -> Command {
+        // Now and then a transaction that only reads, of keys whose homes
+        // differ: it logs one no-op as its position, by the single planner
+        // and by the shares alike.
+        if self.rng.chance(8) {
+            let ks: Vec<String> = (0..2)
+                .map(|_| format!("p{}", self.rng.below(self.spread(3))))
+                .collect();
+            let ops = vec![
+                json!({"op":"get","ns":"txn","key":format!("tk{}", self.rng.below(3))}),
+                json!({"op":"getMany","ns":"txn","keys":ks}),
+            ];
+            let kv = parse_ops(
+                &ops,
+                TENANT,
+                true,
+                511,
+                crate::rsm::planner::kv::MAX_VALUE_BYTES_DEFAULT,
+            )
+            .expect("kv op");
+            return Command::Transaction(TxnCommand {
+                request_id: self.id(),
+                tenant: TENANT.to_string(),
+                pushes: Vec::new(),
+                acks: Vec::new(),
+                positional_acks: Vec::new(),
+                kv,
+                timers: Vec::new(),
+                extra_effects: Vec::new(),
+                allow_duplicate: false,
+                positions: Vec::new(),
+                engine_acks: AckOutcome::default(),
+            });
+        }
         let mut pushes = vec![{
             let q = if self.rng.chance(60) { "qd" } else { "q0" };
             let p = format!("p{}", self.rng.below(self.spread(3)));
@@ -467,6 +500,12 @@ impl Workload {
                     "op":"putIfAbsent","ns":"gate","key":k,"value":{"n":1},
                     "forever":true,"required":true,
                 }));
+            }
+            // A read now and then, first: of a key the transaction may write
+            // after it (answered at plan time) or of one it does not.
+            if self.rng.chance(40) {
+                let k = format!("tk{}", self.rng.below(3));
+                ops.insert(0, json!({"op":"get","ns":"txn","key":k}));
             }
             parse_ops(
                 &ops,

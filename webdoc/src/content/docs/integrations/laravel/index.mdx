@@ -146,6 +146,7 @@ sourceOfTruth:
 # states changes.
 # sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
 # rewords the 504 a membership change answers. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): facade/real.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 ---
 
 QueenMQ can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and running the workers, which Horizon's master does. Your job classes stay ordinary Laravel jobs, and `queue:work` stays the worker.

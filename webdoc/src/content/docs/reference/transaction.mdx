@@ -89,6 +89,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
 # rewords the 504 a membership change answers; handlers/raft.rs changes a comment on ?timeoutMs.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-15 (a transaction's reads at its position, Jepsen W32): facade/real.rs
+# registers a transaction whose `kv` reads with rsm/kv_reads, apply renders its rider right after
+# its last effect, and planner/txn.rs logs one no-op last for it. The page now says what a read
+# in `kv` sees.
 ---
 
 `POST /api/v1/transaction` is the call QueenMQ was built around. It writes a worker's whole step
@@ -237,6 +241,12 @@ answer, 429 `rate_limited` or 403 `kv_quota_exceeded`.
 `version`, `limit`, `type`), the whole transaction rolls back with `reason: "kv_precondition"`.
 Without `required`, a lost precondition is `applied: false` in the results and the rest commits.
 The JS `.once(ns, key)` is `putIfAbsent` with `required: true`.
+
+A `get` or `getMany` answers the keys as they stand at the transaction's own place in the log:
+every write committed before it, and the transaction's own writes, and nothing written after it.
+A `get` placed before a write of the same key answers the value from before that write. A
+transaction that reads takes a place in the log even when it writes nothing. A transaction cannot
+branch on what it reads: to act on a value, read it first and put `expect` on the write.
 
 `check` is a precondition on a key the transaction does not write: `expect: N` holds while the key
 is at version N, `expect: 0` while it is absent, and `expect` is mandatory. The `guard` that

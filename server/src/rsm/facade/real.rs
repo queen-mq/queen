@@ -3067,6 +3067,16 @@ impl RaftFacade {
             })
             .collect();
 
+        // A transaction whose KV rider reads is answered at its own position
+        // in the log, as a KV call is ([`crate::rsm::kv_reads`]): registered
+        // before it is submitted, rendered by apply right after its last
+        // effect, the no-op every such transaction logs (`TxnCommand::reads`).
+        let reads_kv = kv_ops.iter().any(crate::rsm::planner::kv::KvOp::is_read);
+        let kv_registered = reads_kv
+            .then(|| {
+                crate::rsm::kv_reads::global().register(ctx.request_id, &ctx.tenant, &kv_ops, false)
+            })
+            .flatten();
         let cmd = Command::Transaction(crate::rsm::batcher::TxnCommand {
             request_id: ctx.request_id,
             tenant: ctx.tenant.clone(),
@@ -3127,18 +3137,40 @@ impl RaftFacade {
         // 3. Render: one result per flat ordinal, the SQL wire's shapes.
         let mut results: Vec<serde_json::Value> = vec![serde_json::Value::Null; flat];
         if !kv_ops.is_empty() {
-            // Deferred reads are evaluated NOW, after the entry applied (024 §6.4).
-            let store = self.store.clone();
-            let tenant = ctx.tenant.clone();
-            let ops2 = kv_ops.clone();
-            let pre = out.kv.results.clone();
-            let now = wall_micros();
-            let vals = tokio::task::spawn_blocking(move || {
-                store.read(|r| crate::rsm::planner::kv::render_call(r, &tenant, &ops2, &pre, now))
-            })
-            .await
-            .map_err(|e| RsmError::Internal(format!("txn kv render: {e}")))?
-            .map_err(|e| RsmError::Internal(format!("txn kv render: {e}")))?;
+            let vals = if reads_kv {
+                // Rendered by apply at the transaction's own position, never
+                // read off this node's state as it is now: that can hold a
+                // later command's write (Jepsen W32, G1c). Registered ids are
+                // unique (minted here per call, D6).
+                let Some(reg) = &kv_registered else {
+                    return Err(RsmError::Internal(
+                        "txn kv read: the transaction's id was already registered".into(),
+                    ));
+                };
+                match kv::rendered(reg, &ctx).await {
+                    Some(answer) => {
+                        answer.map_err(|e| RsmError::Internal(format!("txn kv render: {e}")))?
+                    }
+                    // Committed, but its answer is gone: the outcome is unknown
+                    // to the client, never answered from later state.
+                    None => return Err(RsmError::Timeout),
+                }
+            } else {
+                // No read: the verdicts alone (024 §6.4).
+                let store = self.store.clone();
+                let tenant = ctx.tenant.clone();
+                let ops2 = kv_ops.clone();
+                let pre = out.kv.results.clone();
+                let now = wall_micros();
+                tokio::task::spawn_blocking(move || {
+                    store.read(|r| {
+                        crate::rsm::planner::kv::render_call(r, &tenant, &ops2, &pre, now)
+                    })
+                })
+                .await
+                .map_err(|e| RsmError::Internal(format!("txn kv render: {e}")))?
+                .map_err(|e| RsmError::Internal(format!("txn kv render: {e}")))?
+            };
             for (i, v) in vals.into_iter().enumerate() {
                 let mut obj = match v {
                     serde_json::Value::Object(m) => m,

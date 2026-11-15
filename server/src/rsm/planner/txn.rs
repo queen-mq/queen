@@ -214,7 +214,7 @@ impl TxnPartPlan {
     /// How many effects planning this share folded into its overlay.
     pub(crate) fn folded(&self, cmd: &TxnCommand, part: &TxnPart) -> u64 {
         let riders = if part.lead {
-            cmd.extra_effects.len()
+            cmd.extra_effects.len() + usize::from(cmd.reads())
         } else {
             0
         };
@@ -223,6 +223,19 @@ impl TxnPartPlan {
 }
 
 impl TxnCommand {
+    /// Whether the KV rider reads (`get`, `getMany`). Such a transaction logs
+    /// one [`Effect::Noop`] after everything else, by the single planner and
+    /// by its lead share alike: its position in the log, where apply renders
+    /// its reads for the receiver ([`crate::rsm::kv_reads`]), so it has one
+    /// even when nothing else of it is logged (it only reads, or every write
+    /// lost a precondition that was not required). Read off the node's state
+    /// once the entry had applied, its reads saw the writes of commands
+    /// planned after it: two transactions each read the other's write (Jepsen
+    /// W32, 2026-11-15: G1c).
+    pub(crate) fn reads(&self) -> bool {
+        self.kv.iter().any(KvOp::is_read)
+    }
+
     /// The shares of a transaction put back together, when every one of them
     /// held: the effects in the order [`Planner::plan_transaction`] logs them
     /// (the pushes in order, the KV rider in apply order, the timers, the
@@ -279,6 +292,10 @@ impl TxnCommand {
             out.timers = results;
         }
         effects.extend(self.extra_effects.iter().cloned());
+        // The position of a transaction that reads, which the lead folded.
+        if self.reads() {
+            effects.push(Effect::Noop);
+        }
         out.acks = self.engine_acks.clone();
         Ok((effects, out.into_outcome()?))
     }
@@ -356,6 +373,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         }
         if part.lead && !cmd.extra_effects.is_empty() {
             ov.apply_effects(&cmd.extra_effects);
+        }
+        // The lead folds the position of a transaction that reads, as the
+        // single planner does after the riders ([`TxnCommand::reads`]).
+        if part.lead && cmd.reads() {
+            ov.apply_effects(&[Effect::Noop]);
         }
         Some(plan)
     }
@@ -490,6 +512,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             ov.apply_effects(&cmd.extra_effects);
             effects.extend(cmd.extra_effects.clone());
         }
+        // A transaction that reads: its position, last ([`TxnCommand::reads`]).
+        if cmd.reads() {
+            ov.apply_effects(&[Effect::Noop]);
+            effects.push(Effect::Noop);
+        }
 
         out.acks = cmd.engine_acks.clone();
         let outcome = out.into_outcome()?;
@@ -530,6 +557,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             effects.extend(self.plan_positions(ov, &cmd.tenant, &cmd.positions)?);
         }
         effects.extend(cmd.extra_effects.iter().cloned());
+        // A transaction that reads: its position, last ([`TxnCommand::reads`]).
+        // Without it a transaction of reads alone would log nothing.
+        if cmd.reads() {
+            effects.push(Effect::Noop);
+        }
         out.acks = cmd.engine_acks.clone();
         let outcome = out.into_outcome()?;
         ov.apply_effects(&effects);

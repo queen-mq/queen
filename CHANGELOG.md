@@ -96,6 +96,16 @@ before: the transaction committed. The Rust SDK's `KvReason` gets `Expired` (a R
 than this release cannot parse that answer and returns an error for it) and the Go SDK
 `KVReasonExpired`.
 
+**Fixed: a transaction's KV reads answer what was there at its place in the log.** A `get` or
+`getMany` in a transaction's `kv` now sees every write committed before the transaction and the
+transaction's own writes, and nothing written after it, as a `POST /api/v1/kv` call's reads
+already did. A transaction that only reads now takes a place in the log too. Why: the reads were
+answered once the transaction's log entry had applied on the node, and by then the commands
+planned after it could have applied as well. Two transactions sent together, each reading the key
+the other writes, each saw the other's write, which no order of the two explains (found by the new
+Jepsen test W32, Elle on `/api/v1/transaction`, in 2.8.1 too). What a transaction writes and the
+conditions on its writes were never affected: those are decided in the log's order.
+
 **Fixed: a pop nobody waits for takes no lease.** When a node stops or dies, the leader drops the
 long-poll pops that node had forwarded to it, and a PostgreSQL sink's worker that stops no longer
 leaves its pop running. Why: such a pop went on waiting, took the next messages and answered

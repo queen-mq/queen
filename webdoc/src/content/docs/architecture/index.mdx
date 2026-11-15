@@ -55,6 +55,7 @@ digest: >-
 # sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
 # names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): apply.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 ---
 
 A QueenMQ node is one process. Every write is decided once, on the leader, and then applied on every node. These pages follow a write through the process, from the request to the disk.

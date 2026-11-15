@@ -110,6 +110,7 @@ verifiedBy:
 # link in a cycle's push item, txn.rs commits a link its partition already holds as a no-op, and
 # SinkOperator.js / FeedRunner.js write a link for a result that is its input unchanged. This
 # page: a paragraph in Two ways to end a stream.
+# sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): planner/txn.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 ---
 
 A stream reads a queue and writes its results to another. The partition is the key, so each customer gets its own windows. Streams are in the JavaScript, Python, Go and Rust clients; PHP and C++ have none, and a stream reads any queue, whoever pushes to it. Like a new group it starts at the tail: push a few more orders and a result arrives a minute later.

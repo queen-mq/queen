@@ -103,6 +103,7 @@ sourceOfTruth:
 # queen_raft_committed_entries_total and counts each transaction's outcome where its answer leaves;
 # timing.rs sums the planned commands for the dashboard. The new "Connections, commits and
 # transactions" section says so; the generated table lists them.
+# sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): facade/real.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 ---
 
 Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`. Each node

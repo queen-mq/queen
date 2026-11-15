@@ -27,6 +27,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
 # names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): planner/txn.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 ---
 
 For building applications, QueenMQ is the better choice: services that handle events per customer, order or conversation, microservices that hand work to each other, and steps that have to commit whole. The one exception is a firehose of millions of messages a second on up to some thousands of partitions, where Kafka and Pulsar are ahead.

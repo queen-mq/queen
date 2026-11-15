@@ -69,6 +69,7 @@ digest: >-
 # request that went away (its deadline, a closed connection) no longer leaves a joint configuration;
 # facade/real.rs rewords the 504 a membership change answers; handlers/raft.rs changes a comment on
 # ?timeoutMs. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): apply.rs, facade/real.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 ---
 
 Most failures need nothing from you. A node that crashes catches up from the leader when it starts again. A leader that gets SIGTERM hands its job to a peer before it stops. A node that was away too long gets a snapshot from the leader, exits with code 75, and loads it when it starts again. This section is for the rest: a lost disk, a lost majority, a full disk, a bad day.
