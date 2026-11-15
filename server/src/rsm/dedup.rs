@@ -1799,7 +1799,8 @@ impl DedupFront {
                         // Cap pressure mid-seed: give up on this partition.
                         let freed = pf.mark_fallback();
                         self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
-                        self.n_fallback.fetch_add(1, Ordering::Relaxed);
+                        let n = self.n_fallback.fetch_add(1, Ordering::Relaxed) + 1;
+                        self.warn_cap(pid, sh.created_us, n);
                         break;
                     }
                     let added = pf.insert(
@@ -2023,7 +2024,8 @@ impl DedupFront {
                 if self.total_bytes.load(Ordering::Relaxed) + pf.next_gen_bytes() as u64 > cap {
                     let freed = pf.mark_fallback();
                     self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
-                    self.n_fallback.fetch_add(1, Ordering::Relaxed);
+                    let n = self.n_fallback.fetch_add(1, Ordering::Relaxed) + 1;
+                    self.warn_cap(pid, created_us, n);
                     continue;
                 }
             }
