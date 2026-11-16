@@ -24,7 +24,7 @@ use crate::rsm::planner::txn::TxnCommand;
 use crate::rsm::planner::Refusal;
 use crate::rsm::store::{Store, TypedReads};
 
-use super::ack::{ack_target, positional, retry_hold, same};
+use super::ack::{ack_target, files_unread, positional, retry_hold, same, unread_refusal};
 use super::load::{registration_meta, Seed};
 use super::state::{lock, shard_of, Cur, Gid, Group, GroupCfg};
 use super::{Engine, TxnPart};
@@ -170,6 +170,12 @@ impl Engine {
                 )?;
                 if !acked.res.stale_hashes.is_empty() {
                     return Ok(Err(qtxn(acked.res.stale_hashes.len(), t.pid)));
+                }
+                // A dead letter whose message the receiver could not read
+                // (`ack::files_unread`): the whole bundle is refused,
+                // retryably, before it commits.
+                if files_unread(&acked) {
+                    return Ok(Err(unread_refusal()));
                 }
                 s.3.extend(acked.dlq);
                 if let Some(at) = retry_hold(&cfg.queue, now).filter(|_| acked.released) {

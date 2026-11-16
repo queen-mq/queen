@@ -819,3 +819,98 @@ fn below_catalogue_version_3_an_ack_keeps_no_released_lease() {
     let repeat = h.ack(pid, "q", "g", "w2", &[("c", Ok)]);
     assert!(repeat.stale_hashes.is_empty(), "{repeat:?}");
 }
+
+/// The snapshot a receiver sends when it could not read the message an ack
+/// names (`facade/real.rs`, `resolve_ack_targets`): no message id, no payload.
+fn unread(txn: &str) -> crate::rsm::planner::DlqSnapshot {
+    crate::rsm::planner::DlqSnapshot {
+        message_id: None,
+        txn: txn.into(),
+        payload: Vec::new(),
+        headers: Vec::new(),
+    }
+}
+
+/// `h.ack`'s target with every signal's snapshot replaced by [`unread`].
+fn unread_ack(h: &mut H, pid: Pid, items: &[(&str, crate::rsm::planner::AckStatus)]) -> Reply {
+    let mut t = h.ack_target(pid, "q", "g", "w1", items);
+    for (it, (txn, _)) in t.items.iter_mut().zip(items) {
+        if it.snapshot.is_some() {
+            it.snapshot = Some(unread(txn));
+        }
+    }
+    let c = crate::rsm::planner::AckCommand {
+        request_id: h.rid(),
+        targets: vec![t],
+    };
+    h.serve(crate::rsm::batcher::Command::Ack(c))
+}
+
+/// Jepsen W7, campaign 3 (2026-11-15): during a graceful restart of the
+/// leader, the new leader took a `failed` ack that spent the last retry
+/// before it had applied the message, sent the snapshot it could not fill,
+/// and the dead letter was filed with no payload on every node. Refused
+/// instead, retryably, with nothing moved; the retry, read on a node that
+/// caught up, files the payload.
+#[test]
+fn a_spent_budget_files_no_dead_letter_its_receiver_could_not_read() {
+    let mut h = H::new("ack-dlq-unread-failed");
+    let pid = lease_cfg(&mut h, &["a", "b"], 0, true);
+    match unread_ack(&mut h, pid, &[("a", Failed)]) {
+        Reply::Refused(r) => {
+            assert!(r.retryable, "{r:?}");
+            assert_eq!(r.code, super::ack::DLQ_UNREAD);
+        }
+        other => panic!("filed: {other:?}"),
+    }
+    assert!(
+        h.dlq_rows().is_empty(),
+        "no dead letter without its message"
+    );
+    let cur = h.cursor(pid, "g").expect("cursor row");
+    assert_eq!(cur.committed, -1, "nothing moved: {cur:?}");
+    assert_eq!(
+        cur.worker.as_deref(),
+        Some("w1"),
+        "the lease is kept: {cur:?}"
+    );
+    // The retry carries the payload: filed whole.
+    let r = h.ack(pid, "q", "g", "w1", &[("a", Failed)]);
+    assert_eq!(r.dlq, 1);
+    let rows = h.dlq_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].txn, "a");
+    assert!(!rows[0].payload.is_empty(), "{:?}", rows[0]);
+}
+
+/// The same for a forced `dlq` ack.
+#[test]
+fn a_forced_dlq_files_no_dead_letter_its_receiver_could_not_read() {
+    let mut h = H::new("ack-dlq-unread-forced");
+    let pid = lease(&mut h, "q", "p0", &["a", "b"], "w1");
+    match unread_ack(&mut h, pid, &[("a", Dlq)]) {
+        Reply::Refused(r) => assert!(r.retryable && r.code == super::ack::DLQ_UNREAD, "{r:?}"),
+        other => panic!("filed: {other:?}"),
+    }
+    assert!(h.dlq_rows().is_empty());
+    let r = h.ack(pid, "q", "g", "w1", &[("a", Dlq)]);
+    assert_eq!(r.dlq, 1);
+    assert!(!h.dlq_rows()[0].payload.is_empty());
+}
+
+/// And for a transaction's ack: the bundle is refused before it commits.
+#[test]
+fn a_transaction_files_no_dead_letter_its_receiver_could_not_read() {
+    let mut h = H::new("ack-dlq-unread-txn");
+    let pid = lease_cfg(&mut h, &["a", "b"], 0, true);
+    let id = h.rid();
+    let mut txn = h.txn(id);
+    let mut t = h.ack_target(pid, "q", "g", "w1", &[("a", Failed)]);
+    t.items[0].snapshot = Some(unread("a"));
+    txn.acks.push(t);
+    match h.e.txn_prepare(&txn, h.now) {
+        Err(r) => assert!(r.retryable && r.code == super::ack::DLQ_UNREAD, "{r:?}"),
+        other => panic!("prepared: {other:?}"),
+    }
+    assert!(h.dlq_rows().is_empty());
+}

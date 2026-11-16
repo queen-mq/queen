@@ -33,6 +33,37 @@ type Result<T> = std::result::Result<T, StoreError>;
 
 const DEFAULT_DLQ_ERROR: &str = "Retries exhausted";
 
+/// The refusal of an ack that would file a dead letter its receiver could not
+/// read ([`files_unread`]): retryable, nothing moved.
+pub(crate) const DLQ_UNREAD: &str = "dlq_unread";
+
+/// Whether `acked` files a dead letter from the snapshot the node that took
+/// the ack could not fill: the placeholder, no message id and no payload
+/// (`facade/real.rs`, `resolve_ack_targets`). Every snapshot a receiver did
+/// read names its message, a link whose message is gone too.
+///
+/// That node had not applied the claim yet: a follower, or a leader just
+/// elected whose apply trails its log, and its read barrier can fail during a
+/// hand-over, so it sent the ack as it was. Filed, the dead letter carries the
+/// transaction id and no payload, on every node (Jepsen W7, campaign 3,
+/// 2026-11-15: two of 10,418, during a graceful restart of the leader). The
+/// ack is refused instead, retryably, before anything moves: its retry is
+/// resolved again on a node that has caught up by then, and carries the
+/// payload.
+pub(crate) fn files_unread(acked: &Acked) -> bool {
+    acked.dlq.iter().any(
+        |e| matches!(e, Effect::DlqInsert { message_id: None, payload, .. } if payload.is_empty()),
+    )
+}
+
+pub(crate) fn unread_refusal() -> Refusal {
+    Refusal::retry(
+        DLQ_UNREAD,
+        "the node that took this ack has not read yet the message it dead-letters; \
+         send the ack again",
+    )
+}
+
 fn is_signal(s: AckStatus) -> bool {
     matches!(s, AckStatus::Failed | AckStatus::Dlq | AckStatus::Retry)
 }
@@ -864,6 +895,16 @@ impl Engine {
                         continue;
                     }
                 };
+                // A dead letter without its message: refused while nothing
+                // moved; after another target did, this one alone is not
+                // acked (answered stale, its lease left to run out).
+                if files_unread(&acked) {
+                    if deps.rows.is_empty() {
+                        return Ok(Err(unread_refusal()));
+                    }
+                    results.push(stale(t));
+                    continue;
+                }
                 if acked.changed || !acked.dlq.is_empty() {
                     if let Some(v) = self.commit_cur(sh, g.id, t.pid, cur, acked.dlq, now) {
                         deps.rows.push((t.pid, g.id, v));
