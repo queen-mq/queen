@@ -194,6 +194,18 @@ the leader paused its writes for up to two minutes. The change now runs on its o
 are taken; a request that ends first answers `504`, and the leader goes on. Found by the Jepsen
 standby test (in 2.8.1 too).
 
+**Fixed: an ephemeral partition that moves loses no message and hands none out twice.** While a
+partition moved to another node (a restart, a rolling restart, a node joining or leaving), the new
+owner could take a push before the old owner's ring arrived. Its new ring knew only the consumer
+groups that had popped there, and freed a message as soon as they had taken it, so a group whose
+cursor was on its way in the old ring never got it. And when the old ring landed in one that
+already held messages, every group was handed again what it had already taken on the old owner: a
+`commitOnDelivery` group got messages twice. A ring created while partitions may still be moving now
+keeps what its groups take until the old ring lands, or for 10 seconds, and each group's place, with
+what it already took, travels with the ring, also when it moves twice. Found by the Jepsen
+ephemeral tests (restart, kill, partition and pause), in every campaign since 2026-11-14; in 2.8.1
+too.
+
 **Fixed: an acquire takes one permit and answers it as new, even when a node's clock runs ahead.**
 When the clock of the node that took an acquire ran ahead of the leader's by more than the lock's
 lifetime, a lock could be answered `already: true` for a permit the call had just taken, and a

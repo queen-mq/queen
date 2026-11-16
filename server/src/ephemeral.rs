@@ -610,7 +610,18 @@ pub struct GroupExport {
     pub redeliver: Vec<u64>,
     pub attempts: Vec<(u64, u32)>,
     pub skipped: u64,
+    /// Ranges `[from, to)` past `next` the group already took on an earlier
+    /// owner (a ring that moved again before the group caught up): the next
+    /// owner must not hand them to it once more.
+    pub skip: Vec<(u64, u64)>,
 }
+
+/// How long a ring created while partitions may still be moving keeps the
+/// messages its groups took ([`Ephemeral::unsettle`]): until the old owner's
+/// ring lands here, or this long. The old ring brings the cursors of the
+/// groups that read the partition there; a message one of them took here
+/// before it landed must still be in the ring for the others.
+pub const HANDOVER_HOLD_MS: i64 = 10_000;
 
 /// One partition's contents on their way to the node that now owns it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -735,6 +746,10 @@ struct GroupState {
     /// backstop: the names come from clients, and a cursor nobody uses pins
     /// both a slot and, through `trim_consumed`'s floor, the messages behind it.
     last_ms: i64,
+    /// Sorted, disjoint ranges `[from, to)` of messages this group already
+    /// took on the node that owned the ring before ([`Ring::adopt`]): the
+    /// cursor jumps over them instead of handing them out a second time.
+    skip: Vec<(u64, u64)>,
 }
 
 impl GroupState {
@@ -745,7 +760,43 @@ impl GroupState {
             attempts: HashMap::new(),
             skipped: 0,
             last_ms: now_ms,
+            skip: Vec::new(),
         }
+    }
+
+    /// Move the cursor past the ranges it reached that this group already
+    /// took elsewhere, and forget the ranges behind it.
+    fn jump(&mut self) {
+        while let Some(&(from, to)) = self.skip.first() {
+            if to <= self.next {
+                self.skip.remove(0);
+            } else if from <= self.next {
+                self.next = to;
+                self.skip.remove(0);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Whether this group already took `seq` on an earlier owner.
+    fn took(&self, seq: u64) -> bool {
+        self.skip.iter().any(|&(from, to)| from <= seq && seq < to)
+    }
+
+    /// Add ranges this group took elsewhere, keeping them sorted and merged.
+    fn add_skips(&mut self, ranges: impl IntoIterator<Item = (u64, u64)>) {
+        self.skip
+            .extend(ranges.into_iter().filter(|(from, to)| from < to));
+        self.skip.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(self.skip.len());
+        for (from, to) in self.skip.drain(..) {
+            match merged.last_mut() {
+                Some(last) if from <= last.1 => last.1 = last.1.max(to),
+                _ => merged.push((from, to)),
+            }
+        }
+        self.skip = merged;
     }
 
     /// The lowest seq this group could still be handed. `u64::MAX` when it is
@@ -817,6 +868,11 @@ struct Ring {
     /// queue: a queue that rotates partition names would otherwise keep one
     /// ring per name it ever saw.
     last_ms: i64,
+    /// Until this epoch ms nothing a group took is freed: the ring was
+    /// created while its partition may still be moving here, and the groups
+    /// the old owner's ring brings may not have a cursor here yet
+    /// ([`HANDOVER_HOLD_MS`]). 0: no hold. Bounds and ttl still apply.
+    hold_until_ms: i64,
 }
 
 impl Ring {
@@ -834,6 +890,7 @@ impl Ring {
             next_lease_id: 0,
             bytes: 0,
             last_ms: now_ms,
+            hold_until_ms: 0,
         }
     }
 
@@ -943,8 +1000,13 @@ impl Ring {
         self.head_seq = seq + 1;
         for g in self.groups.iter_mut() {
             if g.next <= seq {
+                // A message this group already took on an earlier owner is
+                // not one it missed.
+                if !g.took(seq) {
+                    g.skipped += 1;
+                }
                 g.next = seq + 1;
-                g.skipped += 1;
+                g.jump();
             }
             g.redeliver.retain(|&s| s != seq);
             g.attempts.remove(&seq);
@@ -1001,9 +1063,11 @@ impl Ring {
     /// With NO groups at all nothing is reclaimed: a queue that has been pushed
     /// to but never popped is holding messages FOR a consumer that has not
     /// arrived yet, and its bound is `maxBytes`/`ttlSeconds`, not this.
-    fn trim_consumed(&mut self) -> Freed {
+    ///
+    /// A ring under a hand-over hold frees nothing yet: see `hold_until_ms`.
+    fn trim_consumed(&mut self, now_ms: i64) -> Freed {
         let mut out = Freed::default();
-        if self.groups.is_empty() {
+        if self.groups.is_empty() || now_ms < self.hold_until_ms {
             return out;
         }
         // The lowest leased seq of every group in ONE pass over the leases,
@@ -1092,7 +1156,12 @@ impl Ring {
     fn pending_of(&self, gi: u32) -> i64 {
         let g = &self.groups[gi as usize];
         let from = g.next.max(self.head_seq);
-        let forward = self.next_seq.saturating_sub(from) as i64;
+        let taken: u64 = g
+            .skip
+            .iter()
+            .map(|&(a, b)| b.min(self.next_seq).saturating_sub(a.max(from)))
+            .sum();
+        let forward = self.next_seq.saturating_sub(from).saturating_sub(taken) as i64;
         // Redeliveries below the head were evicted under the group and were
         // already counted as skips; they are not pending, they are gone.
         let back = g.redeliver.iter().filter(|&&s| s >= self.head_seq).count() as i64;
@@ -1152,12 +1221,14 @@ impl Ring {
             g.next = self.next_seq;
             g.redeliver.clear();
             g.attempts.clear();
+            g.skip.clear();
         }
         freed
     }
 
     /// Empty the ring INTO a hand-over: the messages, and every group's position
-    /// as offsets from the first one. A leased message travels as a redelivery.
+    /// as offsets from the first one. A leased message travels as a redelivery,
+    /// and what a group already took on an earlier owner travels as `skip`.
     fn export(&mut self) -> (Vec<(i64, Box<[u8]>)>, Vec<GroupExport>, Freed) {
         let base = self.head_seq;
         let mut names = vec![String::new(); self.groups.len()];
@@ -1165,7 +1236,8 @@ impl Ring {
             names[i as usize] = n.clone();
         }
         let mut groups = Vec::with_capacity(self.groups.len());
-        for (i, g) in self.groups.iter().enumerate() {
+        for (i, g) in self.groups.iter_mut().enumerate() {
+            g.jump();
             let mut redeliver: Vec<u64> = g
                 .redeliver
                 .iter()
@@ -1190,6 +1262,12 @@ impl Ring {
                     .map(|(s, n)| (s - base, *n))
                     .collect(),
                 skipped: g.skipped,
+                skip: g
+                    .skip
+                    .iter()
+                    .filter(|&&(_, to)| to > base)
+                    .map(|&(from, to)| (from.max(base) - base, to - base))
+                    .collect(),
             });
         }
         let freed = Freed {
@@ -1211,16 +1289,25 @@ impl Ring {
             g.next = self.next_seq;
             g.redeliver.clear();
             g.attempts.clear();
+            g.skip.clear();
         }
         (msgs, groups, freed)
     }
 
-    /// Take a handed-over ring's messages at the tail. Into a ring with nothing
-    /// in it and nothing in flight — the usual case, at most a parked pop got
-    /// here first — every group resumes exactly where it was. Into a ring that
-    /// already took new pushes (the seconds while nodes disagree) the messages
-    /// land after them and groups keep their cursors: reordered and possibly
-    /// re-delivered, which the class allows (§1.4) where losing them is worse.
+    /// Take a handed-over ring's messages at the tail.
+    ///
+    /// Into a ring with nothing in it and nothing in flight (the usual case:
+    /// at most a parked pop got here first) every group resumes exactly where
+    /// it was. Into a ring that already took new pushes (the seconds while
+    /// nodes disagree) the messages land after them, reordered (§1.4); each
+    /// group keeps its cursor here, jumps over the old messages it already
+    /// took on the old owner, and gets back as a redelivery what it held there
+    /// unacked. Until 2026-11-16 the old positions were dropped in that case
+    /// and a group was handed again everything the old ring still held
+    /// (Jepsen W20: commitOnDelivery messages delivered twice).
+    ///
+    /// The old ring brings the cursors of the groups that read the partition
+    /// there, so the hand-over hold ends here ([`HANDOVER_HOLD_MS`]).
     fn adopt(&mut self, msgs: Vec<(i64, Box<[u8]>)>, groups: &[GroupExport], now_ms: i64) {
         let fresh = self.deque.is_empty() && self.leases.is_empty();
         let base = self.next_seq;
@@ -1239,31 +1326,47 @@ impl Ring {
             });
         }
         let end = self.next_seq;
+        let at = |offset: u64| base.saturating_add(offset).min(end);
         for g in groups {
             // A group past the cap travels without its cursor: it rejoins at
             // the head when it pops, like any new group.
             let Some(gi) = self.group(&g.name, now_ms) else {
                 continue;
             };
-            let gi = gi as usize;
-            if !fresh {
-                continue;
-            }
-            let st = &mut self.groups[gi];
-            st.next = base.saturating_add(g.next).min(end);
-            st.redeliver = g
+            let st = &mut self.groups[gi as usize];
+            let redeliver = g
                 .redeliver
                 .iter()
-                .map(|o| base + o)
-                .filter(|s| *s < end)
-                .collect();
-            st.attempts = g
+                .map(|&o| base.saturating_add(o))
+                .filter(|s| *s < end);
+            let attempts = g
                 .attempts
                 .iter()
-                .filter(|(o, _)| base + o < end)
-                .map(|(o, n)| (base + o, *n))
-                .collect();
+                .filter(|(o, _)| base.saturating_add(*o) < end)
+                .map(|&(o, n)| (base + o, n));
+            let skips = g.skip.iter().map(|&(from, to)| (at(from), at(to)));
+            if fresh {
+                st.next = at(g.next);
+                st.redeliver = redeliver.collect();
+                st.attempts = attempts.collect();
+                st.skip.clear();
+                st.add_skips(skips);
+            } else {
+                // The cursor stays where it is here; the old messages it took
+                // are a range it jumps over when it gets there.
+                st.add_skips(std::iter::once((base, at(g.next))).chain(skips));
+                st.redeliver.extend(redeliver);
+                let mut v: Vec<u64> = st.redeliver.drain(..).collect();
+                v.sort_unstable();
+                v.dedup();
+                st.redeliver = v.into();
+                st.attempts.extend(attempts);
+            }
             st.skipped += g.skipped;
+            st.jump();
+        }
+        if !groups.is_empty() {
+            self.hold_until_ms = 0;
         }
     }
 }
@@ -1334,6 +1437,7 @@ impl EqQueue {
         &self,
         partition: &str,
         now_ms: i64,
+        hold_until_ms: i64,
         base: impl FnOnce() -> u64,
     ) -> Arc<Mutex<Ring>> {
         if let Some(r) = self.ring(partition) {
@@ -1349,6 +1453,7 @@ impl EqQueue {
         p.entry(partition.to_string())
             .or_insert_with(|| {
                 let mut r = Ring::new(start, now_ms);
+                r.hold_until_ms = hold_until_ms;
                 // `known_groups` is capped at the ring's own group cap, so
                 // every seeded name fits.
                 for g in &seed {
@@ -1704,6 +1809,10 @@ pub struct Ephemeral {
     /// has not visited yet. One key snapshot per PASS, `SWEEP_BATCH` queues
     /// per tick, instead of every key cloned every second.
     sweep_cursor: Mutex<Vec<String>>,
+    /// Epoch ms until which partitions may still be moving to or from this
+    /// node: a peer said it is leaving, the placement changed, or this node
+    /// has just started in a cluster ([`Ephemeral::unsettle`]). 0: settled.
+    unsettled_until_ms: AtomicI64,
 }
 
 impl Ephemeral {
@@ -1733,6 +1842,7 @@ impl Ephemeral {
             implicit_ttl_ms: AtomicI64::new(implicit_ttl_ms_env()),
             max_queues: std::sync::atomic::AtomicUsize::new(max_queues_env()),
             sweep_cursor: Mutex::new(Vec::new()),
+            unsettled_until_ms: AtomicI64::new(0),
         })
     }
 
@@ -2049,6 +2159,23 @@ impl Ephemeral {
             .collect();
         v.sort();
         v
+    }
+
+    /// Partitions may move to or from this node until `until_ms` (the later of
+    /// this and any earlier call wins).
+    pub fn unsettle(&self, until_ms: i64) {
+        self.unsettled_until_ms
+            .fetch_max(until_ms, Ordering::Relaxed);
+    }
+
+    /// The hold a ring created now gets: [`HANDOVER_HOLD_MS`] while
+    /// partitions may still be moving, none once settled.
+    fn hold_for_new_ring(&self, now_ms: i64) -> i64 {
+        if now_ms < self.unsettled_until_ms.load(Ordering::Relaxed) {
+            now_ms.saturating_add(HANDOVER_HOLD_MS)
+        } else {
+            0
+        }
     }
 
     /// SIGTERM: from now on this node owns nothing. The next `reap_foreign`
@@ -2470,7 +2597,7 @@ impl Ephemeral {
         for g in &groups {
             q.remember_group(&g.name);
         }
-        let ring = q.ring_or_create(&partition, now_ms, || self.next_ring_base());
+        let ring = q.ring_or_create(&partition, now_ms, 0, || self.next_ring_base());
         q.touch(now_ms);
         let total: i64 = msgs.iter().map(|(_, p)| p.len() as i64).sum();
         let count = msgs.len() as i64;
@@ -2552,7 +2679,8 @@ impl Ephemeral {
         }
         let q = self.get_or_create(tenant, name)?;
         let cfg = *q.config.lock().unwrap();
-        let ring = q.ring_or_create(partition, now_ms, || self.next_ring_base());
+        let hold = self.hold_for_new_ring(now_ms);
+        let ring = q.ring_or_create(partition, now_ms, hold, || self.next_ring_base());
         q.touch(now_ms);
 
         let total: i64 = payloads.iter().map(|p| p.len() as i64).sum();
@@ -2577,7 +2705,7 @@ impl Ephemeral {
                     .fetch_add(sweep.exhausted, Ordering::Relaxed);
             }
             freed.merge(r.drop_expired(now_ms, cfg.ttl_ms));
-            freed.merge(r.trim_consumed());
+            freed.merge(r.trim_consumed(now_ms));
         }
         self.release(tenant, &q, &freed);
 
@@ -2797,7 +2925,9 @@ impl Ephemeral {
             // be the first thing that touches an inbox); a partition-less pop
             // only visits the rings that already exist.
             let ring = match partition {
-                Some(_) => q.ring_or_create(&p, now_ms, || self.next_ring_base()),
+                Some(_) => q.ring_or_create(&p, now_ms, self.hold_for_new_ring(now_ms), || {
+                    self.next_ring_base()
+                }),
                 None => match q.ring(&p) {
                     Some(r) => r,
                     None => continue,
@@ -2844,7 +2974,7 @@ impl Ephemeral {
                         }
                     }
                 }
-                freed.merge(r.trim_consumed());
+                freed.merge(r.trim_consumed(now_ms));
             }
             self.release(tenant, &q, &freed);
         }
@@ -2876,6 +3006,7 @@ impl Ephemeral {
         let mut picked: Vec<(u64, u32)> = Vec::new();
         let tail = r.next_seq;
         while picked.len() < want {
+            r.groups[gi as usize].jump();
             // Look before claiming: a message over the byte budget must stay
             // exactly where it is (cursor not advanced, redelivery not popped).
             let (seq, redelivery) = {
@@ -3034,7 +3165,7 @@ impl Ephemeral {
             out.push((id.clone(), outcome));
         }
         for ring in touched.into_values() {
-            let freed = ring.lock().unwrap().trim_consumed();
+            let freed = ring.lock().unwrap().trim_consumed(now_ms);
             self.release(tenant, &q, &freed);
         }
         if acked > 0 {
@@ -3100,7 +3231,7 @@ impl Ephemeral {
                 // Before the trim: a group that went away must stop holding
                 // the floor in this same pass.
                 out.gc_groups += r.expire_idle_groups(now_ms, idle);
-                freed.merge(r.trim_consumed());
+                freed.merge(r.trim_consumed(now_ms));
                 if let Some(d) = r.next_expiry() {
                     next = Some(next.map_or(d, |c: i64| c.min(d)));
                 }

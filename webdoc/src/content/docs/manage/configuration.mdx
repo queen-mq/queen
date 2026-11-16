@@ -69,6 +69,7 @@ sourceOfTruth:
 # rewords the 504 a membership change answers. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): apply.rs, facade/real.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (a snapshot received while a node starts): raft/mod.rs takes the exit 75 a running node takes for it (stopped_at_open), where the start failed with `FATAL: raft storage failed to open` and exit 1. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (ephemeral hand-over fix, Jepsen W20): ephemeral.rs keeps what the groups of a ring created while partitions may still be moving take until the old owner's ring lands (HANDOVER_HOLD_MS), and a moving ring carries what each group already took (GroupExport.skip); handlers/ephemeral.rs opens that window on a leaving notice, a placement change and at start, and sends `skip` between brokers. Nothing this page states changes.
 ---
 
 Every setting is an environment variable, and most installations need very few of them. When a node starts, it prints the settings it is really using, in lines that start with `config:`. Read them after every change. A yes/no setting accepts `true` or `false`, `1` or `0`, `yes` or `no`, `on` or `off`; any other value stops the node at boot, so a typo cannot pass unnoticed.

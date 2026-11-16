@@ -39,11 +39,12 @@ verifiedBy:
 # names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
 # states changes.
 # sourceOfTruth re-read 2026-11-16 (36bfde0ea, 62e59d3aa): server/src/main.rs counts the broker's connections; metrics.rs names a filtered group's per-queue series after its source. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (ephemeral hand-over fix, Jepsen W20): ephemeral.rs keeps what the groups of a ring created while partitions may still be moving take until the old owner's ring lands (HANDOVER_HOLD_MS), and a moving ring carries what each group already took (GroupExport.skip); handlers/ephemeral.rs opens that window on a leaving notice, a placement change and at start, and sends `skip` between brokers. This page now says a group's place moves with its partition.
 ---
 
 Ephemeral queues live in memory, outside the log, for request/reply. The worker answers on whatever inbox a request names; the caller makes a private inbox and waits on it. There is no transaction or replay here, and a crash loses what is in flight.
 
-A partition keeps its order while one node owns it. When that node restarts or is cut off from the others, the partition moves to another node, and a message pushed during the move can come out before one pushed just before it.
+A partition keeps its order while one node owns it. When that node restarts or is cut off from the others, the partition moves to another node, and a message pushed during the move can come out before one pushed just before it. Each consumer group's place moves with the partition: what a group already took is not handed to it again, and what it held unacknowledged comes back.
 
 The worker:
 

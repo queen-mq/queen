@@ -1547,6 +1547,19 @@ fn ring_json(out: &mut String, r: &ephemeral::RingExport) {
         }
         out.push_str("],\"skipped\":");
         out.push_str(&g.skipped.to_string());
+        // What the group already took on an earlier owner (a ring moving on
+        // again): left out when there is none, so the body stays what a node
+        // that does not know the field reads.
+        if !g.skip.is_empty() {
+            out.push_str(",\"skip\":[");
+            for (j, (from, to)) in g.skip.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                out.push_str(&format!("[{from},{to}]"));
+            }
+            out.push(']');
+        }
         out.push('}');
     }
     out.push_str("]}");
@@ -1789,11 +1802,10 @@ async fn send_rings(
                 // waiting for its leaving notice or for raft.
                 if is_leaving_answer(&resp.body) {
                     if let Some(h) = batch.first() {
-                        st.ephemeral.exclude_peer(
-                            &h.owner,
-                            crate::util::now_epoch_ms() + LEAVING_EXCLUSION_MS,
-                            None,
-                        );
+                        let now = crate::util::now_epoch_ms();
+                        st.ephemeral
+                            .exclude_peer(&h.owner, now + LEAVING_EXCLUSION_MS, None);
+                        st.ephemeral.unsettle(now + ephemeral::HANDOVER_HOLD_MS);
                     }
                 }
                 tracing::debug!(
@@ -1883,6 +1895,8 @@ struct AdoptGroup {
     attempts: Vec<(u64, u32)>,
     #[serde(default)]
     skipped: u64,
+    #[serde(default)]
+    skip: Vec<(u64, u64)>,
 }
 
 #[derive(Deserialize)]
@@ -1968,6 +1982,7 @@ pub async fn handle_ephemeral_adopt(
                     redeliver: g.redeliver,
                     attempts: g.attempts,
                     skipped: g.skipped,
+                    skip: g.skip,
                 })
                 .collect(),
         };
@@ -2015,14 +2030,19 @@ pub async fn handle_ephemeral_leaving(
         Ok(p) => p,
         Err(e) => return bad_request(&format!("bad body: {e}")),
     };
+    let now = crate::util::now_epoch_ms();
     st.ephemeral.exclude_peer(
         &parsed.node,
-        crate::util::now_epoch_ms() + LEAVING_EXCLUSION_MS,
+        now + LEAVING_EXCLUSION_MS,
         parsed
             .epoch
             .as_deref()
             .and_then(|e| u64::from_str_radix(e, 16).ok()),
     );
+    // Its partitions start coming here, maybe ahead of its rings: the rings
+    // this node creates meanwhile keep what their groups take until the old
+    // ones land (ephemeral::HANDOVER_HOLD_MS).
+    st.ephemeral.unsettle(now + ephemeral::HANDOVER_HOLD_MS);
     json(StatusCode::OK, "{\"ok\":true}".to_string())
 }
 
@@ -2243,6 +2263,12 @@ pub fn spawn_ephemeral_placement(st: Arc<AppState>) {
              dropped; set the same QUEEN_RAFT_TOKEN on every node"
         );
     }
+    // A node that has just started in a cluster takes partitions back from
+    // its peers, maybe before their rings arrive: hold what its new rings'
+    // groups take until they do (ephemeral::HANDOVER_HOLD_MS). Each placement
+    // change below opens the same window again.
+    st.ephemeral
+        .unsettle(crate::util::now_epoch_ms() + ephemeral::HANDOVER_HOLD_MS);
     tokio::spawn(async move {
         let mut judge = ephemeral::MemberJudge::new(member_ttl_ms());
         let silent: Silent = Arc::default();
@@ -2269,6 +2295,9 @@ pub fn spawn_ephemeral_placement(st: Arc<AppState>) {
                             spawn_probe(&st, &silent, id, addr);
                         }
                         if st.ephemeral.set_placement(p) {
+                            st.ephemeral.unsettle(
+                                crate::util::now_epoch_ms() + ephemeral::HANDOVER_HOLD_MS,
+                            );
                             let moved = st.ephemeral.reap_foreign();
                             tracing::info!(
                                 target: "ephemeral",

@@ -11,7 +11,8 @@ replay here, and a crash loses what is in flight.
 
 A partition keeps its order while one node owns it. When that node restarts or is cut off from the
 others, the partition moves to another node, and a message pushed during the move can come out
-before one pushed just before it.
+before one pushed just before it. Each consumer group's place moves with the partition: what a
+group already took is not handed to it again, and what it held unacknowledged comes back.
 
 The worker:
 

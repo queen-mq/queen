@@ -415,3 +415,100 @@ async fn when_every_peer_is_leaving_the_drain_does_not_wait_out_its_bound() {
     );
     assert!(a.ephemeral.excluded_peers(now).contains("2"));
 }
+
+/// Jepsen W20 eph-restart (2026-11-16): a node that took a peer's leaving
+/// notice holds what one group takes from a ring it creates before the
+/// peer's ring lands, so the group that ring brings still gets it. The
+/// notice, over HTTP, is what opens that window on the receiving node.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_leaving_notice_keeps_a_new_ring_whole_for_the_groups_on_their_way() {
+    let (a, b) = (node(), node());
+    let base_b = serve(&b).await;
+    let now = crate::util::now_epoch_ms();
+    // Both groups read the partition on A from the start.
+    for g in ["gl", "gc"] {
+        assert!(a
+            .ephemeral
+            .pop(DEFAULT_TENANT, "q", Some("p"), Some(g), 1, true, now)
+            .is_empty());
+    }
+    a.ephemeral
+        .push(DEFAULT_TENANT, "q", "p", msgs(2, "a"), now)
+        .expect("push");
+    for g in ["gl", "gc"] {
+        assert_eq!(
+            a.ephemeral
+                .pop(DEFAULT_TENANT, "q", Some("p"), Some(g), 1, true, now)
+                .len(),
+            1
+        );
+    }
+    a.ephemeral.set_placement(Some(to_peer("1", "2", &base_b)));
+
+    // A's notice reaches B; a push and gc reach B before A's ring does.
+    assert_eq!(
+        post(
+            &a,
+            &format!("{base_b}/api/v1/ephemeral/_leaving"),
+            &crate::peerclient::internal_headers(),
+            "{\"node\":\"1\"}"
+        )
+        .await,
+        StatusCode::OK
+    );
+    b.ephemeral
+        .push(DEFAULT_TENANT, "q", "p", msgs(1, "b"), now)
+        .expect("push on B");
+    let gc = b
+        .ephemeral
+        .pop(DEFAULT_TENANT, "q", Some("p"), Some("gc"), 10, true, now);
+    assert_eq!(gc.len(), 1, "gc takes B's push");
+
+    let d = ephemeral_drain(&a).await;
+    assert_eq!((d.shipped.delivered, d.shipped.lost), (1, 0));
+    let gl: Vec<Vec<u8>> = b
+        .ephemeral
+        .pop(DEFAULT_TENANT, "q", Some("p"), Some("gl"), 10, true, now)
+        .iter()
+        .map(|m| m.payload.to_vec())
+        .collect();
+    assert_eq!(
+        gl,
+        [b"{\"m\":\"b-0\"}".to_vec(), b"{\"m\":\"a-1\"}".to_vec()],
+        "gl gets the push gc took on B, then A's"
+    );
+    let gc_again = b
+        .ephemeral
+        .pop(DEFAULT_TENANT, "q", Some("p"), Some("gc"), 10, true, now);
+    assert_eq!(gc_again.len(), 1, "gc gets A's a-1 once, and b-0 not again");
+}
+
+/// A ring that moves on again carries, per group, what it already took on an
+/// earlier owner (`skip`); a body from a broker without the field still reads.
+#[test]
+fn a_hand_over_body_carries_what_a_group_already_took() {
+    let ring = crate::ephemeral::RingExport {
+        tenant: DEFAULT_TENANT.to_string(),
+        queue: "q".to_string(),
+        partition: "p".to_string(),
+        msgs: vec![(1, b"{\"n\":1}".to_vec().into_boxed_slice())],
+        groups: vec![crate::ephemeral::GroupExport {
+            name: "gc".to_string(),
+            next: 0,
+            redeliver: Vec::new(),
+            attempts: Vec::new(),
+            skipped: 0,
+            skip: vec![(1, 3)],
+        }],
+    };
+    let mut body = String::from("{\"rings\":[");
+    ring_json(&mut body, &ring);
+    body.push_str("]}");
+    let parsed: AdoptBody = serde_json::from_str(&body).expect("parses");
+    assert_eq!(parsed.rings[0].groups[0].skip, vec![(1, 3)]);
+    let older: AdoptBody = serde_json::from_str(
+        "{\"rings\":[{\"queue\":\"q\",\"partition\":\"p\",\"messages\":[],\"groups\":[{\"g\":\"gc\",\"next\":0}]}]}",
+    )
+    .expect("an older broker's body");
+    assert!(older.rings[0].groups[0].skip.is_empty());
+}

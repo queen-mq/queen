@@ -907,6 +907,169 @@ fn a_hand_over_into_a_busy_ring_appends() {
     assert_eq!(got, ["{\"n\":100}", "{\"n\":0}", "{\"n\":1}"]);
 }
 
+/// Jepsen W20 eph-restart (2026-11-16, and in every campaign since 11-14): in
+/// a rolling restart the new owner takes a push before the old owner's ring
+/// lands. Its ring knows only the group that pops there first, which takes the
+/// message; the ring must keep it until the other group's cursor (on its way
+/// in the old ring) has it, or that group never gets it.
+#[test]
+fn a_message_one_group_took_while_the_ring_moved_still_reaches_the_other() {
+    let a = engine(small());
+    let b = engine(small());
+    // Both groups read the partition on A from the start (the Jepsen setup).
+    for g in ["gl", "gc"] {
+        assert!(a
+            .pop(T, "q", Some("Default"), Some(g), 1, true, 0)
+            .is_empty());
+    }
+    a.push(T, "q", "Default", bodies(2), 0).unwrap();
+    assert_eq!(
+        a.pop(T, "q", Some("Default"), Some("gl"), 1, true, 0).len(),
+        1
+    );
+    assert_eq!(
+        a.pop(T, "q", Some("Default"), Some("gc"), 1, true, 0).len(),
+        1
+    );
+    a.set_placement(Some(placement("A", &["A", "B"])));
+    a.set_leaving();
+    a.reap_foreign();
+    let ring = a.take_outbox().into_iter().next().unwrap().ring;
+    assert_eq!(ring.msgs.len(), 1, "both groups took n:0 on A; n:1 travels");
+
+    // B heard A is leaving: its new rings wait for the old owner's ring.
+    b.unsettle(10_000);
+    b.push(T, "q", "Default", vec![body("{\"n\":100}")], 1)
+        .unwrap();
+    let gc_first = b.pop(T, "q", Some("Default"), Some("gc"), 10, true, 1);
+    assert_eq!(
+        gc_first.iter().map(payload_of).collect::<Vec<_>>(),
+        ["{\"n\":100}"]
+    );
+
+    b.adopt(ring, 2).unwrap();
+    let gl: Vec<String> = b
+        .pop(T, "q", Some("Default"), Some("gl"), 10, true, 2)
+        .iter()
+        .map(payload_of)
+        .collect();
+    assert_eq!(
+        gl,
+        ["{\"n\":100}", "{\"n\":1}"],
+        "gl gets the push gc took on B"
+    );
+    let gc: Vec<String> = b
+        .pop(T, "q", Some("Default"), Some("gc"), 10, true, 2)
+        .iter()
+        .map(payload_of)
+        .collect();
+    assert_eq!(gc, ["{\"n\":1}"], "gc gets n:1, and n:100 not twice");
+}
+
+/// Jepsen W20 (every fault, every campaign since 11-14): a ring that lands in
+/// one that already took pushes must not hand a group again what it took on
+/// the old owner. A commitOnDelivery group got such messages twice; a leased,
+/// unacked one still comes back, as before.
+#[test]
+fn a_group_does_not_get_again_what_it_took_before_the_ring_moved() {
+    let a = engine(small());
+    let b = engine(small());
+    for g in ["gl", "gc"] {
+        assert!(a
+            .pop(T, "q", Some("Default"), Some(g), 1, true, 0)
+            .is_empty());
+    }
+    a.push(T, "q", "Default", bodies(4), 0).unwrap();
+    let gl_on_a = a.pop(T, "q", Some("Default"), Some("gl"), 1, false, 0);
+    assert_eq!(
+        payload_of(&gl_on_a[0]),
+        "{\"n\":0}",
+        "gl holds n:0, unacked"
+    );
+    let gc_on_a = a.pop(T, "q", Some("Default"), Some("gc"), 2, true, 0);
+    assert_eq!(gc_on_a.len(), 2);
+    a.set_placement(Some(placement("A", &["A", "B"])));
+    a.set_leaving();
+    a.reap_foreign();
+    let ring = a.take_outbox().into_iter().next().unwrap().ring;
+    assert_eq!(ring.msgs.len(), 4);
+
+    // B took a push nobody read yet: the ring that lands is appended.
+    b.push(T, "q", "Default", vec![body("{\"n\":100}")], 1)
+        .unwrap();
+    b.adopt(ring, 2).unwrap();
+    let gc: Vec<String> = b
+        .pop(T, "q", Some("Default"), Some("gc"), 10, true, 2)
+        .iter()
+        .map(payload_of)
+        .collect();
+    assert_eq!(
+        gc,
+        ["{\"n\":100}", "{\"n\":2}", "{\"n\":3}"],
+        "n:0 and n:1 not twice"
+    );
+    let gl = b.pop(T, "q", Some("Default"), Some("gl"), 10, true, 2);
+    let gl_payloads: Vec<String> = gl.iter().map(payload_of).collect();
+    assert_eq!(
+        gl_payloads,
+        [
+            "{\"n\":0}",
+            "{\"n\":100}",
+            "{\"n\":1}",
+            "{\"n\":2}",
+            "{\"n\":3}"
+        ],
+        "the unacked n:0 first, then the rest once"
+    );
+    assert_eq!(gl[0].attempts, 2, "n:0 is a redelivery");
+}
+
+/// A ring that moves on before a group caught up (a rolling restart: A, then
+/// B) still does not hand it again what it took on A: the ranges move with it.
+#[test]
+fn a_ring_that_moves_twice_still_skips_what_a_group_took_first() {
+    let (a, b, c) = (engine(small()), engine(small()), engine(small()));
+    // gl reads nothing yet, so A keeps the messages gc took for it.
+    for g in ["gl", "gc"] {
+        assert!(a
+            .pop(T, "q", Some("Default"), Some(g), 1, true, 0)
+            .is_empty());
+    }
+    a.push(T, "q", "Default", bodies(3), 0).unwrap();
+    assert_eq!(
+        a.pop(T, "q", Some("Default"), Some("gc"), 2, true, 0).len(),
+        2
+    );
+    a.set_placement(Some(placement("A", &["A", "B"])));
+    a.set_leaving();
+    a.reap_foreign();
+    let first = a.take_outbox().into_iter().next().unwrap().ring;
+
+    b.push(T, "q", "Default", vec![body("{\"n\":100}")], 1)
+        .unwrap();
+    b.adopt(first, 1).unwrap();
+    b.set_placement(Some(placement("B", &["B", "C"])));
+    b.set_leaving();
+    b.reap_foreign();
+    let second = b.take_outbox().into_iter().next().unwrap().ring;
+    let gc_out = second.groups.iter().find(|g| g.name == "gc").unwrap();
+    assert_eq!(gc_out.skip, vec![(1, 3)], "n:0 and n:1, after n:100");
+
+    c.adopt(second, 2).unwrap();
+    let gc: Vec<String> = c
+        .pop(T, "q", Some("Default"), Some("gc"), 10, true, 2)
+        .iter()
+        .map(payload_of)
+        .collect();
+    assert_eq!(gc, ["{\"n\":100}", "{\"n\":2}"]);
+    let gl: Vec<String> = c
+        .pop(T, "q", Some("Default"), Some("gl"), 10, true, 2)
+        .iter()
+        .map(payload_of)
+        .collect();
+    assert_eq!(gl, ["{\"n\":100}", "{\"n\":0}", "{\"n\":1}", "{\"n\":2}"]);
+}
+
 /// A partition this node owns stays local; one it does not is detached for
 /// its owner the first time it is routed.
 #[test]

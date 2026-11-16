@@ -139,6 +139,7 @@ sourceOfTruth:
 # Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): facade/real.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (filtered-group delete): phase2.rs and phase2/admin.rs send each hidden queue's delete as a command of its own (next_command); until now only the first delete of a queue with filtered groups ran. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (ephemeral hand-over fix, Jepsen W20): ephemeral.rs keeps what the groups of a ring created while partitions may still be moving take until the old owner's ring lands (HANDOVER_HOLD_MS), and a moving ring carries what each group already took (GroupExport.skip); handlers/ephemeral.rs opens that window on a leaving notice, a placement change and at start, and sends `skip` between brokers. Nothing this page states changes.
 ---
 
 Most of QueenMQ's limits exist to keep one request from costing everyone else: a body cap, a ceiling
