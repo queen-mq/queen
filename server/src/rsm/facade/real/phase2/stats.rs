@@ -1321,11 +1321,27 @@ mod tests {
             running: AtomicBool::new(false),
             lag: Mutex::new(None),
         };
-        let estimated = f
-            .store
-            .read(|r| tenant_stats(r, tenant, wall_us(), 0, None, Some(&blank)))
-            .expect("read");
-        let s = estimated.iter().find(|s| s.name == "src").expect("src");
+        // A counter reaches the store at the apply's next commit (the counter
+        // overlay, apply.rs `CounterCache`), while the cursor row the walk
+        // read is live at once (RAM keyspaces are read uncommitted,
+        // heed_store.rs): wait for that commit, as the walk waits for the
+        // ack. CI read in between (2026-11-15, 7 runs in 40 here: the counter
+        // said 2, and 1 a commit later).
+        let counted_by = Instant::now() + Duration::from_secs(10);
+        let s = loop {
+            let estimated = f
+                .store
+                .read(|r| tenant_stats(r, tenant, wall_us(), 0, None, Some(&blank)))
+                .expect("read");
+            let s = estimated
+                .into_iter()
+                .find(|s| s.name == "src")
+                .expect("src");
+            if s.fig.pending == 1 || Instant::now() >= counted_by {
+                break s;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
         assert!(!s.exact);
         assert_eq!(s.fig.pending, 1, "g's pending counter");
         // The sampler: the source's figures with g's share, no hidden queue.
