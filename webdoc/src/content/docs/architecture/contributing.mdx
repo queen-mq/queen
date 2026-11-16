@@ -46,6 +46,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-16 (2.9.0-beta.3): server/Cargo.toml's version line says 2.9.0-beta.3. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (server 2.9.0): server/Cargo.toml's version line says 2.9.0, and it asks
 # for queen-protocol 1.7.0. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (a669d4abc, the map): webdoc/package.json's verify also runs check:map, which the gate sentence now names; webdoc/scripts/check-prose.mjs also reads QueenMap.astro and src/lib/map.ts, which this page does not list.
 ---
 
 QueenMQ is one repository with one Rust binary at its center: the broker, which links the proxy and
@@ -173,8 +174,8 @@ it guards the mirror with a fingerprint of the Rust function and refuses to run 
 changes, until someone re-reads it.
 
 **One gate.** `pnpm --dir webdoc verify` runs the generator drift check, the build, the markdown
-and brief checks, the linter, the prose check, the `sourceOfTruth` check, the search-surface check
-and the README check.
+and brief checks, the linter, the prose check, the `sourceOfTruth` check, the search-surface check,
+the README check and the map check (every link of the map leads to a page and a heading).
 
 ## Rules for benchmarks
 

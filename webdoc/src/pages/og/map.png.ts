@@ -179,5 +179,7 @@ export async function GET() {
   const png = surface.makeImageSnapshot().encodeToBytes();
   surface.delete();
   if (!png) throw new Error("[og/map] CanvasKit returned no PNG");
-  return new Response(png, { headers: { "Content-Type": "image/png" } });
+  // A copy on its own ArrayBuffer: CanvasKit types its bytes over
+  // ArrayBufferLike, which Response's BodyInit does not take (astro check).
+  return new Response(new Uint8Array(png), { headers: { "Content-Type": "image/png" } });
 }
