@@ -786,6 +786,50 @@ fn role_of(m: &openraft::RaftMetrics<TypeConfig>) -> Role {
     }
 }
 
+/// How long a node that received a snapshot waits before it exits to load it:
+/// the leader is answered that the snapshot is installed, and the answer
+/// must leave first (it then replicates from the snapshot on).
+const SNAPSHOT_ANSWER_GRACE: Duration = Duration::from_millis(1500);
+
+/// The exit a received snapshot asks for: 75, which the supervisor (run.sh,
+/// a pod's restart) reads as "start me again"; the next boot swaps the
+/// staged snapshot in.
+fn exit_to_load_snapshot(why: &str) -> ! {
+    tracing::error!(target: "rsm", why, "raft: the process exits to load a received snapshot");
+    std::process::exit(75)
+}
+
+/// What [`RaftReplicator::open_with`] does when openraft stopped while it
+/// waited for the node to be ready.
+#[derive(Debug, PartialEq, Eq)]
+enum StoppedAtOpen {
+    /// A snapshot a leader sent while this node booted asked for the restart
+    /// that loads it: the binary exits for it, as a running node does.
+    Restart(String),
+    /// The open fails with this.
+    Fail(String),
+}
+
+/// A snapshot can arrive before the open returns: a node that was away long
+/// enough is sent one the moment its leader hears from it. Until 2026-11-16
+/// the open failed on it, and the binary logged `FATAL: raft storage failed
+/// to open: ... installing the snapshot at ...: the node restarts to load it`
+/// and exited 1 (Jepsen p11-w1-member-snap, campaign 3): no restart for a
+/// supervisor that restarts on 75 only, and a FATAL that reads like a broken
+/// disk to whoever reads the log. A poisoned log still fails the open.
+fn stopped_at_open(
+    poisoned: Option<String>,
+    restart: Option<String>,
+    exit_on_restart: bool,
+) -> StoppedAtOpen {
+    match (poisoned, restart) {
+        (Some(why), _) => StoppedAtOpen::Fail(why),
+        (None, Some(why)) if exit_on_restart => StoppedAtOpen::Restart(why),
+        (None, Some(why)) => StoppedAtOpen::Fail(why),
+        (None, None) => StoppedAtOpen::Fail("openraft stopped during recovery".into()),
+    }
+}
+
 /// The background step's knobs.
 struct WatchOpts {
     /// Exit the process when a received snapshot needs a restart (the binary;
@@ -1162,9 +1206,8 @@ async fn watch<S: Store + 'static>(
                     // The leader is answered that the snapshot is installed
                     // (it then replicates from it): let that answer leave
                     // before the process does.
-                    tokio::time::sleep(Duration::from_millis(1500)).await;
-                    tracing::error!(target: "rsm", why, "raft: the process exits to load a received snapshot");
-                    std::process::exit(75);
+                    tokio::time::sleep(SNAPSHOT_ANSWER_GRACE).await;
+                    exit_to_load_snapshot(&why);
                 }
                 tracing::warn!(target: "rsm", why, "raft: a received snapshot waits for a restart");
             }
@@ -2099,10 +2142,20 @@ impl<S: Store + 'static> RaftReplicator<S> {
                     cluster.is_some() && raft.metrics().borrow_watched().current_leader.is_some()
                 }
                 Role::Stopped => {
-                    let why = shared
-                        .poisoned()
-                        .or_else(|| restart.requested())
-                        .unwrap_or_else(|| "openraft stopped during recovery".into());
+                    let why = match stopped_at_open(
+                        shared.poisoned(),
+                        restart.requested(),
+                        opts.exit_on_restart,
+                    ) {
+                        StoppedAtOpen::Restart(why) => {
+                            // The leader is answered that the snapshot is
+                            // installed: let that answer leave first, as
+                            // a running node does.
+                            std::thread::sleep(SNAPSHOT_ANSWER_GRACE);
+                            exit_to_load_snapshot(&why)
+                        }
+                        StoppedAtOpen::Fail(why) => why,
+                    };
                     return Err(fail(
                         io::Error::other(why),
                         Some((rt, Some(raft))),
@@ -3405,6 +3458,45 @@ mod bootstrap_tests {
         assert_eq!(
             bootstrap_verdict(&[(2, Silent), (3, HoldsState)]),
             Bootstrap::Join(3)
+        );
+    }
+}
+
+#[cfg(test)]
+mod stopped_at_open_tests {
+    use super::{stopped_at_open, StoppedAtOpen};
+
+    /// Jepsen p11-w1-member-snap, campaign 3 (2026-11-15): a leader sent n2 a
+    /// snapshot 0.5 s into its boot; the open failed on the restart the
+    /// snapshot asked for and the binary exited 1 with a FATAL. The binary
+    /// takes the exit a running node takes for it (75) instead.
+    #[test]
+    fn a_snapshot_received_while_the_node_opens_restarts_it() {
+        let why = "installing the snapshot at 9.9295: the node restarts to load it";
+        assert_eq!(
+            stopped_at_open(None, Some(why.into()), true),
+            StoppedAtOpen::Restart(why.into())
+        );
+        // Without the exit (the tests reopen the node), the open says why.
+        assert_eq!(
+            stopped_at_open(None, Some(why.into()), false),
+            StoppedAtOpen::Fail(why.into())
+        );
+    }
+
+    #[test]
+    fn a_poisoned_log_still_fails_the_open() {
+        assert_eq!(
+            stopped_at_open(
+                Some("raft log write failed".into()),
+                Some("snapshot".into()),
+                true
+            ),
+            StoppedAtOpen::Fail("raft log write failed".into())
+        );
+        assert_eq!(
+            stopped_at_open(None, None, true),
+            StoppedAtOpen::Fail("openraft stopped during recovery".into())
         );
     }
 }
