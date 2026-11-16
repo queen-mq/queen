@@ -491,17 +491,17 @@ export function chartsOf(metrics, status, { from, to, view = null } = {}) {
     {
       id: 'connections', title: 'Connections', sub: 'open, clients and other nodes', unit: 'count',
       value: (m) => sumUnder(m, 'connections'),
-      none: 'Not recorded by this broker: a node records its connections from the release after 2.8.1.',
+      none: 'Not recorded by this broker: a node records its connections from 2.9.0.',
     },
     {
       id: 'commits', title: 'Commits', sub: perCommit === null ? 'entries into the log' : `entries into the log, ${roundish(perCommit)} commands each`, unit: 'perSec',
       value: (m) => leafOf(m, ['work', 'commits_per_sec']),
-      none: 'Not recorded by this broker: a node records its commits from the release after 2.8.1.',
+      none: 'Not recorded by this broker: a node records its commits from 2.9.0.',
     },
     {
       id: 'transactions', title: 'Transactions', sub: 'committed, as each node answered', unit: 'perSec',
       value: (m) => leafOf(m, ['work', 'transactions_per_sec']),
-      none: 'Not recorded by this broker: a node records its transactions from the release after 2.8.1.',
+      none: 'Not recorded by this broker: a node records its transactions from 2.9.0.',
     },
     { id: 'log', title: 'Raft log', sub: 'size on its disk', unit: 'bytes', value: (m) => leafOf(m, ['raft', 'log_bytes']), none: 'No log samples in this window.' },
     {
