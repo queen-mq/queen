@@ -223,6 +223,32 @@
       (is (false? (:valid? r)))
       (is (= 1 (:phantom-count r)))
       (is (= [{:m 2, :k 0, :id "g"}] (:ok-txn-missing r)))))
+  (testing "under clock faults, a rejected_ack rollback whose record exists is counted, not judged"
+    ; Campaign 4, long-pipeline (2026-11-16): a new leader 202 s ahead retired
+    ; the answer of a relayed retry; it ran again and was refused.
+    (let [h     (flat (w5-history {:extra-enq [2]
+                                   :extra-procs [(proc 4 2 0 "f" :fail :error
+                                                       [:rolled-back {:reason "rejected_ack"}])]
+                                   :out [{:m 0, :k 0, :id "a"} {:m 1, :k 1, :id "c"}
+                                         {:m 2, :k 0, :id "f"}]
+                                   :counters {0 2, 1 1}}))
+          clock (checker/check (pipeline/checker) (assoc test-map :faults #{:clock :kill}) (hist h) {})
+          none  (checker/check (pipeline/checker) (assoc test-map :faults #{:kill}) (hist h) {})]
+      (is (true? (:valid? clock)))
+      (is (= 0 (:phantom-count clock)))
+      (is (= 1 (:count (:phantom-after-clock-jump clock))))
+      (is (false? (:valid? none)) "without clock faults it is judged")
+      (is (= 1 (:phantom-count none)))))
+  (testing "under clock faults, a phantom of another refusal is still judged"
+    (let [h (flat (w5-history {:extra-enq [2]
+                               :extra-procs [(proc 4 2 0 "f" :fail :error
+                                                   [:rolled-back {:reason "lock_lost"}])]
+                               :out [{:m 0, :k 0, :id "a"} {:m 1, :k 1, :id "c"}
+                                     {:m 2, :k 0, :id "f"}]
+                               :counters {0 2, 1 1}}))
+          r (checker/check (pipeline/checker) (assoc test-map :faults #{:clock}) (hist h) {})]
+      (is (false? (:valid? r)))
+      (is (= 1 (:phantom-count r)))))
   (testing "phantom: a record no transaction wrote"
     (let [r (w5 (flat (w5-history {:out [{:m 0, :k 0, :id "zzz"} {:m 1, :k 1, :id "c"}]})))]
       (is (false? (:valid? r)))

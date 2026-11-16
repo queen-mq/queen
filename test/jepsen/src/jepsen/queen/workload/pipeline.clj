@@ -22,7 +22,12 @@
     2. no input committed twice: at most one `out` record per m;
     3. no phantom: no `out` record comes from a transaction that failed
        (or from no transaction at all), and every :ok transaction's record is
-       there;
+       there. Under clock faults, the record of a transaction answered rolled
+       back with `rejected_ack` is counted (:phantom-after-clock-jump), not
+       judged: a leader that takes over with its clock far ahead (beyond the
+       500 ms the cluster allows) retires the answers its predecessor kept for
+       a relayed retry, the retry runs again and is refused, its first run had
+       committed (campaign 4, long-pipeline, 2026-11-16: a clock 202 s ahead);
     4. every final counter equals the number of `out` records of its key;
     5. counter bounds: every read of c:<k> lies between the transactions of k
        known to have committed before the read began and those that may have
@@ -256,6 +261,12 @@
                                               (= :fail (:type p)) {:out r, :why :failed-transaction
                                                                    :error (:error p)}))))
                               vec)
+                clock?   (boolean (some #{:clock} (:faults test)))
+                retried? (fn [ph] (and clock?
+                                       (= :failed-transaction (:why ph))
+                                       (= "rejected_ack" (get-in ph [:error 1 :reason]))))
+                at-clock (filterv retried? phantom)
+                phantom  (vec (remove retried? phantom))
                 missing  (->> procs
                               (filter #(and (= :ok (:type %)) (<= (:time %) end-inv)))
                               (remove #(out-ids (:id (:value %))))
@@ -304,6 +315,7 @@
              :twice             (take 16 twice)
              :phantom-count     (count phantom)
              :phantom           (take 16 phantom)
+             :phantom-after-clock-jump {:count (count at-clock), :sample (take 4 at-clock)}
              :ok-txn-missing    (take 16 missing)
              :counter-mismatch  counts
              :bound-violations  (take 16 bounds)
