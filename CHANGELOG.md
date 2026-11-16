@@ -77,6 +77,12 @@ the band shows the commits a second, and the Overview lists commits and connecti
 entry in `GET /api/v1/raft/members` carries the same figures as `work`. Why: how many clients a
 node holds, and how many commits and transactions it does in a second, showed nowhere.
 
+**The sign-in page has the console's look.** It opens in the theme and the areas the console's
+theme chip saved in this browser; with nothing saved, in the console's first look, Soft with Tone
+areas. Its colours are the console's, and its sign-in button is white, as the console's main
+buttons are. Why: the page still wore the old dashboard's colours and yellow button after the
+console replaced that design, so signing in and out jumped between two designs.
+
 **Fixed: `maxWaitTimeSeconds` and a short retention on a busy partition.** A partition that took
 more than 1,000 pushes inside its dedup window stopped removing messages when the queue said:
 `maxWaitTimeSeconds`, `retentionSeconds` and `completedRetentionSeconds` then removed a message

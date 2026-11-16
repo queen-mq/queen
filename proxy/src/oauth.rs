@@ -1973,7 +1973,7 @@ Sign in through the control plane that operates it, then return here.</p>{link}"
         ),
     };
     format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+        "<!doctype html><html lang=\"en\" class=\"soft tone\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
 <title>Sign in · Queen</title>\
 <link rel=\"icon\" type=\"image/svg+xml\" href=\"{favicon}\">\
@@ -1988,15 +1988,23 @@ Sign in through the control plane that operates it, then return here.</p>{link}"
     )
 }
 
-/// The dashboard's scheme, resolved the way `app/index.html` resolves it, before
-/// the first paint: the choice stored by the dashboard's own toggle wins, else
-/// the OS but only when it asks for light, else dark. This page and the SPA are
-/// one origin, so they read the same key, and signing out of a light dashboard
-/// lands on a light page.
-const SIGN_IN_THEME: &str = "(function(){var t='dark';try{var s=localStorage.getItem('queen-theme');\
-if(s==='light'||s==='dark')t=s;else if(window.matchMedia('(prefers-color-scheme: light)').matches)t='light'}\
-catch(e){}var r=document.documentElement;r.classList.toggle('light',t==='light');\
-r.classList.toggle('dark',t!=='light');r.style.colorScheme=t})();";
+/// The console's look, resolved the way `app/src/console/useLook.js` resolves
+/// it, before the first paint. The theme (dark, soft, light or the system's)
+/// and the areas (tone or lines) the console's theme chip saved in this browser
+/// win; with nothing saved it is the console's first-visit look, soft with tone
+/// areas, or light when the old design's `queen-theme` asked for light. This
+/// page and the SPA are one origin, so they read the same keys, and signing out
+/// of a light console lands on a light page.
+///
+/// The `<html>` tag already carries `soft tone`, so the page has the console's
+/// default look without JavaScript too; the script only swaps it.
+const SIGN_IN_THEME: &str = "(function(){var l={},t,a='tone';\
+try{l=JSON.parse(localStorage.getItem('queen-console-look')||'{}')||{}}catch(e){}t=l.theme;\
+if(t!=='dark'&&t!=='soft'&&t!=='light'&&t!=='system'){t='soft';\
+try{if(localStorage.getItem('queen-theme')==='light')t='light'}catch(e){}}\
+if(t==='system'){t='dark';try{if(window.matchMedia('(prefers-color-scheme: light)').matches)t='light'}catch(e){}}\
+if(l.areas==='lines')a='lines';var r=document.documentElement;\
+r.className=t+(a==='tone'?' tone':'');r.style.colorScheme=t==='light'?'light':'dark'})();";
 
 // Progressive enhancement: both sign-in methods work without JavaScript.
 // Reset pending UI on pageshow, including when Back restores the page from BFCache.
@@ -2028,86 +2036,95 @@ var error=document.querySelector('[role=alert]');if(error)error.focus();
 
 /// The sign-in page's stylesheet. The page is plain server-rendered HTML: it
 /// exists BEFORE the SPA (and, under mandatory auth, before any of its assets
-/// are reachable), so it cannot import the webapp's stylesheet. It restates it
-/// instead: the same tokens in both schemes, with more room for the standalone
-/// sign-in card, labelled fields, provider choices and keyboard focus rings.
+/// are reachable), so it cannot import the console's stylesheet. It restates
+/// it instead: the console's tokens in its three themes and its tone areas,
+/// and its parts (a field, the white primary button, the outlined button),
+/// with more room for the standalone sign-in card.
 ///
-/// THE TOKENS ARE A COPY BY NECESSITY, NOT BY CHOICE. `:root` and `html.light`
-/// here repeat the blocks of the same name in app/src/style.css, value for
-/// value; `the_sign_in_tokens_are_the_dashboards` fails when one of them drifts.
-/// Google's button uses its official light palette and logo in both schemes.
+/// THE TOKENS ARE A COPY BY NECESSITY, NOT BY CHOICE. `:root`, `html.soft`,
+/// `html.light` and `html.tone` here repeat `.qn`, `.qn.soft`, `.qn.light` and
+/// `.qn.tone` in app/src/console/console.css, value for value;
+/// `the_sign_in_tokens_are_the_consoles` fails when one of them drifts.
+///
+/// Colour follows the console's rule: yellow lives in the logo only, the one
+/// action is white on the page, red is a failed sign-in. Google's button keeps
+/// its official light palette and logo in every theme.
 ///
 /// What is this page's own: the buttons run the width of the card, since they
 /// are its one action and its provider choices, not a row at the foot of a
-/// dialog; and an autofilled field keeps the input's surface, where a browser
-/// would paint its own blue over the two fields this page has.
+/// dialog; fields and buttons are 44 px tall, for a finger on a phone; and an
+/// autofilled field keeps the field's surface, where a browser would paint its
+/// own blue over the two fields this page has.
 ///
 /// The brand is not the sidebar's badge: there is room here for the wordmark
 /// with its line, centred over the card, at about the smallest height that
 /// still lets the line be read.
 const SIGN_IN_CSS: &str = "\
-:root{--ink-0:#0b0a0a;--ink-2:#111010;--ink-3:#171615;\
---text-hi:#f3f0eb;--text-mid:#b8b3ab;--text-low:#9a958e;--text-faint:#706b65;\
---brand:#fcc620;--accent:var(--brand);--accent-dim:#e6ae05;--accent-text:var(--brand);--on-accent:#000000;\
---ember-400:#f07a5f;--ember-glow:rgba(240,122,95,0.12);--ember-bd:rgba(240,122,95,0.30);\
---bd:#2a2725;--bd-hi:#34312e;--ring:var(--accent-text);color-scheme:dark}\
-html.light{--ink-0:#f7f7f6;--ink-2:#ffffff;--ink-3:#fcfcfb;\
---text-hi:#1a1918;--text-mid:#45423e;--text-low:#67625c;--text-faint:#8c8782;\
---brand:#fcc620;--accent:var(--brand);--accent-dim:#e6ae05;--accent-text:#806000;--on-accent:#000000;\
---ember-400:#c0262d;--ember-glow:rgba(192,38,45,0.07);--ember-bd:rgba(192,38,45,0.32);\
---bd:#e2e2df;--bd-hi:#cfcfcb;--ring:var(--accent-text);color-scheme:light}\
+:root{--bg:#0d0c0b;--bg2:#151413;--bg3:#1e1c1a;--line:#2a2725;--line2:#1c1a18;\
+--text:#eeebe6;--text2:#b9b3ab;--text3:#908a82;--red:#f0614f;--redbg:rgba(240,97,79,.13);\
+--card:#1c1b1a;--ctl:#262422;--r-ctl:4px;--r-card:6px;color-scheme:dark}\
+html.soft{--bg:#202020;--bg2:#2c2c2c;--bg3:#3a3a3a;--line:#3d3d3d;--line2:#2e2e2e;\
+--text:#f3f3f3;--text2:#bdbdbd;--text3:#9e9e9e;--red:#f26a59;--redbg:rgba(242,106,89,.16);\
+--card:#2b2b2b;--ctl:#363636}\
+html.light{--bg:#f6f5f3;--bg2:#edebe8;--bg3:#e3e1dd;--line:#dad7d2;--line2:#e8e6e2;\
+--text:#1b1a18;--text2:#4b4741;--text3:#6b665f;--red:#c03221;--redbg:rgba(192,50,33,.08);\
+--card:#ffffff;--ctl:#ecebe8;color-scheme:light}\
+html.tone{--line:transparent;--line2:transparent;--r-ctl:8px;--r-card:14px}\
 *{box-sizing:border-box}\
+html{background:var(--bg)}\
 body{margin:0;min-height:100vh;min-height:100dvh;display:flex;align-items:center;justify-content:center;\
 padding:24px;font:13px/1.5 'Inter',ui-sans-serif,system-ui,sans-serif;\
 font-feature-settings:'cv11','ss01','ss03','cv02';-webkit-font-smoothing:antialiased;\
-text-rendering:optimizeLegibility;letter-spacing:-.005em;background:var(--ink-0);color:var(--text-hi)}\
-::selection{background:color-mix(in srgb,var(--accent) 12%,transparent)}\
-:focus-visible{outline:2px solid var(--ring);outline-offset:2px}\
+text-rendering:optimizeLegibility;letter-spacing:-.005em;background:var(--bg);color:var(--text)}\
+::selection{background:var(--bg3)}\
+:focus-visible{outline:2px solid var(--text);outline-offset:2px}\
 .sign{width:100%;max-width:400px}\
 .brand{display:flex;justify-content:center;margin-bottom:28px}\
 .mark svg{display:block;height:88px;max-width:100%;width:auto}\
 .word{font-size:15px;font-weight:600;line-height:1;letter-spacing:-.015em}\
-.card{border:1px solid var(--bd);border-radius:16px;background:var(--ink-2);box-shadow:0 12px 40px rgba(0,0,0,.06)}\
+.card{border:1px solid var(--line);border-radius:var(--r-card);background:var(--card)}\
 .card-header{padding:28px 28px 0;text-align:center}\
 h1{margin:0;font-size:24px;font-weight:600;letter-spacing:-.035em;line-height:1.25}\
-.card-header p{margin:8px 0 0;color:var(--text-mid);font-size:13px}\
+.card-header p{margin:8px 0 0;color:var(--text2);font-size:13px}\
 .card-body{padding:24px 28px 28px}\
 .card-body,form{display:grid;gap:18px}\
 .field{display:grid;gap:6px}\
 .providers{display:grid;gap:8px}\
 .field span,.field label{font-weight:500}\
-input{width:100%;min-height:44px;padding:10px 12px;border:1px solid var(--bd-hi);border-radius:8px;font:inherit;font-size:14px;\
-background:var(--ink-3);color:var(--text-hi);transition:box-shadow .12s cubic-bezier(.2,.7,.2,1)}\
-input:focus{outline:none;box-shadow:0 0 0 1px var(--ring)}\
-input:-webkit-autofill{-webkit-text-fill-color:var(--text-hi);caret-color:var(--text-hi);\
-box-shadow:0 0 0 100px var(--ink-3) inset}\
-input:-webkit-autofill:focus{box-shadow:0 0 0 100px var(--ink-3) inset,0 0 0 1px var(--ring)}\
+input{--field:var(--bg2);width:100%;min-height:44px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-ctl);\
+font:inherit;font-size:14px;background:var(--field);color:var(--text);transition:border-color .12s cubic-bezier(.2,.7,.2,1)}\
+html.tone input{--field:var(--ctl)}\
+input:focus{outline:none;border-color:var(--text3)}\
+input:-webkit-autofill{-webkit-text-fill-color:var(--text);caret-color:var(--text);\
+box-shadow:0 0 0 100px var(--field) inset}\
 input:autofill{filter:none}\
-input::placeholder{color:var(--text-low);opacity:1}\
-.submit,.oauth{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;min-height:44px;padding:10px 12px;border:1px solid var(--bd-hi);\
-border-radius:8px;font:inherit;font-size:14px;font-weight:500;text-decoration:none;cursor:pointer;\
-color:var(--text-hi);background:color-mix(in srgb,var(--text-hi) 3%,transparent);\
-transition:.12s cubic-bezier(.2,.7,.2,1)}\
-.oauth:hover{border-color:var(--text-faint)}\
-.oauth-google{background:#fff;border-color:#747775;color:#1f1f1f;font-family:'Google Sans',ui-sans-serif,system-ui,sans-serif;letter-spacing:.25px}\
+input::placeholder{color:var(--text3);opacity:1}\
+.submit,.oauth{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;min-height:44px;padding:10px 12px;\
+border:1px solid var(--line);border-radius:var(--r-ctl);font:inherit;font-size:14px;font-weight:500;text-decoration:none;\
+cursor:pointer;color:var(--text);background:transparent;transition:.12s cubic-bezier(.2,.7,.2,1)}\
+html.tone .oauth{background:var(--ctl)}\
+.oauth:hover,html.tone .oauth:hover{background:var(--bg3)}\
+.oauth-google,html.tone .oauth-google{background:#fff;border-color:#747775;color:#1f1f1f;\
+font-family:'Google Sans',ui-sans-serif,system-ui,sans-serif;letter-spacing:.25px}\
 .oauth-google img{object-fit:contain;flex-shrink:0}\
-.oauth-google:hover{background:#f2f2f2;border-color:#747775}\
-.submit{margin-top:2px;border-color:var(--accent);background:var(--accent);color:var(--on-accent)}\
-.submit:hover{border-color:var(--accent-dim);background:var(--accent-dim)}\
+.oauth-google:hover,html.tone .oauth-google:hover{background:#f2f2f2;border-color:#747775}\
+.submit{margin-top:2px;border-color:var(--text);background:var(--text);color:var(--bg)}\
+.submit:hover{border-color:var(--text2);background:var(--text2)}\
 .submit:disabled,.oauth[aria-disabled=true]{opacity:.65;cursor:wait}\
 .password-field{position:relative;display:flex;align-items:center}\
 .password-field:has(.password-toggle:not([hidden])) input{padding-right:64px}\
-.password-toggle{position:absolute;right:4px;min-height:36px;padding:6px 10px;border:0;border-radius:5px;\
-font:inherit;font-size:12px;font-weight:500;background:transparent;color:var(--text-mid);cursor:pointer}\
-.password-toggle:hover{color:var(--text-hi);background:var(--ink-2)}\
+.password-toggle{position:absolute;right:4px;min-height:36px;padding:6px 10px;border:0;border-radius:var(--r-ctl);\
+font:inherit;font-size:12px;font-weight:500;background:transparent;color:var(--text2);cursor:pointer}\
+.password-toggle:hover{color:var(--text);background:var(--bg3)}\
 [hidden]{display:none!important}\
-.sep{display:flex;align-items:center;gap:10px;color:var(--text-low);font-size:12px;line-height:1}\
-.sep:before,.sep:after{content:'';flex:1;height:1px;background:var(--bd)}\
-.err{padding:12px 14px;border:1px solid var(--ember-bd);border-radius:8px;background:var(--ember-glow);\
-color:var(--ember-400);font-size:12.5px;line-height:1.45}\
-.note{margin:0;color:var(--text-mid)}\
-.help{margin:20px 0 0;text-align:center;color:var(--text-low);font-size:12px}\
-.sign-in-status{margin:0;text-align:center;color:var(--text-mid);font-size:12px}\
+.sep{display:flex;align-items:center;gap:10px;color:var(--text3);font-size:12px;line-height:1}\
+.sep:before,.sep:after{content:'';flex:1;height:1px;background:var(--line)}\
+html.tone .sep:before,html.tone .sep:after{background:var(--bg3)}\
+.err{padding:12px 14px;border-radius:var(--r-ctl);background:var(--redbg);\
+color:var(--red);font-size:12.5px;line-height:1.45}\
+.note{margin:0;color:var(--text2)}\
+.help{margin:20px 0 0;text-align:center;color:var(--text3);font-size:12px}\
+.sign-in-status{margin:0;text-align:center;color:var(--text2);font-size:12px}\
 @media(max-width:480px){body{padding:24px 16px}.card-header{padding:24px 20px 0}.card-body{padding:22px 20px 24px}input{font-size:16px}}\
 @media(prefers-reduced-motion:reduce){input,.submit,.oauth{transition:none}}";
 
@@ -3161,46 +3178,97 @@ mod tests {
     }
 
     #[test]
-    fn the_sign_in_tokens_are_the_dashboards() {
-        // The page restates the dashboard's tokens because it cannot import its
-        // stylesheet, and a copy nothing checks goes stale: the dashboard moved
-        // to its warm palette and gained a light scheme while this page kept
-        // the old dark greys. Every token the page declares must carry the
-        // value app/src/style.css gives it, in both schemes.
-        let app = include_str!("../../app/src/style.css");
-        for (page_block, app_block) in [(":root{", "  :root {"), ("html.light{", "  html.light {")]
-        {
-            let (page, app) = (tokens(SIGN_IN_CSS, page_block), tokens(app, app_block));
+    fn the_sign_in_tokens_are_the_consoles() {
+        // The page restates the console's tokens because it cannot import its
+        // stylesheet, and a copy nothing checks goes stale: this page kept the
+        // old design's warm greys and yellow button for weeks after the console
+        // replaced that design. Every token the page declares must carry the
+        // value app/src/console/console.css gives it, in every theme and in
+        // the tone areas.
+        let console = include_str!("../../app/src/console/console.css");
+        let blocks = [
+            (":root{", ".qn {", 14),
+            ("html.soft{", ".qn.soft {", 12),
+            ("html.light{", ".qn.light {", 12),
+            ("html.tone{", ".qn.tone {", 4),
+        ];
+        for (page_block, console_block, at_least) in blocks {
+            let (page, console) = (
+                tokens(SIGN_IN_CSS, page_block),
+                tokens(console, console_block),
+            );
             assert!(
-                page.len() >= 16,
+                page.len() >= at_least,
                 "`{page_block}` declares the page's tokens"
             );
             for (name, value) in &page {
                 assert_eq!(
                     Some(value),
-                    app.get(name),
-                    "{name} in `{page_block}` is the dashboard's"
+                    console.get(name),
+                    "{name} in `{page_block}` is the console's"
                 );
             }
+        }
+        // A colour the dark block sets and a theme forgets would show the
+        // dark value in that theme: soft and light restate every one.
+        let colours = |block| {
+            tokens(SIGN_IN_CSS, block)
+                .into_keys()
+                .filter(|name| !name.starts_with("--r-"))
+                .collect::<Vec<_>>()
+        };
+        for theme in ["html.soft{", "html.light{"] {
+            assert_eq!(
+                colours(theme),
+                colours(":root{"),
+                "`{theme}` sets every colour"
+            );
         }
     }
 
     #[test]
-    fn the_sign_in_page_takes_the_dashboards_scheme() {
-        // Same key and same fallback as the script in app/index.html: a
-        // different key here would be a page that ignores the dashboard's toggle.
-        let app = include_str!("../../app/index.html");
-        for part in [
-            "localStorage.getItem('queen-theme')",
-            "(prefers-color-scheme: light)",
+    fn the_sign_in_page_takes_the_consoles_look() {
+        // Same keys, same themes and the same first-visit look as
+        // app/src/console/useLook.js: a different key here would be a page
+        // that ignores the console's theme chip.
+        let look = include_str!("../../app/src/console/useLook.js");
+        for (console_part, page_part) in [
+            (
+                "const KEY = 'queen-console-look'",
+                "localStorage.getItem('queen-console-look')",
+            ),
+            (
+                "const THEMES = ['dark', 'soft', 'light', 'system']",
+                "t!=='dark'&&t!=='soft'&&t!=='light'&&t!=='system'",
+            ),
+            (
+                "(themePreference.value === 'light' ? 'light' : 'soft')",
+                "t='soft';try{if(localStorage.getItem('queen-theme')==='light')t='light'}",
+            ),
+            (
+                "(prefers-color-scheme: light)",
+                "(prefers-color-scheme: light)",
+            ),
+            ("saved.areas === 'lines' ? 'lines' : 'tone'", "a='tone'"),
+            (
+                "saved.areas === 'lines' ? 'lines' : 'tone'",
+                "if(l.areas==='lines')a='lines'",
+            ),
         ] {
             assert!(
-                app.contains(part),
-                "the dashboard resolves its scheme with {part}"
+                look.contains(console_part),
+                "the console resolves its look with {console_part}"
             );
-            assert!(SIGN_IN_THEME.contains(part), "and so does this page");
+            assert!(
+                SIGN_IN_THEME.contains(page_part),
+                "and this page with {page_part}"
+            );
         }
         let html = login_html(SignIn::Here, &[], None, "/", None);
+        assert!(
+            html.contains("<html lang=\"en\" class=\"soft tone\">"),
+            "without JavaScript the page has the console's first-visit look"
+        );
         assert!(html.contains(SIGN_IN_THEME), "the script is on the page");
         assert!(
             html.find("<script>").unwrap() < html.find("<style>").unwrap(),
