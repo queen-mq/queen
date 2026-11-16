@@ -42,6 +42,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-15 (W32 txnelle): core.clj registers W32, Elle over /api/v1/transaction; the page lists W1 to W13 and no campaign has run W32 yet. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (campaign 3's harness fixes): queue.clj judges an ack refused under a renewal only when it was answered inside the renewal; pipeline.clj drains for a lease and 2 s of quiet; db.clj starts a node again once without a QUEEN_S3_CRASH_AT point that fired; nemesis.clj excuses the full-disk stop line the full disk cut short; failover.clj reads the standby's membership as a map of groups. The workloads, faults and checks this page lists do not change.
 # sourceOfTruth re-read 2026-11-16 (locks.clj): the rule that an `already` answer names a permit its owner was granted is reported but not judged under clock faults, like the lease rule; the failures this page lists do not change.
+# sourceOfTruth re-read 2026-11-16 (3120e4729, pipeline.clj): under clock faults, the record of a transaction answered rolled back with `rejected_ack` is counted (:phantom-after-clock-jump), not judged; the Limits section now says so.
 ---
 
 A million messages a second is worth nothing if one of them can go missing. We check that with
@@ -351,7 +352,12 @@ several raft groups, several tenants, the Kafka facade, the embedded proxy and t
 forms of 2.3.0 (binary push, compressed groups, framed pops, the binary transaction body) were not
 part of any.
 Lease exclusivity across a leader change needs the nodes' clocks within
-`QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other. Losing a majority of the disks for good can
+`QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other. Further apart, the pipeline checker counts
+one wrong answer and does not judge it (the [guarantees](/introduction/guarantees/) list it under
+clocks): a leader that takes over with its clock minutes ahead forgets the answers kept for
+retries, so a transaction a node relayed during the change runs again, its ack is refused, and the
+client is told it rolled back although its first run committed. Nothing is lost or committed
+twice. Losing a majority of the disks for good can
 lose acknowledged writes, since raft survives the loss of a minority. The full campaign, standby
 failovers included, last ran on the binary of `229a4c3ea`, 2.6.0-beta.6 (its first 91 tests on
 2.6.0-beta.1); the server code of 2.6.0 adds its version line and nothing else. The 2.7.0 campaign
