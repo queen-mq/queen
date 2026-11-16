@@ -967,6 +967,7 @@ async fn apply_steps(
                     *ttl_seconds,
                     owner.as_deref(),
                     *limit,
+                    landed_expired(verdict).then_some(slot),
                 )
                 .await?
             }
@@ -1048,6 +1049,20 @@ async fn renew_again(
 /// read and the write: read again, try another, a few times. Past that the
 /// semaphore is `contended` — free permits, and a crowd on them — and the
 /// caller comes back, as it does for `held`.
+///
+/// `landed`: the slot this call's own write landed in, answered expired by
+/// this node's clock ([`landed_expired`]). Every other node may still read
+/// that row live: this node's clock runs ahead of the leader's that stamped
+/// its lifetime (Jepsen W11, campaign 3, 2026-11-15: clocks strobed 2.6 to
+/// 64 s apart). That slot is written again first, before any read: its
+/// `putIfAbsent` is judged where the lifetime was stamped, and it finds the
+/// row live and this owner's, or takes the slot again. Either way the call
+/// ends with the one permit it wrote, a new one, answered without `already`.
+/// Until 2026-11-16 the call read again, and this node's read judged its own
+/// row expired as well: a lock answered `already: true` with a token nobody
+/// had been answered, and a semaphore took a second slot for the same owner,
+/// whose next acquire was answered `already` with the first (the rerun of
+/// campaign 3, x-sem-clock: one owner in slots 1 and 2 of three).
 #[allow(clippy::too_many_arguments)]
 async fn acquire_again(
     rsm: &dyn Rsm,
@@ -1058,15 +1073,23 @@ async fn acquire_again(
     ttl_seconds: i64,
     owner: Option<&str>,
     limit: u32,
+    mut landed: Option<u32>,
 ) -> Result<Value, KvFailure> {
     let mut held = BTreeMap::new();
     for _ in 1..ACQUIRE_ATTEMPTS {
-        let slots = kv_one(rsm, tenant, deadline, get_slots(name, limit)).await?;
-        held = held_of(name, &slots["rows"]);
-        let slot = match next_of(&held, limit, owner, pick()) {
-            Next::Already { slot, token } => return Ok(granted(i, name, slot, token, owner, true)),
-            Next::Full => return Ok(refused(i, name, "held", holders_brief(&held, limit))),
-            Next::Try(slot) => slot,
+        let (slot, own) = match landed.take() {
+            Some(slot) => (slot, true),
+            None => {
+                let slots = kv_one(rsm, tenant, deadline, get_slots(name, limit)).await?;
+                held = held_of(name, &slots["rows"]);
+                match next_of(&held, limit, owner, pick()) {
+                    Next::Already { slot, token } => {
+                        return Ok(granted(i, name, slot, token, owner, true))
+                    }
+                    Next::Full => return Ok(refused(i, name, "held", holders_brief(&held, limit))),
+                    Next::Try(slot) => (slot, false),
+                }
+            }
         };
         let verdict = kv_one(
             rsm,
@@ -1079,8 +1102,13 @@ async fn acquire_again(
         if applied(&verdict) {
             return Ok(granted(i, name, slot, token, owner, false));
         }
+        // The owner's row: this call's own write when it is the slot that
+        // write landed in, else a write of another call of the same owner.
         if owner.is_some() && owner_of(&verdict["value"]) == owner {
-            return Ok(granted(i, name, slot, token, owner, true));
+            return Ok(granted(i, name, slot, token, owner, !own));
+        }
+        if landed_expired(&verdict) {
+            landed = Some(slot);
         }
     }
     Ok(refused(i, name, "contended", holders_brief(&held, limit)))
@@ -1460,5 +1488,288 @@ mod tests {
             bytes as usize,
             r#"{"owner":"w"}"#.len() + r#"{"owner":null}"#.len()
         );
+    }
+
+    /// A KV that answers each call with the next scripted results, and is
+    /// nothing else.
+    struct ScriptedKv(
+        std::sync::Mutex<std::collections::VecDeque<Vec<Value>>>,
+        std::sync::Mutex<Vec<Vec<Value>>>,
+    );
+
+    impl ScriptedKv {
+        fn new(answers: Vec<Vec<Value>>) -> ScriptedKv {
+            ScriptedKv(std::sync::Mutex::new(answers.into()), Default::default())
+        }
+
+        /// The `op` and `key` of every call's first operation, in order.
+        fn asked(&self) -> Vec<(String, String)> {
+            let asked = self.1.lock().unwrap();
+            asked
+                .iter()
+                .map(|ops| {
+                    let o = &ops[0];
+                    let key = o["key"]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| o["keys"].to_string());
+                    (o["op"].as_str().unwrap_or("").to_string(), key)
+                })
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Rsm for ScriptedKv {
+        async fn kv(
+            &self,
+            _ctx: ReqCtx,
+            req: KvReq,
+        ) -> Result<crate::rsm::facade::KvOut, KvFailure> {
+            self.1.lock().unwrap().push(req.ops.clone());
+            let results = self
+                .0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| panic!("an unscripted kv call: {:?}", req.ops));
+            assert_eq!(results.len(), req.ops.len(), "{:?}", req.ops);
+            Ok(crate::rsm::facade::KvOut { results })
+        }
+        async fn push(
+            &self,
+            _: ReqCtx,
+            _: crate::rsm::facade::PushReq,
+        ) -> Result<crate::rsm::facade::PushOut, crate::rsm::facade::RsmError> {
+            unimplemented!()
+        }
+        async fn pop_wildcard(
+            &self,
+            _: ReqCtx,
+            _: crate::rsm::facade::PopReq,
+        ) -> Result<crate::rsm::facade::PopOut, crate::rsm::facade::RsmError> {
+            unimplemented!()
+        }
+        async fn pop_pinned(
+            &self,
+            _: ReqCtx,
+            _: crate::rsm::facade::PopPinnedReq,
+        ) -> Result<crate::rsm::facade::PopOut, crate::rsm::facade::RsmError> {
+            unimplemented!()
+        }
+        async fn pop_discover(
+            &self,
+            _: ReqCtx,
+            _: crate::rsm::facade::PopDiscoverReq,
+        ) -> Result<crate::rsm::facade::PopOut, crate::rsm::facade::RsmError> {
+            unimplemented!()
+        }
+        async fn ack(
+            &self,
+            _: ReqCtx,
+            _: crate::rsm::facade::AckReq,
+        ) -> Result<crate::rsm::facade::AckOut, crate::rsm::facade::RsmError> {
+            unimplemented!()
+        }
+        async fn renew(
+            &self,
+            _: ReqCtx,
+            _: crate::rsm::facade::RenewReq,
+        ) -> Result<crate::rsm::facade::RenewOut, crate::rsm::facade::RsmError> {
+            unimplemented!()
+        }
+        async fn transaction(
+            &self,
+            _: ReqCtx,
+            _: crate::rsm::facade::TxnReq,
+        ) -> Result<crate::rsm::facade::TxnOut, crate::rsm::facade::RsmError> {
+            unimplemented!()
+        }
+        async fn dlq_head(
+            &self,
+            _: ReqCtx,
+            _: crate::rsm::facade::DlqHeadReq,
+        ) -> Result<crate::rsm::facade::DlqHeadOut, crate::rsm::facade::RsmError> {
+            unimplemented!()
+        }
+        async fn has_pending(
+            &self,
+            _: ReqCtx,
+            _: crate::rsm::facade::PendingReq,
+        ) -> Result<bool, crate::rsm::facade::RsmError> {
+            unimplemented!()
+        }
+        async fn depth(
+            &self,
+            _: ReqCtx,
+            _: crate::rsm::facade::DepthReq,
+        ) -> Result<crate::rsm::facade::DepthOut, crate::rsm::facade::RsmError> {
+            unimplemented!()
+        }
+        fn health(&self) -> crate::rsm::facade::RaftHealth {
+            unimplemented!()
+        }
+    }
+
+    /// A ttl put this node answered expired ([`crate::rsm::planner::kv::expire_late_puts`]).
+    fn expired_put(key: &str) -> Value {
+        json!({"index": 0, "op": "putIfAbsent", "applied": false,
+               "reason": crate::rsm::planner::kv::REASON_EXPIRED,
+               "key": key, "value": null, "version": 0})
+    }
+
+    fn owned_row(key: &str, owner: &str, version: u64) -> Value {
+        json!({"key": key, "value": {"owner": owner}, "version": version})
+    }
+
+    async fn acquire(kv: &ScriptedKv, limit: u32) -> Value {
+        let ops = vec![LockOp::Acquire {
+            name: "report".into(),
+            ttl_seconds: 2,
+            owner: Some("w-1".into()),
+            limit,
+        }];
+        let mut out = apply(
+            kv,
+            "t",
+            Deadline::after(std::time::Duration::from_secs(5)),
+            &ops,
+        )
+        .await
+        .expect("answered");
+        assert!(
+            kv.0.lock().unwrap().is_empty(),
+            "every scripted call was made"
+        );
+        out.remove(0)
+    }
+
+    /// A put that found this owner's row (a write that did not apply).
+    fn own_row_put(key: &str, version: u64) -> Value {
+        json!({"index": 0, "op": "putIfAbsent", "applied": false,
+               "key": key, "value": {"owner": "w-1"}, "version": version})
+    }
+
+    /// Jepsen W11, campaign 3 (2026-11-15): the node that took an acquire had
+    /// its clock strobed seconds ahead of the leader's; it answered its own
+    /// fresh write expired, the acquire was made again, found the owner's row
+    /// (that write, live for everybody else), and answered `already: true`
+    /// with a token the owner had never been answered. The acquire writes
+    /// that slot again (no read first) and answers its own grant, without
+    /// `already`.
+    #[tokio::test]
+    async fn an_acquire_whose_own_write_this_node_judged_expired_is_a_new_grant() {
+        let kv = ScriptedKv::new(vec![
+            vec![expired_put("report#0")],
+            vec![own_row_put("report#0", 60)],
+        ]);
+        let got = acquire(&kv, 1).await;
+        assert_eq!(
+            (got["acquired"].clone(), got["token"].clone()),
+            (json!(true), json!(60)),
+            "{got}"
+        );
+        assert!(
+            got.get("already").is_none(),
+            "a new grant, not one the owner held: {got}"
+        );
+        let asked = kv.asked();
+        assert_eq!(asked[1], asked[0], "the same slot written again: {asked:?}");
+    }
+
+    /// The rerun of campaign 3 (2026-11-16, x-sem-clock): a semaphore acquire
+    /// whose own write this node judged expired read the slots again, judged
+    /// its own row expired once more, and took a second slot: one owner held
+    /// two permits, and its next acquire was answered `already` with the
+    /// first. It writes the slot it landed in again, and holds that one.
+    #[tokio::test]
+    async fn a_semaphore_acquire_whose_own_write_this_node_judged_expired_keeps_its_slot() {
+        let kv = ScriptedKv::new(vec![
+            // The first read: every slot free; the write picks one.
+            vec![json!({"index": 0, "op": "getMany", "rows": []})],
+            vec![expired_put("report#x")],
+            vec![own_row_put("report#x", 365)],
+        ]);
+        let got = acquire(&kv, 3).await;
+        let asked = kv.asked();
+        assert_eq!(asked[0].0, "getMany", "{asked:?}");
+        assert_eq!(asked[1].0, "putIfAbsent", "{asked:?}");
+        assert_eq!(
+            asked[2], asked[1],
+            "the slot it landed in, written again: {asked:?}"
+        );
+        assert_eq!(got["token"], json!(365), "{got}");
+        assert_eq!(
+            Some(format!("report#{}", got["slot"])),
+            Some(asked[1].1.clone()),
+            "{got}"
+        );
+        assert!(got.get("already").is_none(), "{got}");
+    }
+
+    /// The slot taken by somebody else once its lifetime was over for
+    /// everybody: the acquire reads again and takes a free one.
+    #[tokio::test]
+    async fn a_landed_slot_somebody_took_since_is_left_for_a_free_one() {
+        // A semaphore of two whose own write landed in slot 0, answered
+        // expired here; somebody took slot 0 once it was over for everybody.
+        let kv = ScriptedKv::new(vec![
+            vec![json!({"index": 0, "op": "putIfAbsent", "applied": false,
+                        "key": "report#0", "value": {"owner": "w-9"}, "version": 8})],
+            vec![json!({"index": 0, "op": "getMany", "rows": [owned_row("report#0", "w-9", 8)]})],
+            vec![json!({"index": 0, "op": "putIfAbsent", "applied": true,
+                        "key": "report#1", "value": {"owner": "w-1"}, "version": 3})],
+        ]);
+        let got = acquire_again(
+            &kv,
+            "t",
+            Deadline::after(std::time::Duration::from_secs(5)),
+            0,
+            "report",
+            2,
+            Some("w-1"),
+            2,
+            Some(0),
+        )
+        .await
+        .expect("answered");
+        let asked = kv.asked();
+        assert_eq!(
+            asked[0],
+            ("putIfAbsent".into(), "report#0".into()),
+            "{asked:?}"
+        );
+        assert_eq!(asked[1].0, "getMany", "{asked:?}");
+        assert_eq!(
+            asked[2],
+            ("putIfAbsent".into(), "report#1".into()),
+            "{asked:?}"
+        );
+        assert_eq!(
+            (got["slot"].clone(), got["token"].clone()),
+            (json!(1), json!(3)),
+            "{got}"
+        );
+        assert!(got.get("already").is_none(), "{got}");
+    }
+
+    /// An owner that holds another slot from an earlier call of its own (its
+    /// answer lost) is still answered `already` with that permit: only the
+    /// slot this call wrote is its own grant.
+    #[tokio::test]
+    async fn a_semaphore_slot_the_owner_held_before_is_still_already() {
+        let kv = ScriptedKv::new(vec![
+            // The first read: both slots free; the write picks one of them.
+            vec![json!({"index": 0, "op": "getMany", "rows": []})],
+            // Somebody else took the slot this call tried.
+            vec![json!({"index": 0, "op": "putIfAbsent", "applied": false,
+                        "key": "report#0", "value": {"owner": "w-9"}, "version": 5})],
+            // Read again: the owner's earlier call holds one slot.
+            vec![json!({"index": 0, "op": "getMany",
+                        "rows": [owned_row("report#0", "w-9", 5), owned_row("report#1", "w-1", 7)]})],
+        ]);
+        let got = acquire(&kv, 2).await;
+        assert_eq!(got["already"], json!(true), "{got}");
+        assert_eq!(got["token"], json!(7), "{got}");
     }
 }
