@@ -2142,18 +2142,22 @@ mod tests {
                 continue;
             }
             assert!(
-                first.is_ok(),
-                "the full group is on disk (attempt {attempt})"
-            );
-            assert!(
                 second.is_err(),
-                "the entry without payloads failed its group"
+                "the entry without payloads failed its group (attempt {attempt})"
             );
             assert!(
                 saved.is_none_or(|c| c.index < n),
                 "commit point {saved:?} saved past the last entry on disk ({})",
                 n - 1
             );
+            // The writer can fail the entry before the full group's fsync is
+            // done, and then fails that group too (a poisoned writer vouches
+            // for nothing more): nothing reached the disk, no point was saved
+            // past it, but the case looked for is a durable group under the
+            // point. Seen on CI 2026-11-16 (attempt 0). Try again.
+            if first.is_err() {
+                continue;
+            }
             return;
         }
         panic!("in 20 attempts the commit point never queued before the failure");
