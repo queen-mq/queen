@@ -59,6 +59,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
 # rewords the 504 a membership change answers. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): facade/real.rs, planner/txn.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-15 (a node a full disk stopped starts again): raft/log_store.rs
+# saves no commit point once a raft log write failed, and at open a commit point past the last
+# entry on disk reads as unknown (the leader sends it again). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (a dead letter always carries its message): consume/ack.rs and txn.rs refuse, retryably (503 `retry`, nothing moved), an ack or a transaction that would file a dead letter whose message the node that took it has not read yet. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (campaign 3's harness fixes): queue.clj judges an ack refused under a renewal only when it was answered inside the renewal; pipeline.clj drains for a lease and 2 s of quiet; db.clj starts a node again once without a QUEEN_S3_CRASH_AT point that fired; nemesis.clj excuses the full-disk stop line the full disk cut short; failover.clj reads the standby's membership as a map of groups. The workloads, faults and checks this page lists do not change.
 ---
 
 A broker that promises "all or nothing" has to keep the promise exactly when something breaks. We test QueenMQ with Jepsen on five nodes, under kill -9, network partitions, paused processes, clock jumps, power loss and corrupted files. This page says what each API guarantees, what an answered write means, and where the guarantees stop.

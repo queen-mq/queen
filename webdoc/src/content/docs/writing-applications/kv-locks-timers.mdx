@@ -61,6 +61,7 @@ verifiedBy:
 # names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
 # states changes.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): facade/real/kv.rs, kv_reads.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (locks): when the node that took an acquire judged the call's own write expired by its clock, locks.rs writes that slot again first: the call keeps the one permit it wrote and answers it without `already` (a semaphore no longer takes a second slot for the owner). Nothing this page states changes.
 ---
 
 The transaction above already used two of the three: `kv.put` stored the order's state, and `timer()` scheduled tomorrow's reminder, which arrives as a message.

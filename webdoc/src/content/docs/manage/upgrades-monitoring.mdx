@@ -96,6 +96,10 @@ sourceOfTruth:
 # rewords the 504 a membership change answers; handlers/raft.rs changes a comment on ?timeoutMs.
 # Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): apply.rs, facade/real.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-15 (a node a full disk stopped starts again): raft/log_store.rs
+# saves no commit point once a raft log write failed, and at open a commit point past the last
+# entry on disk reads as unknown (the leader sends it again). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (a snapshot received while a node starts): raft/mod.rs takes the exit 75 a running node takes for it (stopped_at_open), where the start failed with `FATAL: raft storage failed to open` and exit 1. Nothing this page states changes.
 ---
 
 ## Upgrade one node at a time

@@ -120,6 +120,44 @@ reported the failed write on stderr, that write failed too, and the failure coun
 the Jepsen disk-full tests 13 of the 21 nodes a full disk took out had died this way, with no
 acknowledged write lost (in 2.8.1 too).
 
+**Fixed: a node a full disk stopped starts again.** Restarted after its disk was freed, such a node
+could refuse to start for good (`raft storage failed to open: ... Failed to get log entries`), so
+the recovery page's "grow the volume and restart it" did not work. Why: the raft log writer saved
+the commit point that came after a group of entries even when that group had failed to reach the
+disk, so the point said more than the disk held, and at start the node looked for entries it never
+wrote. The writer now saves no commit point once a write has failed, and at start a commit point
+past the last entry on disk counts as unknown: the leader sends it again. Nodes already left in
+that state start again with this release. No acknowledged write was lost: the other nodes held the
+entries. Found by the Jepsen disk-full tests on 2.9.0-beta.1.
+
+**Fixed: a dead letter always carries its message.** A message dead-lettered by a `failed` ack
+that spent its last retry, or by a `dlq` ack, could be filed without its payload: the DLQ listed it
+with its transaction id and `data: null`, on every node. Such an ack is now refused with a 503 (the
+SDKs send it again) and nothing moves, and the retry files the message whole. Why: the node that
+takes an ack copies the message from its own log into the dead letter, and a node that had not
+applied that message yet (a follower serving its own clients, or a leader just elected, while its
+read barrier failed) sent the copy empty, and the leader filed it. Found by the Jepsen DLQ tests
+during a graceful restart of the leader (2 of 10,418 dead letters; in 2.8.1 too).
+
+**Fixed: a node that receives a snapshot while it starts restarts to load it.** A node that came
+back after a long absence and was sent a snapshot before it had finished starting logged
+`FATAL: raft storage failed to open: ... installing the snapshot at ...` and exited with code 1. It
+now exits with code 75, like a running node that receives a snapshot, and its next start loads the
+snapshot. Why: the start treated the restart the snapshot asks for as a failure to open. No data
+was involved, but a FATAL that reads like a broken disk could send an operator to the recovery
+page, and a supervisor that restarts on 75 only left the node down. Found by the Jepsen membership
+tests (in 2.8.1 too).
+
+**Fixed: an acquire takes one permit and answers it as new, even when a node's clock runs ahead.**
+When the clock of the node that took an acquire ran ahead of the leader's by more than the lock's
+lifetime, a lock could be answered `already: true` for a permit the call had just taken, and a
+semaphore could give the same owner a second slot, whose next acquire was then answered `already`
+with the first. Why: that node judged the acquire's own write expired, read the slots again, judged
+its own row expired too, and went on to another slot. The acquire now writes the slot it landed in
+again first, and the leader judges that write on the clock that stamped its lifetime. Found by the
+Jepsen lock and semaphore tests under clock faults far past the 500 ms the cluster allows; 2.8.1
+does not have it (it came with the fix above that answers a late write as expired).
+
 **Fixed: a busy broker with a long dedup window no longer stops after a few minutes.** The memory
 the leader gives to finding duplicates fast (`QUEEN_RAFT_DEDUP_FRONT_MB`) now defaults to a quarter
 of the broker's memory (its cgroup limit, else the machine's RAM), never under the 4 GiB it was

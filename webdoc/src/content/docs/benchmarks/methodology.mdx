@@ -64,6 +64,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
 # names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-15 (a node a full disk stopped starts again): raft/log_store.rs
+# saves no commit point once a raft log write failed, and at open a commit point past the last
+# entry on disk reads as unknown (the leader sends it again). Nothing this page states changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one

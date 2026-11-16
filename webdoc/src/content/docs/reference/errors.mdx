@@ -121,6 +121,7 @@ sourceOfTruth:
 # rewords the 504 a membership change answers; handlers/raft.rs changes a comment on ?timeoutMs.
 # This page: the 504 sentence under Raft membership codes says so.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): facade/real.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (a dead letter always carries its message): consume/ack.rs and txn.rs refuse, retryably (503 `retry`, nothing moved), an ack or a transaction that would file a dead letter whose message the node that took it has not read yet: one more case of the `retry` row, which now names it.
 ---
 
 When QueenMQ refuses a call it answers a status code and a JSON body with a stable code, and the code
@@ -155,7 +156,7 @@ The `code` of the first shape.
 
 | `code` | Status | Meaning | Client |
 |---|---|---|---|
-| `retry` | 503 | This node could not get the call to a leader: a leader change, no quorum lease, or the leader unreachable from the node that forwarded it. | Retry after `Retry-After` (1 s). A write may have reached the leader, so it must be safe to repeat. |
+| `retry` | 503 | This node could not get the call to a leader: a leader change, no quorum lease, or the leader unreachable from the node that forwarded it. Also an ack, or the ack of a transaction, that would dead-letter a message the node that took it has not read yet (a moment after a leader change): nothing moved. | Retry after `Retry-After` (1 s). A write may have reached the leader, so it must be safe to repeat. |
 | `no_leader` | 503 | No leader is known after the hold: an election is running, or a majority is down. | Retry. |
 | `timeout` | 503 | The request's deadline passed before an answer. A write may have committed. | Retry a write that is safe to repeat; otherwise read to check. |
 | `outcome_unknown` | 503 | The leader changed while an ack, nack or DLQ move was being made durable, or a forwarded one was lost after it went out. It may or may not have applied. | Send the same ack again: a repeat of an ack that applied is answered as the first one was. |

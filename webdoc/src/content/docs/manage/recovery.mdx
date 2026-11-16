@@ -70,6 +70,11 @@ digest: >-
 # facade/real.rs rewords the 504 a membership change answers; handlers/raft.rs changes a comment on
 # ?timeoutMs. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): apply.rs, facade/real.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-15 (a node a full disk stopped starts again): raft/log_store.rs
+# saves no commit point once a raft log write failed, and at open a commit point past the last
+# entry on disk reads as unknown (the leader sends it again). This is what makes "Grow its volume and restart it"
+# in "A disk is full" hold; the page already says so.
+# sourceOfTruth re-read 2026-11-16 (a snapshot received while a node starts): raft/mod.rs takes the exit 75 a running node takes for it (stopped_at_open), where the start failed with `FATAL: raft storage failed to open` and exit 1. The row "A node exited once with code 75: it loaded a snapshot" now holds for that case too.
 ---
 
 Most failures need nothing from you. A node that crashes catches up from the leader when it starts again. A leader that gets SIGTERM hands its job to a peer before it stops. A node that was away too long gets a snapshot from the leader, exits with code 75, and loads it when it starts again. This section is for the rest: a lost disk, a lost majority, a full disk, a bad day.
