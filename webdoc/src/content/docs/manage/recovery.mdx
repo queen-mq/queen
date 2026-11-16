@@ -75,6 +75,7 @@ digest: >-
 # entry on disk reads as unknown (the leader sends it again). This is what makes "Grow its volume and restart it"
 # in "A disk is full" hold; the page already says so.
 # sourceOfTruth re-read 2026-11-16 (a snapshot received while a node starts): raft/mod.rs takes the exit 75 a running node takes for it (stopped_at_open), where the start failed with `FATAL: raft storage failed to open` and exit 1. The row "A node exited once with code 75: it loaded a snapshot" now holds for that case too.
+# sourceOfTruth re-read 2026-11-16 (log_store.rs, a test only): no_commit_point_is_saved_once_the_log_writer_failed retries a run in which the failed writer took the group before it down too; the code does not change. Nothing this page states changes.
 ---
 
 Most failures need nothing from you. A node that crashes catches up from the leader when it starts again. A leader that gets SIGTERM hands its job to a peer before it stops. A node that was away too long gets a snapshot from the leader, exits with code 75, and loads it when it starts again. This section is for the rest: a lost disk, a lost majority, a full disk, a bad day.

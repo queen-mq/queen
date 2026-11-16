@@ -100,6 +100,7 @@ sourceOfTruth:
 # saves no commit point once a raft log write failed, and at open a commit point past the last
 # entry on disk reads as unknown (the leader sends it again). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (a snapshot received while a node starts): raft/mod.rs takes the exit 75 a running node takes for it (stopped_at_open), where the start failed with `FATAL: raft storage failed to open` and exit 1. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (log_store.rs, a test only): no_commit_point_is_saved_once_the_log_writer_failed retries a run in which the failed writer took the group before it down too; the code does not change. Nothing this page states changes.
 ---
 
 ## Upgrade one node at a time
