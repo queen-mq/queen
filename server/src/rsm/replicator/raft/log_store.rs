@@ -485,6 +485,25 @@ impl LogStore {
         }
 
         let last_log_id = max_log_id(max_log_id(last, cfg.applied), purged);
+        // A commit point past the last entry on disk covers entries that never
+        // reached it: openraft re-applies up to the point at start, finds them
+        // missing and the node never starts again (2026-11-15, Jepsen disk-full:
+        // a group failed on a full disk and the point that came after it was
+        // still saved). The point is only a hint: unknown is always safe, and
+        // the leader says it again.
+        let committed = match committed {
+            Some(c) if last_log_id.is_none_or(|l| c.index > l.index) => {
+                tracing::warn!(
+                    target: "rsm",
+                    committed = c.index,
+                    last_on_disk = last_log_id.map(|l| l.index),
+                    "raft log recovery: the saved commit point is past the last entry on disk; \
+                     it reads as unknown and the leader's is used",
+                );
+                None
+            }
+            c => c,
+        };
         // Every recovered record is fsync'd now, so the durable point may count
         // it (`QlogTails::wait_synced`); the store's own checkpoint is at or
         // below this tip too.
@@ -1013,7 +1032,8 @@ fn read_state(dir: &Path) -> io::Result<Persisted> {
 }
 
 /// The commit point written in place without fsync: a torn or missing file
-/// reads as "unknown", which is always safe.
+/// reads as "unknown", which is always safe. [`LogStore::open`] also takes
+/// one past the last entry on disk as unknown.
 fn read_committed(dir: &Path) -> Option<LogId> {
     let b = fs::read(dir.join(COMMITTED_FILE)).ok()?;
     let end = b.iter().position(|c| *c == b'\n').unwrap_or(b.len());
@@ -1336,7 +1356,8 @@ enum SyncMsg {
         items: Vec<GroupItem>,
         callbacks: Vec<IOFlushed<TypeConfig>>,
     },
-    /// The commit point, written after every earlier group is durable.
+    /// The commit point, written after every earlier group is durable (and
+    /// not at all when one failed).
     Committed(Option<LogId>),
     /// Answered once every earlier message is done (before a truncation or a
     /// vote write, which must follow every earlier append).
@@ -1418,7 +1439,13 @@ impl Syncer {
                             }
                         }
                     },
-                    SyncMsg::Committed(c) => write_committed_to(&mut self.committed_file, c),
+                    // Not after a failed fsync, nor once the writer failed:
+                    // the groups before the point may not be on disk.
+                    SyncMsg::Committed(c) => {
+                        if failed.is_none() && self.poison.lock().expect("poison").is_none() {
+                            write_committed_to(&mut self.committed_file, c);
+                        }
+                    }
                     SyncMsg::Barrier(done) => {
                         let _ = done.send(());
                     }
@@ -1520,7 +1547,8 @@ impl Writer {
             }
             // A commit point never splits a group (it would cost an fsync):
             // the latest one is written after the group, whose entries it
-            // cannot be ahead of.
+            // cannot be ahead of, and not at all when the group failed
+            // ([`Writer::write_committed`]).
             let mut committed: Option<Option<LogId>> = None;
             for cmd in batch {
                 match cmd {
@@ -1814,8 +1842,14 @@ impl Writer {
     }
 
     /// The commit point, in place and without fsync (see the module header),
-    /// after every group already written is durable.
+    /// after every group already written is durable. Never once the writer
+    /// has failed: the group the point covers may not be on disk, and a
+    /// point past the log stopped nodes from starting again (2026-11-15, a
+    /// full disk).
     fn write_committed(&mut self, committed: Option<LogId>) {
+        if self.poisoned().is_some() {
+            return;
+        }
         match (&self.sync_tx, self.committed_file.as_mut()) {
             (Some(tx), _) => {
                 let _ = tx.send(SyncMsg::Committed(committed));
@@ -1993,5 +2027,135 @@ mod tests {
         drop(log);
         drop(opened);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn blanks(from: u64, to: u64) -> Vec<REntry> {
+        (from..to)
+            .map(|i| REntry {
+                log_id: log_id(1, i),
+                payload: EntryPayload::Blank,
+            })
+            .collect()
+    }
+
+    /// 2026-11-15, the Jepsen disk-full tests: a node a full disk had stopped
+    /// refused to start again, every time ("raft storage failed to open: ...
+    /// Failed to get log entries, expected index: [12651, 12715), got
+    /// [Some(12651), Some(12661))"). Its saved commit point (12714) was past
+    /// the last entry on disk (12661), and openraft re-applies up to it at
+    /// start. The point is only a hint: past the log, it reads as unknown,
+    /// and the leader says it again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_commit_point_past_the_last_entry_reads_as_unknown() {
+        use openraft::type_config::TypeConfigExt;
+        let dir = scratch("commit-past");
+        let opened = open(&dir, 0);
+        let mut log = opened.store.clone();
+        let (tx, rx) = TypeConfig::oneshot();
+        log.append(blanks(0, 10), IOFlushed::signal(tx))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(20), rx)
+            .await
+            .expect("flushed within 20 s")
+            .unwrap()
+            .unwrap();
+        log.close();
+        drop(log);
+        opened.writer.join().expect("the writer stops");
+
+        let save = |c: Option<LogId>| {
+            let mut b = serde_json::to_vec(&c).unwrap();
+            b.push(b'\n');
+            fs::write(dir.join("raft").join(COMMITTED_FILE), b).unwrap();
+        };
+        // What the full disk left: the point at entry 50, the log at 9.
+        save(Some(log_id(1, 50)));
+        let again = open(&dir, 0);
+        let mut log = again.store.clone();
+        assert_eq!(
+            log.get_log_state().await.unwrap().last_log_id,
+            Some(log_id(1, 9))
+        );
+        assert_eq!(
+            log.read_committed().await.unwrap(),
+            None,
+            "a commit point past the last entry reads as unknown"
+        );
+        log.close();
+        drop(log);
+        again.writer.join().expect("the writer stops");
+
+        // A point inside the log is kept as it was saved.
+        save(Some(log_id(1, 7)));
+        let third = open(&dir, 0);
+        let mut log = third.store.clone();
+        assert_eq!(log.read_committed().await.unwrap(), Some(log_id(1, 7)));
+        log.close();
+        drop(log);
+        third.writer.join().expect("the writer stops");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The cause of it: a group failed to reach the disk (a full disk; here
+    /// an entry the writer cannot write, which fails the group the same way)
+    /// and the writer still saved the commit point that came after it, past
+    /// the last entry on disk. Once the log writer has failed, no commit
+    /// point is saved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_commit_point_is_saved_once_the_log_writer_failed() {
+        use openraft::type_config::TypeConfigExt;
+        // A full group keeps the writer busy while the failing entry and its
+        // commit point queue up behind it. If the writer is faster and fails
+        // the entry first, the point is refused at the door and the case did
+        // not happen: try again.
+        let n = GROUP_MAX_ENTRIES as u64;
+        for attempt in 0..20 {
+            let dir = scratch("commit-poison");
+            let opened = open(&dir, 0);
+            let mut log = opened.store.clone();
+            let (tx1, rx1) = TypeConfig::oneshot();
+            log.append(blanks(0, n), IOFlushed::signal(tx1))
+                .await
+                .unwrap();
+            let bad = REntry {
+                log_id: log_id(1, n),
+                payload: EntryPayload::Normal(AppEntry::recovered(Arc::new(Entry::new(0, 0, 0)))),
+            };
+            let (tx2, rx2) = TypeConfig::oneshot();
+            let queued = log.append(vec![bad], IOFlushed::signal(tx2)).await.is_ok()
+                && log.save_committed(Some(log_id(1, n))).await.is_ok();
+            let first = tokio::time::timeout(std::time::Duration::from_secs(20), rx1)
+                .await
+                .expect("answered within 20 s")
+                .unwrap();
+            let second = tokio::time::timeout(std::time::Duration::from_secs(20), rx2)
+                .await
+                .expect("answered within 20 s")
+                .unwrap();
+            log.close();
+            drop(log);
+            opened.writer.join().expect("the writer stops");
+            let saved = read_committed(&dir.join("raft"));
+            let _ = fs::remove_dir_all(&dir);
+            if !queued {
+                continue;
+            }
+            assert!(
+                first.is_ok(),
+                "the full group is on disk (attempt {attempt})"
+            );
+            assert!(
+                second.is_err(),
+                "the entry without payloads failed its group"
+            );
+            assert!(
+                saved.is_none_or(|c| c.index < n),
+                "commit point {saved:?} saved past the last entry on disk ({})",
+                n - 1
+            );
+            return;
+        }
+        panic!("in 20 attempts the commit point never queued before the failure");
     }
 }
