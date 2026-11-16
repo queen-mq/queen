@@ -13,10 +13,19 @@
 
   The checker rejects: a delivered message nobody pushed; a gc message
   delivered twice; within one pop answer, two messages of a partition in the
-  wrong order (a push acknowledged before the other was sent comes first);
-  and, in a test whose only faults are graceful restarts (or none), an
-  acknowledged push that one of the groups never received. Under kills and
-  partitions losses are by design and only counted."
+  wrong order (a push acknowledged before the other was sent comes first),
+  unless a hand-over could have come between the two pushes; and, in a test
+  whose only faults are graceful restarts (or none), an acknowledged push
+  that one of the groups never received. Under kills and partitions losses
+  are by design and only counted.
+
+  Order across a hand-over is not promised (writing-applications/
+  ephemeral.mdx): the new owner can take a push before the old owner's
+  queue reaches it. A pair pushed while a fault was under way, a restart,
+  kill, pause or partition and 10 s after it (`handover-windows`), is
+  counted as :reordered-at-handover, not judged. Until 2026-11-16 every
+  such pair failed the run, in every campaign (eph-restart, -kill, -part,
+  -pause)."
   (:require [clojure.tools.logging :refer [info warn]]
             [jepsen [checker :as checker]
                     [client :as client]
@@ -155,8 +164,34 @@
                                (assoc empties t 0))))
       this)))
 
+(def handover-settle-ns
+  "How long after a fault a partition's owner can still move: the ring
+  settles, and the old owner's queue reaches the new one."
+  (* 10 1000000000))
+
+(def ^:private fault-ends #{:start :resume :stop-partition :heal})
+
+(defn handover-windows
+  "`[from to]` times when a partition can change its owner: from each fault
+  (a restart, a kill, a pause, a partition) to its end, the next op that
+  ends one (a start, a resume, a heal), and `settle-ns` after; a fault with
+  no end lasts to the end of the history."
+  ([history] (handover-windows history handover-settle-ns))
+  ([history settle-ns]
+   (let [ns (->> history (filter #(= :nemesis (:process %))) (sort-by :time) vec)]
+     (->> ns
+          (remove #(fault-ends (:f %)))
+          (mapv (fn [s]
+                  (let [end (if (= :restart (:f s))
+                              (:time s)
+                              (some #(when (and (fault-ends (:f %)) (<= (:time s) (:time %)))
+                                       (:time %))
+                                    ns))]
+                    [(:time s) (if end (+ end settle-ns) Long/MAX_VALUE)])))))))
+
 (defn checker
-  []
+  ([] (checker handover-settle-ns))
+  ([settle-ns]
   (reify checker/Checker
     (check [this test history opts]
       (let [hist     (h/client-ops history)
@@ -174,14 +209,21 @@
             cod-twice (->> (ds "gc") (map :v) frequencies (filter #(< 1 (val %))) (map key) sort vec)
             ; Within one answer: per partition, a push acknowledged before
             ; another was sent comes first.
-            order    (->> pops
+            windows  (handover-windows history settle-ns)
+            inverted (->> pops
                           (mapcat (fn [op]
                                     (for [[p ms] (group-by :partition (:msgs op))
                                           [a b] (partition 2 1 ms)
                                           :let [ta (times (:v a)), tb (times (:v b))]
                                           :when (and ta tb (< (:comp tb) (:inv ta)))]
-                                      {:pop (:index op), :partition p, :first (:v a), :then (:v b)})))
+                                      {:pop (:index op), :partition p, :first (:v a), :then (:v b)
+                                       ; b acknowledged, then a sent: a hand-over in between?
+                                       ::span [(:comp tb) (:inv ta)]})))
                           vec)
+            handover? (fn [{[from to] ::span}]
+                        (some (fn [[ws we]] (and (<= from we) (<= ws to))) windows))
+            order    (->> inverted (remove handover?) (mapv #(dissoc % ::span)))
+            at-handover (->> inverted (filter handover?) (mapv #(dissoc % ::span)))
             graceful? (every? #{:restart} (:faults test))
             missing  (into {} (for [g groups]
                                 (let [got (set (map :v (ds g)))]
@@ -194,9 +236,10 @@
          :invented        (take 16 invented)
          :cod-delivered-twice (take 16 cod-twice)
          :out-of-order    (take 16 order)
+         :reordered-at-handover {:count (count at-handover), :sample (take 4 at-handover)}
          :loss-judged?    graceful?
          :missing         (into {} (for [[g vs] missing] [g {:count (count vs), :sample (take 8 vs)}]))
-         :push-errors     (->> pushes (keep :error) (map #(vec (take 2 %))) frequencies)}))))
+         :push-errors     (->> pushes (keep :error) (map #(vec (take 2 %))) frequencies)})))))
 
 (defn workload
   [opts]
