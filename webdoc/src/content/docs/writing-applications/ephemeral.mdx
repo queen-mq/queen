@@ -43,6 +43,8 @@ verifiedBy:
 
 Ephemeral queues live in memory, outside the log, for request/reply. The worker answers on whatever inbox a request names; the caller makes a private inbox and waits on it. There is no transaction or replay here, and a crash loses what is in flight.
 
+A partition keeps its order while one node owns it. When that node restarts or is cut off from the others, the partition moves to another node, and a message pushed during the move can come out before one pushed just before it.
+
 The worker:
 
 <SdkCode id="worker" />

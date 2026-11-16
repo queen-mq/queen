@@ -96,7 +96,7 @@ A write is answered only after its entry is committed: a majority of the nodes h
 
 <Fig id="cluster-write" caption="A write is answered after a majority has it on disk." />
 
-There are two exceptions. **Ephemeral queues** keep their messages in memory, so a node that crashes loses what it held, by design. **`QUEEN_CONSUME_FAST=1`** (off by default) answers pops and acks before their checkpoint commits, so a change of leader can lose a lease or an ack you were told about.
+There are two exceptions. **Ephemeral queues** keep their messages in memory, so a node that crashes loses what it held, by design, and a partition that moves to another node can reorder the messages pushed while it moved. **`QUEEN_CONSUME_FAST=1`** (off by default) answers pops and acks before their checkpoint commits, so a change of leader can lose a lease or an ack you were told about.
 
 A 503 means the outcome is not known: the write may still commit (`retry`, `timeout`, `no_leader`, or `outcome_unknown` on an ack). Send it again with the same ids, and deduplication makes the retry safe. The one 503 after which nothing was applied is `standby`, from a [standby cluster](/manage/standby/).
 
