@@ -38,6 +38,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
 # names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-16 (36bfde0ea, 62e59d3aa): server/src/main.rs counts the broker's connections; metrics.rs names a filtered group's per-queue series after its source. Nothing this page states changes.
 ---
 
 Ephemeral queues live in memory, outside the log, for request/reply. The worker answers on whatever inbox a request names; the caller makes a private inbox and waits on it. There is no transaction or replay here, and a crash loses what is in flight.

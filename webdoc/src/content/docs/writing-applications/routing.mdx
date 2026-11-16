@@ -20,6 +20,7 @@ sourceOfTruth:
   - server/src/rsm/planner/txn.rs
   - server/src/rsm/maintenance.rs
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): planner/txn.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (0707549d5): phase2/stats.rs changed in a test only (it waits for the counter commit). Nothing this page states changes.
 ---
 
 A queue can read other queues. A consumer group can read only some of a queue. A transaction can forward the message it holds into another queue. In each case the message is written once, at its source; the queue that reads it holds a **link**, about 20 bytes, written in the same commit as the message itself.
