@@ -2484,6 +2484,12 @@
                                 "type": "integer",
                                 "format": "int64",
                                 "minimum": 0
+                              },
+                              "skip": {
+                                "type": "array",
+                                "items": {
+                                  "description": "Rust type `(u64, u64)`."
+                                }
                               }
                             },
                             "required": [
