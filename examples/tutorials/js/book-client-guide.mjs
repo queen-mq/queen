@@ -7,7 +7,7 @@
 // says it does.
 //
 // Run it against the node that the book's first section starts:
-//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.8.1
+//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.9.0
 //   node book-client-guide.mjs
 // run.sh runs a copy with localhost:6632 replaced by $QUEEN_URL.
 
@@ -18,6 +18,8 @@ const queen = new Queen({ url: 'http://localhost:6632', handleSignals: false })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const QUEUES = ['jobs', 'emails', 'events', 'reviews', 'prices', 'metrics', 'tasks', 'payments', 'payments-statuses', 'logins',
   'login-rate', 'clicks', 'sales', 'sales-per-hour', 'outgoing-sms', 'invoices',
+  // headers and routing: the reading queue and the link holder before their source
+  'loyalty', 'manual-review', 'shop-events',
   // the feed streams' (end of this program)
   'orders', 'orders-it', 'orders-IT', 'orders-FR', 'per-minute', 'order-followups', 'shipments', 'order-status', 'parts',
   'batches', 'bookings', 'property-settings', 'bookings-priced', 'bursts', 'gh-issues', 'gh-comments', 'gh-unanswered',
@@ -321,6 +323,201 @@ for (const letter of dead.messages) {
   assert.equal(filed.messages.length, 1, "'dlq' filed the message in the dead-letter queue")
   assert.equal(filed.messages[0].errorMessage, 'bad payload')
   console.log('ok: ack statuses')
+}
+
+// --- Headers and routing (broker 2.9.0) -----------------------------------------
+// One source, `shop-events`: a shop's order events, one partition per order.
+// Its readers below: the groups billing, large-eu and fraud-check, the reading
+// queue loyalty, and manual-review, which holds links.
+for (const q of ['shop-events', 'manual-review']) {
+  await queen.queue(q)
+    .config({
+      leaseTime: 60,
+      retryLimit: 3,
+      retryDelay: 1000,
+      deadLetterQueue: true,
+      dlqAfterMaxRetries: true,
+      dedupWindowSeconds: 3600,
+      retentionEnabled: true,
+      completedRetentionSeconds: 86400,
+      maxWaitTimeSeconds: 604800,
+    })
+    .create()
+}
+
+// guide:start(headers)
+await queen.queue('shop-events').partition('order-9137').push([{
+  transactionId: 'order-9137-paid',
+  data: { orderId: 9137, customer: 'customer-42', country: 'IT', total: 1250 },
+  headers: {
+    type: 'order.paid',
+    traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+  },
+}])
+// guide:end
+const shopEvent = (orderId, type, data) => ({
+  transactionId: `order-${orderId}-${type.slice('order.'.length)}`,
+  data: { orderId, ...data },
+  headers: { type },
+})
+await queen.queue('shop-events').partition('order-9138').push([
+  shopEvent(9138, 'order.placed', { customer: 'customer-7', country: 'DE', total: 80 }),
+  shopEvent(9138, 'order.paid', { customer: 'customer-7', country: 'DE', total: 80 }),
+])
+await queen.queue('shop-events').partition('order-9139').push([
+  shopEvent(9139, 'order.paid', { customer: 'customer-42', country: 'FR', total: 300 }),
+  shopEvent(9139, 'order.refunded', { customer: 'customer-42', country: 'FR', total: 300 }),
+])
+await queen.queue('shop-events').partition('order-9137').push([
+  shopEvent(9137, 'order.shipped', { customer: 'customer-42', country: 'IT', total: 1250 }),
+])
+assert.throws(() => queen.queue('shop-events').push([{ data: {}, headers: { Type: 'x' } }]),
+  /header name "Type"/, 'a header name is lower case')
+console.log('ok: headers')
+
+// guide:start(where-text)
+const where =
+  "headers.type prefix 'order.' and data.country in ('IT', 'FR') and data.total > 100"
+// guide:end
+{
+  const taken = []
+  await queen.queue('shop-events').group('large-eu').subscriptionMode('all').where(where)
+    .each().limit(4).idleMillis(3000).consume(async (msg) => { taken.push(msg.transactionId) })
+  assert.deepEqual(taken.sort(), ['order-9137-paid', 'order-9137-shipped', 'order-9139-paid', 'order-9139-refunded'],
+    'prefix, in and > together: the Italian and French events over 100, not the German order')
+  console.log('ok: where-text')
+}
+
+const billed = []
+// guide:start(filtered-group)
+await queen.queue('shop-events')
+  .group('billing')
+  .subscriptionMode('all')            // a new group starts at the end: take what is there
+  .where('headers.type', 'in', ['order.paid', 'order.refunded'])
+  .each()
+  .limit(4) // guide:hide
+  .idleMillis(3000) // guide:hide
+  .consume(async (msg) => {
+    billed.push(msg) // guide:hide
+    console.log(msg.headers.type, msg.data.orderId)   // paid and refunded orders only
+  })
+// guide:end
+{
+  const ids = billed.map((m) => m.transactionId)
+  assert.deepEqual([...ids].sort(), ['order-9137-paid', 'order-9138-paid', 'order-9139-paid', 'order-9139-refunded'],
+    'billing got the paid and refunded events, and nothing else')
+  assert.ok(ids.indexOf('order-9139-paid') < ids.indexOf('order-9139-refunded'), 'in the order of their partition')
+  const paid = billed.find((m) => m.transactionId === 'order-9137-paid')
+  assert.deepEqual(paid.headers, { type: 'order.paid', traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' },
+    'the headers came back with the message')
+  // Another worker of the group with another where is refused, before it gets anything.
+  await assert.rejects(async () => queen.queue('shop-events').group('billing').where('headers.type', '=', 'order.paid')
+    .each().limit(1).idleMillis(1000).consume(async () => {}), { code: 'where_mismatch' })
+  const [row] = (await queen.admin.listConsumerGroups())
+    .filter((g) => g.name === 'billing' && g.queueName === 'shop-events')
+  assert.equal(row.filtered, true)
+  assert.equal(row.where, "headers.type in ('order.paid', 'order.refunded')", 'the listing shows the where')
+  assert.equal(row.totalLag, 0, 'its lag counts only what it takes: nothing is left')
+  console.log('ok: filtered-group')
+}
+
+const points = []
+// guide:start(reading-queue)
+await queen.queue('loyalty')
+  .config({
+    from: 'shop-events',
+    where: "headers.type in ('order.paid', 'order.refunded')",
+    partitionBy: 'data.customer',   // a partition per customer, not per order
+    start: 'all',                   // what the source still keeps, then the new ones
+    leaseTime: 30,
+    retryLimit: 10,
+    retryDelay: 5000,
+    deadLetterQueue: true,
+    dlqAfterMaxRetries: true,
+    priority: 0,
+    delayedProcessing: 0,
+    windowBuffer: 0,
+  })
+  .create()
+
+await queen.queue('loyalty')
+  .each()
+  .limit(4) // guide:hide
+  .idleMillis(5000) // guide:hide
+  .consume(async (msg) => {
+    points.push(msg) // guide:hide
+    console.log(msg.partition, msg.transactionId)   // customer-42 order-9137-paid ...
+  })
+// guide:end
+{
+  const of = (customer) => points.filter((m) => m.partition === customer).map((m) => m.transactionId)
+  assert.deepEqual(of('customer-42'), ['order-9137-paid', 'order-9139-paid', 'order-9139-refunded'],
+    "one partition per customer, in the source's commit order")
+  assert.deepEqual(of('customer-7'), ['order-9138-paid'])
+  for (const m of points) {
+    const atSource = billed.find((b) => b.transactionId === m.transactionId)
+    assert.equal(m.id, atSource.id, `${m.transactionId}: the same message id as at the source`)
+  }
+  await assert.rejects(async () => queen.queue('loyalty').partition('customer-7').push([{ transactionId: 'x', data: {} }]),
+    /reading_queue/, 'a push into a reading queue is refused')
+  await assert.rejects(async () => queen.queue('loyalty').config({ from: 'shop-events', retentionEnabled: true }).create(),
+    { code: 'reading_queue' }, 'a reading queue keeps what its source keeps')
+  const { route } = await queen.admin.getQueue('shop-events')
+  assert.ok(route.readers.some((r) => r.queue === 'loyalty'), "the source's page names its reading queue")
+  console.log('ok: reading-queue')
+}
+
+const looksRisky = (order) => order.total > 1000
+// guide:start(link)
+await queen.queue('shop-events')
+  .group('fraud-check')
+  .subscriptionMode('all')
+  .where('headers.type', '=', 'order.paid')
+  .each()
+  .autoAck(false)                     // the transaction below acks
+  .limit(3) // guide:hide
+  .idleMillis(3000) // guide:hide
+  .consume(async (msg) => {
+    const tx = queen.transaction().ack(msg)
+    if (looksRisky(msg.data)) {
+      tx.queue('manual-review').link([msg], { headers: { 'review-reason': 'risk' } })
+    }
+    await tx.commit()
+  })
+// guide:end
+{
+  const review = await queen.queue('manual-review').batch(10).wait(true).timeoutMillis(3000).pop()
+  assert.equal(review.length, 1, 'one payment went to manual review')
+  const [m] = review
+  const atSource = billed.find((b) => b.transactionId === 'order-9137-paid')
+  assert.equal(m.transactionId, 'order-9137-paid')
+  assert.equal(m.partition, 'order-9137', 'a link keeps the partition name when it names none')
+  assert.equal(m.id, atSource.id, 'the same message as at the source')
+  assert.deepEqual(m.data, atSource.data)
+  assert.deepEqual(m.headers, { ...atSource.headers, 'review-reason': 'risk' }, "the source's headers, then the link's")
+  await queen.ack(m, 'completed')
+  // The same link again commits, and writes nothing: a forward is safe to retry.
+  const again = await queen.transaction().queue('manual-review').link([atSource]).commit()
+  assert.equal(again.results.find((r) => r.type === 'link').duplicate, true)
+  const { route } = await queen.admin.getQueue('shop-events')
+  assert.ok(route.holders.some((h) => h.queue === 'manual-review' && h.holdsRetention), 'the link holder holds retention')
+  console.log('ok: link')
+}
+{
+  // A where changes from the next push; a worker that still sends the old one is refused.
+  await queen.admin.updateConsumerGroupWhere('billing', 'shop-events',
+    "headers.type in ('order.paid', 'order.refunded', 'order.chargeback')")
+  await queen.queue('shop-events').partition('order-9139').push([
+    shopEvent(9139, 'order.chargeback', { customer: 'customer-42', country: 'FR', total: 300 })])
+  await assert.rejects(async () => queen.queue('shop-events').group('billing').where('headers.type', 'in', ['order.paid', 'order.refunded'])
+    .each().limit(1).idleMillis(1000).consume(async () => {}), { code: 'where_mismatch' })
+  const charged = []
+  await queen.queue('shop-events').group('billing').where("headers.type in ('order.paid', 'order.refunded', 'order.chargeback')")
+    .each().limit(1).idleMillis(3000).consume(async (m) => { charged.push(m.transactionId) })
+  assert.deepEqual(charged, ['order-9139-chargeback'], 'the new where took the next push')
+  // A source with readers is not deleted by accident.
+  await assert.rejects(async () => queen.queue('shop-events').delete(), { code: 'has_readers' })
+  console.log('ok: where change, has_readers')
 }
 
 // --- KV -------------------------------------------------------------------

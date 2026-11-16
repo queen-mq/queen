@@ -1,0 +1,250 @@
+% Chapter 2, section 8: Headers and routing
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-11-16, from the website's headers and routing pages
+% (webdoc/src/content/docs/writing-applications/headers.mdx, routing.mdx). The code is cut from
+% examples/tutorials/js/book-client-guide.mjs, which ran it against a 2.9.0-beta.3 node and checked
+% every result quoted here, and the refusals in the tables marked by their code (where_mismatch,
+% reading_queue, has_readers, duplicate, source_mismatch).
+
+\section{Headers and routing}
+
+A message can carry headers beside its payload. A consumer group can take only some of a queue's
+messages, a queue can read other queues, and a transaction can forward the message it holds into
+another queue. In each case the message is written once, at its source: the group or the queue
+that reads it holds a \emph{link}, about 20 bytes, written in the same commit as the message.
+
+Three rules are all there is to learn:
+
+\begin{enumerate}
+\item A group or a queue reads only what its \texttt{where} takes.
+\item The source keeps the messages; the queues that read it consume them.
+\item It is the same message, with the same \texttt{id} and \texttt{transactionId}, everywhere it
+shows.
+\end{enumerate}
+
+\why{without this, a reader that wants a few kinds of message reads and acks all of them, and
+routing means a router process that copies every message and adds a commit for each batch. A link
+costs the source's commit a few bytes, and it cannot be lost or doubled: it is in the same log
+entry as the message.}
+
+The examples read one queue, \texttt{shop-events}, where a shop writes the events of its orders,
+one partition per order. It is configured like any other queue.
+
+All of this is new in QueenMQ 2.9. Every node of the cluster must run it: before that, headers, a
+\texttt{where}, \texttt{from} or a link are refused with \texttt{cluster\_version}.
+
+\subsection{Headers}
+
+Headers are a small map of strings stored beside the payload: what the message is, where it comes
+from, which trace it belongs to.
+
+\guide{headers}
+
+They come back on every read of the message: a pop, a fetch, the feed, the message browser and the
+dead-letter queue.
+
+\why{without headers, the type and the trace context go inside the payload. Then every payload must
+be a JSON object, every filter parses the body, and a tool that must not read the body (it may hold
+personal data) has nothing to read.}
+
+\begin{pairs}[0.20]{What}{Rule}
+Names & 1 to 64 bytes of \texttt{a-z}, \texttt{0-9}, \texttt{.}, \texttt{\_} and \texttt{-}: lower
+case only \\
+Values & any UTF-8 string \\
+Reserved & names that start with \texttt{queen-} are the broker's \\
+How many & 64 per message (\texttt{QUEEN\_MAX\_HEADERS}) \\
+How big & 8 KiB per message, names and values together (\texttt{QUEEN\_MAX\_HEADER\_BYTES}, at most
+64 KiB) \\
+Encryption & never: headers are stored in clear on an encrypted queue too, so routing and
+monitoring read them without the body. Put no secret and no personal data in a header. \\
+Dedup & not part of it: the \texttt{transactionId} stays the key \\
+Dead letters & a dead letter keeps its headers, and a replay sends them again \\
+Timers & a timer takes \texttt{headers} too, and the message it fires carries them \\
+Kafka & a record produced through the Kafka port keeps its headers; the ones whose value is UTF-8
+are also the message's headers, with their names in lower case \\
+\end{pairs}
+
+A header describes the message. It never says where the message goes: QueenMQ routes on a header
+only when a reader asks for it, in its own \texttt{where}. Some names that tools understand, documented
+but not enforced: \texttt{traceparent} and \texttt{tracestate} (W3C trace context), \texttt{type},
+\texttt{content-type}.
+
+\subsection{The where language}
+
+Filtered groups, reading queues and the tenant feed filter with one language. A \texttt{where} can be
+one string:
+
+\guide{where-text}
+
+or a list of conditions, which is what \texttt{.where(field, op, value)} builds.
+
+\begin{pairs}[0.20]{Part}{What it takes}
+Fields & \texttt{queue}, \texttt{partition}, \texttt{transactionId}, \texttt{data} or
+\texttt{data.a.b} (a path into the JSON payload, up to 16 deep), \texttt{headers.<name>} \\
+Operators & \texttt{=} \texttt{!=} \texttt{<} \texttt{<=} \texttt{>} \texttt{>=} \texttt{in}
+\texttt{exists} \texttt{prefix} \texttt{!prefix} \\
+Combining & \texttt{and} only; \texttt{in (...)} for alternatives \\
+Values & \texttt{'text'}, numbers, \texttt{true}, \texttt{false}, \texttt{null}; \texttt{in} takes up
+to 64 values \\
+Size & up to 16 conditions \\
+\end{pairs}
+
+A field the message does not have holds for no operator, \texttt{!=} included, as in SQL. The
+\texttt{where} above took the Italian and French events over 100, and not the German order.
+
+The leader evaluates a \texttt{where} once, when it plans the push, and the log entry keeps the
+answer: followers and replays never evaluate it again. On an encrypted queue, the leader decrypts
+the payload for it.
+
+\subsection{Filtered consumer groups}
+
+A consumer group with a \texttt{where} gets only the messages it takes. Billing needs the payments
+and the refunds, not every event of an order:
+
+\guide{filtered-group}
+
+The group got four events of the six, with their headers, in the order of their partitions. Its
+\texttt{where} is set at its first pop, like its start, and stays fixed from then on. The group
+gets only its messages, its lag counts only those, and a waiting pop wakes only for one of them.
+Leases, acks, retries and dead letters work as for any group, with the queue's settings.
+
+\begin{pairs}[0.40]{Case}{Answer}
+Another worker of the group sends another \texttt{where} & refused, \texttt{where\_mismatch}, with
+the group's current \texttt{where} \\
+A \texttt{where} without a group & refused: name a group \\
+A \texttt{where} on a group that already reads the queue without one & refused,
+\texttt{where\_mismatch}: a filter starts as a new group \\
+\texttt{subscriptionMode('all')} or \texttt{subscriptionFrom} & the group starts with every match
+the queue still keeps \\
+Change the \texttt{where} & the admin call \texttt{updateConsumerGroupWhere(group, queue, where)}:
+it applies from the next push, and a worker that still sends the old one is refused \\
+Delete the group & as any group, with the admin call \texttt{deleteConsumerGroupForQueue(group, queue)} \\
+The group listings & show the group under its queue, with \texttt{filtered: true} and its
+\texttt{where} \\
+\end{pairs}
+
+\why{``only some of these'' is what most readers need. Here it is one line in the consumer, with no
+queue to create, no router to run and nothing to ack that the consumer does not want.}
+
+\subsection{Reading queues}
+
+A reading queue is a queue whose messages come from other queues. Give it \texttt{from} and, if you
+want, \texttt{where}, \texttt{partitionBy} and \texttt{start}:
+
+\guide{reading-queue}
+
+The loyalty service gets the payments and the refunds too, but by customer: partition
+\texttt{customer-42} holds the events of every order of that customer, in the order the log
+committed them, each with the \texttt{id} it has at the source.
+
+\begin{options}{Option}{Default}{What it does}
+from & (none) & The source: a queue name, or a list of names and \texttt{\{ queue, where \}}
+objects. \texttt{null} stops the reading; what the queue holds stays readable. \\
+where & every message & The condition a message of a source named by its name alone must meet. \\
+partitionBy & \texttt{same} & \texttt{same}: the source's partitions, in the source's order.
+\texttt{data.<path>} or \texttt{headers.<name>}: the field's value names the partition (a message
+without it is not routed). \\
+start & \texttt{now} & \texttt{now}: the messages pushed from now on. \texttt{all}: every match the
+sources still keep, then the new ones, in order. \\
+\end{options}
+
+A reading queue has its own leases, retries, dead-letter queue, priority, delays and consumer
+groups, and a token of its own can read it without reading its sources. It has no keep settings:
+retention, the dedup window, encryption, \texttt{maxSize} and the sink hold are refused on it
+(\texttt{reading\_queue}), because its sources decide how long a message is kept. A push into it is
+refused too: push to its source.
+
+\why{a filtered group shares its queue's settings and its partitions. A reading queue is for a
+reader that needs settings of its own, partitions of its own (\texttt{partitionBy}), several
+sources, or a token of its own.}
+
+\begin{pairs}[0.40]{Case}{Answer}
+An ordinary queue given \texttt{from} & it becomes a reading queue if no message was ever pushed to
+it; refused once it holds messages \\
+A reading queue that reads itself, at any depth & refused, \texttt{route\_loop} \\
+A source that does not exist & refused, \texttt{source\_not\_found} \\
+Two sources route one message (one \texttt{transactionId}) into one partition & kept once: a reading
+queue deduplicates by \texttt{transactionId} in its partitions, as every queue does \\
+Change its \texttt{where} & from the next push; to rebuild it, delete it and create it again \\
+Delete a source that reading queues read & refused, \texttt{has\_readers} (409), unless
+\mbox{\texttt{delete(\{ force: true \})}}: their links then read as gone \\
+\end{pairs}
+
+\subsection{Forward a message: link}
+
+A transaction can put the message it holds into another queue without sending its payload again,
+together with the ack, the KV writes and the timers, all or nothing. Here a fraud check sends the
+risky payments to a person:
+
+\guide{link}
+
+The target gets the same message, with the same \texttt{id} and \texttt{transactionId}, and the
+source's headers with the link's own written over them. Without \texttt{.partition(p)}, the message
+keeps the name of its partition. The same link again commits and writes nothing (its result is
+marked \texttt{duplicate}), so a forward is safe to retry. A link to a message that is gone rolls the
+transaction back (\texttt{source\_gone}), and so does one whose \texttt{transactionId} is not the one
+at that offset (\texttt{source\_mismatch}).
+
+\why{a pipeline that hands a message to the next step sends the whole payload again at every hop.
+A link costs about 20 bytes, whatever the payload weighs, and it commits with the ack of the input,
+so the hand-over cannot be lost or done twice.}
+
+A stream's \texttt{.to(queue)} writes a link too, when its result is its input unchanged (nothing
+but \texttt{where}, \texttt{filter}, \texttt{keyBy} or routing before it); with the option
+\mbox{\texttt{link: false}} it writes copies.
+
+\subsection{What the readers keep, and their lag}
+
+The source keeps the message. For the source's retention, every filtered group, every reading
+queue and every queue that holds its links counts as one more consumer group:
+
+\begin{pairs}[0.40]{Source setting}{What a reader gets}
+\texttt{retentionSeconds}, \texttt{maxWaitTimeSeconds} & the same limit: past it, a link reads as
+gone, as a message is gone for a group that is behind \\
+\texttt{completedRetentionSeconds} & the source waits for the readers too: it keeps a message until
+they have consumed their link \\
+retention off & everything is kept \\
+\end{pairs}
+
+So a queue that holds links keeps the source's messages for as long as it keeps the links: give a
+queue you forward into a retention of its own. The source's page in the dashboard, and
+\texttt{GET /api/v1/resources/queues/:queue}, list its readers and its holders. A dead letter filed
+from a reading queue is a copy: it holds the message itself, because a dead letter outlives its
+source.
+
+A filtered group's lag counts only the messages its \texttt{where} took. A message that no reader
+takes waits for nobody: it counts as completed. The partitions no reader can take at all (when the
+\texttt{where}s name queues or partitions) show as \emph{unread}, and the dashboard marks the queue
+``No reader'' for them.
+
+\why{a filtered group that counted the whole queue as its lag would look behind for ever, and an
+autoscaler reading its depth would start workers for messages it never gets. The partitions nobody
+reads are the gap worth seeing: a worker that was never started.}
+
+\subsection{Limits and traps}
+
+\begin{options}{Setting}{Default}{What it limits}
+QUEEN\_WHERE\_MAX\_CONDITIONS & 16 & The conditions in one \texttt{where} \\
+QUEEN\_WHERE\_MAX\_IN & 64 & The values in one \texttt{in} \\
+QUEEN\_MAX\_READERS\_PER\_QUEUE & 64 & The readers of one source: reading queues and filtered groups \\
+QUEEN\_MAX\_SOURCES\_PER\_QUEUE & 16 & The sources of one reading queue \\
+\normalfont(fixed) & 8 deep & Readers of readers, in a chain \\
+\end{options}
+
+Every reader costs an evaluation of its \texttt{where} on each push to its source. That is why the
+readers of one source are limited; raise the limit knowing it.
+
+\begin{itemize}
+\item \textbf{A new filtered group starts at the end of the queue}, like any group: ask for
+\mbox{\texttt{subscriptionMode('all')}} to read what is already there.
+\item \textbf{A \texttt{where} is fixed at the group's first pop.} To change it, use the admin
+call in the table of filtered groups, then deploy the workers with the new one.
+\item \textbf{Headers are in clear}, on an encrypted queue too.
+\item \textbf{A queue you forward into holds the source's messages}: give it retention.
+\end{itemize}
+
+On the site: \href{https://queenmq.com/writing-applications/headers/}{queenmq.com/writing-applications/headers}
+and \href{https://queenmq.com/writing-applications/routing/}{queenmq.com/writing-applications/routing}.

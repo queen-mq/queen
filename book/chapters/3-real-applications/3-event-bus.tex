@@ -1,0 +1,35 @@
+% Chapter 3, section 3: Event bus
+% Write in plain LaTeX. Code of a guide step: \guide{<step>}; commands: \begin{shell}...\end{shell};
+% a screenshot: \screenshot{file}{caption}; a gap in the draft: \placeholder{...}.
+% See book/latex/queen.sty for the full list.
+%
+% Draft by Claude, 2026-11-16. The code is cut from examples/tutorials/js/book-use-cases.mjs, which
+% checks every result quoted here against a 2.9.0-beta.3 node.
+
+\section{Event bus}
+
+A company's services tell each other what happened: a customer signed up, an invoice was created,
+an invoice was paid, a cart was abandoned. Each service cares about a few types. With a queue per
+type, a service that needs three types reads three queues, and every new type is a new queue for
+someone to create. With one queue for everything, every service reads, leases and acks every event
+to keep the few it wants.
+
+Here there is one queue, the type of each event goes in a header, and each service is a consumer
+group with a \texttt{where} on that header. The partition is the customer, so each service sees one
+customer's events in the order they happened.
+
+\guide{uc-event-bus}
+
+Accounting got the two invoice events, in order. Emails got the sign-up and the paid invoice. The
+abandoned cart, which no service takes yet, waits for nobody: once both services were done, the
+queue had nothing pending.
+
+\why{the broker evaluates each \texttt{where} once, when the event is pushed, so a group gets only
+its events and its lag counts only those. A new type costs nothing, and a new service is one more
+group, which can start from the history with \texttt{subscriptionMode('all')}.}
+
+One thing to know: a group's \texttt{where} is fixed at its first pop. A worker that sends another
+one is refused with \texttt{where\_mismatch}. To change it, the admin call
+\mbox{\texttt{updateConsumerGroupWhere}} sets a new one, from the next push. A service that
+needs settings of its own (a longer lease, more retries) or partitions of its own reads a reading
+queue instead: see Headers and routing, in chapter 2.

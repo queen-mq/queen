@@ -6,7 +6,7 @@
 // says it does.
 //
 // Run it against a node:
-//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.8.1
+//   docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.9.0
 //   node book-use-cases.mjs
 // run.sh runs a copy with localhost:6632 replaced by $QUEEN_URL.
 
@@ -17,7 +17,7 @@ import { Queen, Stream, tokenBucketGate } from 'queen-mq'
 const url = 'http://localhost:6632'
 const queen = new Queen({ url, handleSignals: false })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-const QUEUES = ['thumbnails', 'order-placed', 'chat', 'order-events', 'shipping', 'trace-events',
+const QUEUES = ['thumbnails', 'order-placed', 'company-events', 'chat', 'order-events', 'shipping', 'trace-events',
   'traces', 'sms-out', 'availability', 'review-reminders', 'webhooks', 'daily-reports']
 for (const q of QUEUES) {
   try { await queen.queue(q).delete() } catch {}
@@ -85,6 +85,59 @@ await subscribe('analytics')
   const late = await queen.queue('order-placed').group('late').wait(false).batch(10).pop()
   assert.equal(late.length, 0, 'a new group without subscriptionMode all skips the history')
   console.log('ok: uc-pubsub')
+}
+
+// --- Event bus: one queue, each service takes its types (filtered groups) ---
+await queen.queue('company-events')
+  .config({
+    leaseTime: 60,
+    retryLimit: 5,
+    retryDelay: 2000,
+    deadLetterQueue: true,
+    dlqAfterMaxRetries: true,
+    dedupWindowSeconds: 3600,
+    retentionEnabled: true,
+    completedRetentionSeconds: 604800,
+    maxWaitTimeSeconds: 2592000,
+  })
+  .create()
+const got = { accounting: [], emails: [] }
+// guide:start(uc-event-bus)
+// Every service publishes to one queue, with the event's type in a header.
+const publish = (customer, type, transactionId, data) => queen.queue('company-events')
+  .partition(`customer-${customer}`)
+  .push([{ transactionId, data, headers: { type } }])
+
+await publish(42, 'user.signed-up', 'signup-42', { email: 'ada@example.com' })
+await publish(42, 'invoice.created', 'invoice-7001', { total: 90 })
+await publish(42, 'cart.abandoned', 'cart-42-1', { items: 3 })
+await publish(42, 'invoice.paid', 'invoice-7001-paid', { total: 90 })
+
+// Each service is a group that takes only its types, in order for each customer.
+const service = (group, where) => queen.queue('company-events')
+  .group(group)
+  .subscriptionMode('all')
+  .where(where)
+  .each()
+  .idleMillis(1000) // guide:hide
+  .consume(async (event) => {
+    got[group].push(event.transactionId) // guide:hide
+    console.log(group, event.headers.type, event.transactionId)
+  })
+
+await Promise.all([
+  service('accounting', "headers.type prefix 'invoice.'"),
+  service('emails', "headers.type in ('user.signed-up', 'invoice.paid')"),
+])
+// guide:end
+{
+  assert.deepEqual(got.accounting, ['invoice-7001', 'invoice-7001-paid'], 'accounting got the invoices, in order')
+  assert.deepEqual(got.emails, ['signup-42', 'invoice-7001-paid'], 'emails got the sign-up and the paid invoice')
+  // The abandoned cart, which no service takes, waits for nobody: nothing is left.
+  const { totals } = await queen.admin.getQueue('company-events')
+  assert.equal(totals.pending, 0, `no backlog (${JSON.stringify(totals)})`)
+  assert.equal(totals.unread, 0)
+  console.log('ok: uc-event-bus')
 }
 
 // --- 1. Chat processing: a burst is one batch (windowBuffer) ---------------
