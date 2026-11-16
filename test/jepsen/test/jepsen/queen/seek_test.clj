@@ -3,8 +3,10 @@
   No cluster."
   (:require [clojure.test :refer :all]
             [jepsen [checker :as checker]
+                    [generator :as gen]
                     [history :as h]
                     [util :as util]]
+            [jepsen.generator.context :as gctx]
             [jepsen.queen.workload.seek :as w]))
 
 (def s 1000000000)
@@ -57,3 +59,24 @@
   (testing "a pop in flight while the seek applied, first delivery: no proof, must come again"
     (let [r (run #{} (enq 4 (+ (* 26 s) (quot s 2))) (deq (+ (* 30 s) 500) [3 4]))]
       (is (= [4] (:not-read-again r))))))
+
+(deftest a-seek-that-fails-for-sure-is-sent-again-until-one-is-answered
+  ; Campaign 4, seek-kill (2026-11-16): the test's only two seeks met killed
+  ; nodes and failed, so it tested nothing about seek.
+  (let [test    {:concurrency 1, :nodes ["n1"]}
+        ctx     (gctx/context test)
+        [o1 g1] (gen/op (w/seek-until-ok :end) test ctx)]
+    (is (= [:seek :end] ((juxt :f :value) o1)))
+    (is (= :pending (first (gen/op g1 test ctx))) "one at a time: nothing while it is in flight")
+    (let [failed  (+ (:time o1) 1000)
+          g2      (gen/update g1 test ctx (assoc o1 :type :fail, :time failed))
+          [o2 g3] (gen/op g2 test ctx)]
+      (is (= [:seek :end] ((juxt :f :value) o2)) "sent again")
+      (is (<= (+ failed (* w/retry-s s)) (:time o2)) "retry-s after the failure")
+      (let [g4 (gen/update g3 test ctx (assoc o2 :type :ok, :time (+ (:time o2) 1000)))]
+        (is (nil? (gen/op g4 test ctx)) "answered: no more seeks")))
+    (testing "an answer that may have applied (:info) is the last seek"
+      (is (nil? (gen/op (gen/update g1 test ctx (assoc o1 :type :info)) test ctx))))
+    (testing "another seek's answer changes nothing"
+      (let [other (assoc o1 :value :time, :type :fail)]
+        (is (= :pending (first (gen/op (gen/update g1 test ctx other) test ctx))))))))

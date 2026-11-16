@@ -20,7 +20,11 @@
     - a message pushed after the seek to the end answered that no pop
       delivered by the end.
   W2's rules are reported, not judged: a seek skips messages for good,
-  delivers acked ones again, and clears the group's leases."
+  delivers acked ones again, and clears the group's leases.
+
+  A seek that fails for sure (the node it went to was down, or it refused
+  it) is sent again `retry-s` later, one at a time, until one is answered
+  (`seek-until-ok`); one whose outcome is unknown is never sent again."
   (:require [jepsen [checker :as checker]
                     [client :as client]
                     [generator :as gen]
@@ -65,6 +69,38 @@
   (close! [this test] (client/close! (:inner this) test))
   client/Reusable
   (reusable? [this test] true))
+
+(def retry-s
+  "How long after a seek that failed for sure the same seek is sent again."
+  2)
+
+(defrecord SeekUntilOk [value retry-ns state not-before]
+  ; One seek at a time. A :fail never applied (connection refused, or a 4xx),
+  ; so the same seek goes again `retry-ns` after it, until one is answered.
+  ; An :info may have applied, even later than a second seek would: it is the
+  ; last one, so the checker never judges against a point the group did not
+  ; end up at. Campaign 4, seek-kill (2026-11-16): both of the test's two
+  ; seeks met killed nodes and failed, and nothing about seek was tested.
+  gen/Generator
+  (op [this test ctx]
+    (case state
+      :done    nil
+      :waiting [:pending this]
+      (let [op (gen/fill-in-op {:f :seek, :value value} ctx)]
+        (if (= :pending op)
+          [:pending this]
+          [(assoc op :time (max (:time op) not-before)) (assoc this :state :waiting)]))))
+  (update [this test ctx event]
+    (if (and (= :seek (:f event)) (= value (:value event)) (not= :invoke (:type event)))
+      (if (= :fail (:type event))
+        (assoc this :state :ready, :not-before (+ (:time event) retry-ns))
+        (assoc this :state :done))
+      this)))
+
+(defn seek-until-ok
+  "A seek to `value` (:end or :time), sent again after each sure failure."
+  [value]
+  (->SeekUntilOk value (* retry-s s) :ready 0))
 
 (defn checker
   []
@@ -146,8 +182,8 @@
      :checker         (checker)
      :generator       (gen/any
                         (gen/phases (gen/sleep (long (* 0.3 tl)))
-                                    (gen/once {:f :seek, :value :end})
+                                    (seek-until-ok :end)
                                     (gen/sleep (long (* 0.3 tl)))
-                                    (gen/once {:f :seek, :value :time}))
+                                    (seek-until-ok :time))
                         (:generator inner))
      :final-generator (:final-generator inner)}))
