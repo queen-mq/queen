@@ -127,6 +127,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
 # names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-16 (62e59d3aa, f9d08835e): phase2.rs and phase2/reads.rs fold filtered groups into a queue's figures (a group's lag is still the wait of the oldest message it has not consumed); planner/kv.rs answers a ttl put that landed after its lifetime as not applied. Nothing this page states changes.
 ---
 
 The [dashboard](/integrations/laravel/dashboard/) shows what the supervisors are doing. This page is about

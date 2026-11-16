@@ -95,6 +95,7 @@ sourceOfTruth:
 # config's bearer_token stays a string (QueenConnector.php, QueenServiceProvider.php); bearerToken
 # may be a token callable, read per attempt, and Queen gains tokens()->mint() (Queen.php,
 # HttpClient.php); Defaults.php gains a comment (8c3fcd498). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (routing, e0654033f): the PHP client sends and reads message headers (PushBinary, PopFrames, QueenQueue; a job that implements QueenHeaders) and leaves out the options a reading queue keeps from its sources (Defaults READING_QUEUE_KEEPS); HttpClient changed comments only. The options and defaults this page lists do not change.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. The file reads 20 environment variables, for what differs between environments (the broker, its credentials, the queue and group, paths, and the switches of optional features); every other setting is a plain value in the file. This page lists the 20, then every key area by area, with its default in PHP client 2.1.0 and later.

@@ -33,6 +33,7 @@ sourceOfTruth:
 # checked membership change on a task of its own until openraft has taken its second step, so a
 # request that went away (its deadline, a closed connection) no longer leaves a joint configuration;
 # handlers/raft.rs changes a comment on ?timeoutMs. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (40b6e0b94): handlers/raft.rs answers a filtered group's empty pop like any empty pop. Nothing this page states changes.
 ---
 
 The [manifest](/manage/kubernetes/) installs a cluster, and a rolling update takes a new version

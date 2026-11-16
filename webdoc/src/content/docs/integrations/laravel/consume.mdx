@@ -76,6 +76,7 @@ sourceOfTruth:
 # config's bearer_token stays a string (QueenConnector.php, QueenServiceProvider.php); bearerToken
 # may be a token callable, read per attempt, and Queen gains tokens()->mint() (Queen.php,
 # HttpClient.php) (8c3fcd498). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (routing, e0654033f): QueueBuilder and HighLevelConsumer take a `where` (filtered groups) and headers, and check that a broker applied the filter. The consume options and behavior this page states do not change.
 ---
 
 `php artisan queen:consume` reads a QueenMQ queue and passes each message to a class of yours. Use it

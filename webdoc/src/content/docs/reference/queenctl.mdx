@@ -36,6 +36,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-13 (status): status.go joins the list; the command reads the queue listing and the consumer-group listing, described below. consumer_manager.go changed on 10-12 (it can read framed pops, off by default, and the CLI does not turn them on): nothing on this page depends on it.
 # sourceOfTruth re-read 2026-10-13 (lag, queue list): lag.go and queue.go join the list; what lag prints with and without --min-seconds and where queue list applies its flags are described below.
 # sourceOfTruth re-read 2026-10-24 (queenctl 2.6.1): .goreleaser.yaml no longer publishes; it builds the same archives, and the release workflow publishes them as the release "queenctl X.Y.Z" on the clients/client-cli/vX.Y.Z tag. Install now names that release and the go install path.
+# sourceOfTruth re-read 2026-11-16 (routing, e0654033f): client-go's ConsumerManager checks a `where` target and logs `where-not-applied` when the broker did not apply it. Nothing this page states changes.
 ---
 
 `queenctl` is a single static binary over the HTTP API, built on the Go SDK. It is what we reach

@@ -23,6 +23,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-12 (the MySQL source): config.rs and config_validate.rs take an
 # `engine` (absent: postgres, never written back for a Postgres document), connectors.rs deletes a
 # MySQL source at once. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (9a5af4ee8, 078078815): queen-pg sink/engine.rs changed comments only; pg_inproc.rs gained a broker call held while it is awaited (on_broker_while_awaited, for the MySQL source). Nothing this page states changes.
 ---
 
 The broker can stream a PostgreSQL table into a queue, and a queue into a table, with no other process. The **source** reads committed changes through logical replication and turns each one into a message, in a partition named after the row's key, in commit order. The **sink** is a consumer group the broker runs for you, and it writes every message into a table. Each one is set up with one HTTP call, runs on every node of a cluster, and gives exactly-once effects.
