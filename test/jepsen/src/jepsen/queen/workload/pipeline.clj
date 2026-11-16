@@ -313,29 +313,44 @@
 ;; ---------------------------------------------------------------------------
 ;; Generators
 
-(defrecord ProcessUntilEmpty [need empties]
-  ; One thread's drain: :process until `need` in a row found nothing, then
-  ; one :final-read.
+(defrecord ProcessUntilEmpty [need quiet-ns empties since read?]
+  ; One thread's drain: :process until `need` pops in a row found nothing AND
+  ; none found a message, or failed, for `quiet-ns`, then one :final-read.
+  ; The quiet time is longer than a lease: a pop whose answer was lost (a 503
+  ; "the request deadline elapsed", a timeout) may still hold the head of a
+  ; partition, and everything behind it, until its lease runs out. Until
+  ; 2026-11-16 eight empty pops (about 2.6 s) ended the drain before a 3 s
+  ; lease did, and the messages it held counted as lost (campaign 3,
+  ; bin-pipeline-part: 186 of 24,284).
   gen/Generator
   (op [this test ctx]
-    (cond
-      (< empties need)
-      (let [op (gen/fill-in-op {:f :process, :value nil, :drain? true} ctx)]
-        (if (= :pending op) [:pending this] [op this]))
+    (let [now  (:time ctx)
+          this (cond-> this (nil? since) (assoc :since now))]
+      (cond
+        read? nil
 
-      (= empties need)
-      (let [op (gen/fill-in-op {:f :final-read, :value nil} ctx)]
-        (if (= :pending op) [:pending this] [op (ProcessUntilEmpty. need (inc empties))]))
+        (and (<= need empties) (<= quiet-ns (- now (:since this))))
+        (let [op (gen/fill-in-op {:f :final-read, :value nil} ctx)]
+          (if (= :pending op) [:pending this] [op (assoc this :read? true)]))
 
-      :else nil))
+        :else
+        (let [op (gen/fill-in-op {:f :process, :value nil, :drain? true} ctx)]
+          (if (= :pending op) [:pending this] [op this])))))
 
   (update [this test ctx event]
     (if (and (= :process (:f event)) (:drain? event) (not= :invoke (:type event))
-             (< empties need))
+             (not read?))
       (if (and (= :ok (:type event)) (nil? (:value event)))
-        (ProcessUntilEmpty. need (inc empties))
-        (ProcessUntilEmpty. need 0))
+        (assoc this :empties (inc empties))
+        (assoc this :empties 0, :since (:time event)))
       this)))
+
+(defn drain
+  "The final phase: every thread drains (ProcessUntilEmpty) for at least the
+  lease (--w2-lease) and 2 s more of quiet."
+  [opts]
+  (gen/each-thread
+    (->ProcessUntilEmpty 8 (long (* 1e9 (+ 2 (:w2-lease opts 3)))) 0 nil false)))
 
 (defn workload
   [opts]
@@ -345,5 +360,5 @@
                       (gen/mix [(map (fn [m] {:f :enqueue, :value m}) (range))
                                 (repeat {:f :process, :value nil})])
                       (gen/stagger 1 (repeat {:f :read-counters, :value nil})))
-   :final-generator (gen/each-thread (->ProcessUntilEmpty 8 0))
+   :final-generator (drain opts)
    :db-env          kv/db-env})

@@ -282,3 +282,21 @@
       (is (= {"QUEEN_LINK_TOKEN" "tok", "QUEEN_RAFT_LOG_KEEP" "16", "QUEEN_RAFT_PURGE_HOLD_S" "5"} sr))
       (is (= "true" ((qdb/link-env (dissoc t :standby-seed) "127.0.0.3") "QUEEN_LINK_STANDBY")))
       (is (= {"QUEEN_LINK_TOKEN" "tok"} (qdb/link-env (dissoc t :standby-seed) "127.0.0.1"))))))
+
+(deftest grown-reads-the-membership-it-was-answered
+  ; Campaign 3, 2026-11-15: every --standby-seed run threw a ClassCastException
+  ; on the membership answer (a map keyed by group number, looked up with
+  ; :status) and never grew its standby.
+  (let [one   {:groups (f/membership-of {:membership {:voters [3 1 2], :learners []}})}
+        two   {:groups (f/membership-of
+                         {:groups [{:group 0, :status 200, :body {:membership {:voters [1 2 3]}}}
+                                   {:group 1, :status 200, :body {:membership {:voters [2 1 3]}}}]})}
+        joint {:groups (f/membership-of {:membership {:voters [1 2 3], :joint [[1] [1 2 3]]}})}]
+    (is (:ok? (f/grown one [1 2 3] 1)))
+    (is (= {0 [1 2 3]} (:voters (f/grown one [1 2 3] 1))))
+    (is (not (:ok? (f/grown one [1 2 3 4] 1))) "a voter missing")
+    (is (:ok? (f/grown two [1 2 3] 2)))
+    (is (not (:ok? (f/grown two [1 2 3] 1))) "not the groups the test runs")
+    (is (not (:ok? (f/grown joint [1 2 3] 1))) "between two steps of a change")
+    (is (not (:ok? (f/grown {:status 503} [1 2 3] 1))))
+    (is (= {:status 503} (:voters (f/grown {:status 503} [1 2 3] 1))))))

@@ -110,3 +110,29 @@
   (testing "no answer: unknown; a refused connection: nothing sent"
     (is (= :info (w/replay-outcome {:exception {:type :jepsen.queen.http/timeout}})))
     (is (= :fail (w/replay-outcome {:exception {:type :jepsen.queen.http/refused}})))))
+
+(deftest a-copy-whose-ack-answer-was-lost
+  ; Rerun of campaign 3, dlqops-lz-kill: the copy dlq:<id> of a replay was
+  ; delivered once, acked `completed`, the answer lost, and it never came
+  ; back: the ack applied. Not before the final drain, it proves nothing.
+  (let [drain   (fn [] [{:process 1, :type :invoke, :f :dequeue, :value nil, :drain? true}
+                        {:process 1, :type :ok, :f :dequeue, :value nil, :drain? true, :msgs []}])
+        base    (concat (enq 0) (enq 1) (enq 2) (enq 4) (enq 8)
+                        (deq (m 1 0 :retry) (m 2 1 :completed))
+                        (deq (m 1 0 :retry) (m 2 1 :completed))
+                        (deq (m 1 0 :completed) (m 2 1 :completed))
+                        (deq (m 0 0 :dlq :pid "2") (m 4 1 :dlq :pid "2") (m 8 2 :dlq :pid "2"))
+                        (op :replay :ok :id "d4" :txn "q4" :value 4))
+        tail    (concat (op :delete-dlq :ok :id "d8" :txn "q8" :value 8)
+                        (dlq {:id "d0", :txn "q0", :v 0}))
+        unknown (deq (m 4 3 :completed :txn "dlq:d4" :pid "2" :ack :unknown))]
+    (testing "acked with its answer lost before the drain, never back: completed"
+      (let [r (run (concat base unknown (drain) (drain) tail))]
+        (is (:valid? r) (pr-str r))
+        (is (= 1 (:copies-completed-unknown r)))))
+    (testing "the same ack inside the drain proves nothing yet"
+      (let [r (run (concat base (drain) unknown (drain) tail))]
+        (is (some #(= :copy-never-completed (:problem %)) (:replay-problems r)) (pr-str r))))
+    (testing "with no drain in the history either"
+      (let [r (run (concat base unknown tail))]
+        (is (some #(= :copy-never-completed (:problem %)) (:replay-problems r)))))))

@@ -174,26 +174,55 @@
   [x]
   (str "'" (str/replace (str x) "'" "'\\''") "'"))
 
+(def s3-crash-fired
+  "Written on a node whose QUEEN_S3_CRASH_AT point fired (the broker aborts
+  there, every time it reaches it): from then on the node runs without it."
+  (str data-dir "/s3-crash-fired"))
+
+(defn wrapper-loop
+  "The restart loop of a node's run.sh (paths as options, for its test). It
+  restarts the binary on exit 75 (load a received snapshot), and once on the
+  abort of a QUEEN_S3_CRASH_AT point that fired (the sink's crash tests, W30):
+  it starts again at once, without the point, and so does every later start
+  of that node. The point fires every time the sink reaches it, on every
+  node, so with it kept no node could pass it: `before_commit` stands before
+  every commit, and until 2026-11-16 its test aborted 28 times and committed
+  nothing (campaign 3). kill -9 (137) and any other exit stay down."
+  [{:keys [bin log fired pid wrapper-pid]}]
+  (str "echo $$ > " wrapper-pid "\n"
+       "while true; do\n"
+       "  if [ -n \"${QUEEN_S3_CRASH_AT:-}\" ] && [ -e " fired " ]; then\n"
+       "    unset QUEEN_S3_CRASH_AT\n"
+       "    echo \"run.sh: the QUEEN_S3_CRASH_AT point fired on this node already; starting without it\"\n"
+       "  fi\n"
+       "  echo \"run.sh: starting queen $(date -u +%Y-%m-%dT%H:%M:%S.%NZ)\"\n"
+       "  " bin " &\n"
+       "  echo $! > " pid "\n"
+       "  wait $!\n"
+       "  rc=$?\n"
+       "  echo \"run.sh: queen exited rc=$rc $(date -u +%Y-%m-%dT%H:%M:%S.%NZ)\"\n"
+       "  if [ $rc -eq 134 ] && [ -n \"${QUEEN_S3_CRASH_AT:-}\" ] \\\n"
+       "     && tail -n 200 " log " | grep -q 'QUEEN_S3_CRASH_AT fired'; then\n"
+       "    mkdir -p \"$(dirname " fired ")\" && touch " fired "\n"
+       "    echo \"run.sh: the QUEEN_S3_CRASH_AT point fired; restarting without it\"\n"
+       "    continue\n"
+       "  fi\n"
+       "  [ $rc -eq 75 ] || break\n"
+       "  echo \"run.sh: exit 75 = load a received snapshot; restarting\"\n"
+       "done\n"))
+
 (defn run-sh-script
   [test node]
   (str "#!/usr/bin/env bash\n"
        "# Written by jepsen.queen.db. One Queen raft node; restarts the binary\n"
-       "# ONLY on exit 75 (load a received snapshot). kill -9 (137) stays down.\n"
+       "# on exit 75 (load a received snapshot), and once after a fired\n"
+       "# QUEEN_S3_CRASH_AT point (wrapper-loop). kill -9 (137) stays down.\n"
        "ulimit -n 1048576\n"
        (->> (env test node)
             (map (fn [[k v]] (str "export " k "=" (sh-quote v) "\n")))
             (apply str))
-       "echo $$ > " wrapper-pid-file "\n"
-       "while true; do\n"
-       "  echo \"run.sh: starting queen $(date -u +%Y-%m-%dT%H:%M:%S.%NZ)\"\n"
-       "  " bin " &\n"
-       "  echo $! > " pid-file "\n"
-       "  wait $!\n"
-       "  rc=$?\n"
-       "  echo \"run.sh: queen exited rc=$rc $(date -u +%Y-%m-%dT%H:%M:%S.%NZ)\"\n"
-       "  [ $rc -eq 75 ] || break\n"
-       "  echo \"run.sh: exit 75 = load a received snapshot; restarting\"\n"
-       "done\n"))
+       (wrapper-loop {:bin bin, :log log-file, :fired s3-crash-fired
+                      :pid pid-file, :wrapper-pid wrapper-pid-file})))
 
 (defn write-run-sh!
   "Writes this node's run.sh; `extra` env entries go on top of the test's

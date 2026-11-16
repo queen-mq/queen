@@ -274,11 +274,28 @@
                                (filter #(and (= :fail (replay-fate %)) (:id %)
                                              (not (movers (:id %))) (seq (copies (:id %)))))
                                (mapv #(select-keys % [:id :value :answer])))
+            ; The final drain's start: it outlasts a lease (six empty pops of
+            ; 1 s each, leaseTime 5), so a copy whose `completed` ack did not
+            ; apply is delivered again before it ends.
+            drain-at (some->> hist
+                              (h/filter #(and (= :dequeue (:f %)) (:drain? %) (= :invoke (:type %))))
+                              first :time)
+            ; A copy whose last delivery was acked `completed` with no
+            ; certain answer (a 503, a timeout), before the drain, and which
+            ; never came back: the ack applied. Until 2026-11-16 only a
+            ; certain answer counted (rerun of campaign 3, dlqops-lz-kill:
+            ; dlq:01a1e31d, delivered once, its ack's answer lost, never
+            ; delivered again in the 128 s and the drain that followed).
+            unknown-done? (fn [cs]
+                            (let [l (last (sort-by :comp cs))]
+                              (boolean (and l (= :completed (:action l)) (= :unknown (:ack l))
+                                            drain-at (< (:comp l) drain-at)))))
             replay-bad (->> applied
                             (keep (fn [r]
                                     (let [cs   (copies (:id r))
                                           offs (set (map :offset cs))
-                                          done? (some #(= :acked (:ack %)) cs)]
+                                          done? (or (some #(= :acked (:ack %)) cs)
+                                                    (unknown-done? cs))]
                                       (cond
                                         (dlq-txns (:txn r)) {:id (:id r), :problem :still-in-dlq}
                                         (< 1 (count offs))  {:id (:id r), :problem :two-copies, :offsets offs}
@@ -306,6 +323,10 @@
          :replay-refused-but-moved (take 16 refused-moved)
          :replays         (count replays)
          :replays-unknown-applied (- (count applied) (count replays))
+         :copies-completed-unknown (count (filter #(let [cs (copies (:id %))]
+                                                    (and (not (some (fn [d] (= :acked (:ack d))) cs))
+                                                         (unknown-done? cs)))
+                                                 applied))
          :second-replays  (frequencies (keep :again replays))
          :deletes         (frequencies (map :type deletes))
          :batch-rule-redeliveries (count shadowed)

@@ -410,15 +410,24 @@
             rejected  (count (filter #(= :rejected (:ack %)) ds))
             partial   (count (filter :partial-ack? ops))
             ; --w2-extend: an ack refused although the broker had just
-            ; renewed its lease (answered success) for longer than the work.
-            renewed-refused (->> ds
-                                 (filter #(and (get-in % [:extend :renewed]) (= :rejected (:ack %))))
-                                 (mapv #(select-keys % [:v :partition :offset :op-index :extend])))]
+            ; renewed its lease (answered success) for longer than the work,
+            ; judged when the ack was ANSWERED inside the renewal (the op
+            ; completes with the ack's answer). Under a fault the renewal or
+            ; the ack can take seconds, and an ack that landed after the
+            ; renewal ran out is refused rightly: until 2026-11-16 those were
+            ; flagged too (campaign 3: all 16 flagged acks of three runs were
+            ; answered 0.2 to 4.6 s after their renewal ended).
+            renewed      (filter #(and (get-in % [:extend :renewed]) (= :rejected (:ack %))) ds)
+            inside?      #(< (:comp-time %) (second (window %)))
+            renewed-refused (->> renewed (filter inside?)
+                                 (mapv #(select-keys % [:v :partition :offset :op-index :extend])))
+            refused-late (count (remove inside? renewed))]
         {:valid?             (and (empty? twice) (empty? redeliv) (empty? overlaps)
                                   (empty? mismatch) (empty? internal) (empty? skips)
                                   (empty? payload) (empty? renewed-refused))
          :renewals           (->> ds (keep :extend) distinct (map :renewed) frequencies)
          :ack-refused-under-renewal (take 16 renewed-refused)
+         :ack-refused-after-renewal refused-late
          :payload-mismatch   (take 16 payload)
          :deliveries         (count ds)
          :redeliveries       (count (filter #(< 1 (or (:attempt %) 1)) ds))

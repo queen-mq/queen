@@ -3,6 +3,7 @@
   each, and one per anomaly the checker must flag. Run with `lein test` (no
   cluster)."
   (:require [clojure.test :refer :all]
+            [clojure.java.shell :as shell]
             [jepsen [checker :as checker]
                     [generator :as gen]
                     [history :as h]
@@ -12,6 +13,7 @@
             [jepsen.queen [membership :as qm]
                           [nemesis :as qn]]
             [jepsen.generator.context :as gctx]
+            [jepsen.generator.test :as gt]
             [jepsen.queen [db :as qdb]]
             [jepsen.queen.workload [dedup :as dedup]
                                    [elle :as elle]
@@ -763,10 +765,33 @@
           other "ERROR rsm: raft log writer poisoned; node stops why=raft log write failed: Input/output error (os error 5)"]
       (is (true? (qn/full-disk-stop-line? #{:disk-full} stop)))
       (is (true? (qn/full-disk-stop-line? [:disk-full :kill] stop)))
+      ; The same stop, from the other writes a full disk fails: the vote and
+      ; state file (campaign 3, 2026-11-15: diskfull-log failed on it), the
+      ; log's fsync and a truncation.
+      (doseq [why ["raft state write failed" "raft log fsync failed" "raft log truncation failed"]]
+        (is (true? (qn/full-disk-stop-line?
+                     #{:disk-full}
+                     (str "2026-11-15T16:53:31.117686452Z ERROR rsm: raft log writer poisoned; node stops "
+                          "why=" why ": No space left on device (os error 28)")))
+            why))
       (is (false? (qn/full-disk-stop-line? #{:kill} stop)) "not in a test that fills no disk")
       (is (false? (qn/full-disk-stop-line? #{:disk-full} lock)) "a poisoned lock stays a finding")
       (is (false? (qn/full-disk-stop-line? #{:disk-full} panic)) "a panic stays a finding")
-      (is (false? (qn/full-disk-stop-line? #{:disk-full} other)) "a write that failed for another reason")))
+      (is (false? (qn/full-disk-stop-line? #{:disk-full} other)) "a write that failed for another reason")
+      ; The same stop, cut short by the full disk it reports, the next line's
+      ; timestamp glued on (campaign 3, diskfull-pipeline-fix): until
+      ; 2026-11-16 the word "poisoned" in it was a finding.
+      (let [cut (str "2026-11-15T17:59:59.990000000Z ERROR rsm: raft log writer poisoned; node stops "
+                     "why=raft log write faile2026-11-15T18:00:00.020016484Z  WARN rsm: raft storage "
+                     "pressure changed")]
+        (is (true? (qn/full-disk-stop-line? #{:disk-full} cut)) "the line the full disk cut short")
+        (is (true? (qn/full-disk-stop-line? #{:disk-full} (subs cut 0 (+ 14 (.indexOf cut "why=raft")))))
+            "cut at the end of the file")
+        (is (false? (qn/full-disk-stop-line? #{:kill} cut)) "not in a test that fills no disk")
+        (is (false? (qn/full-disk-stop-line? #{:disk-full} (.replace cut "write faile" "write failed: Input/outp")))
+            "cut, and another reason")
+        (is (false? (qn/full-disk-stop-line? #{:disk-full} (str cut " thread 'x' panicked at src/y.rs:1:1")))
+            "a panic glued on stays a finding"))))
   (testing "the restarts are counted, by why"
     (let [r (checker/check
               (qn/fault-summary-checker) test-map
@@ -1005,3 +1030,57 @@
                                   (assoc-in pages [(dec (count pages)) :done?] false)
                                   pages))))]
       (is (= :unknown (:valid? r))))))
+
+(deftest w5-drain-outlasts-a-lease
+  ; Campaign 3, bin-pipeline-part: each thread's drain ended after eight empty
+  ; pops (about 2.6 s), before the 3 s lease of a pop whose answer was lost
+  ; ran out, and the 186 messages behind it counted as lost. A thread now
+  ; reads the end state only once it has also been quiet for `quiet-ns`.
+  (let [quiet 1000
+        ops   (gt/perfect (gen/clients (gen/each-thread
+                                         (pipeline/->ProcessUntilEmpty 2 quiet 0 nil false))))
+        by-p  (group-by :process ops)]
+    (is (= 2 (count by-p)) "one drain a client thread")
+    (doseq [[p os] by-p]
+      (let [[procs [fin & more]] (split-with #(= :process (:f %)) os)]
+        (is (= :final-read (:f fin)) (str "thread " p))
+        (is (empty? more) "one final read, then nothing")
+        (is (<= quiet (- (:time fin) (:time (first procs))))
+            (str "thread " p " read the end state after "
+                 (- (:time fin) (:time (first procs))) " ns of quiet"))))
+    (testing "with no quiet time, `need` empty pops end it, as before"
+      (let [ops (gt/perfect (gen/clients (gen/each-thread
+                                           (pipeline/->ProcessUntilEmpty 2 0 0 nil false))))]
+        (is (every? #(= [:process :process :final-read] (map :f %))
+                    (vals (group-by :process ops))))))))
+
+(deftest a-fired-s3-crash-point-restarts-the-node-once-without-it
+  ; Campaign 3, s3sink-crash-before_commit: QUEEN_S3_CRASH_AT aborts the broker
+  ; every time the sink reaches the point, on every node, so with
+  ; `before_commit` nothing was ever committed (28 aborts). The wrapper starts
+  ; the node again at once without the point, and keeps it off.
+  (let [d    (str (java.nio.file.Files/createTempDirectory
+                    "queen-wrapper" (make-array java.nio.file.attribute.FileAttribute 0)))
+        p    #(str d "/" %)
+        fake (p "fake-queen.sh")
+        log  (p "queen.log")
+        run  (p "run.sh")]
+    (spit fake (str "#!/usr/bin/env bash\n"
+                    "if [ ! -e " (p "ran") " ]; then\n"
+                    "  touch " (p "ran") "\n"
+                    "  echo \"ERROR queen-s3: QUEEN_S3_CRASH_AT fired: aborting at=$QUEEN_S3_CRASH_AT\"\n"
+                    "  kill -ABRT $$\n"
+                    "fi\n"
+                    "echo \"started again, crash point: ${QUEEN_S3_CRASH_AT:-none}\"\n"))
+    (.setExecutable (java.io.File. ^String fake) true)
+    (spit run (str "#!/usr/bin/env bash\nexport QUEEN_S3_CRASH_AT=before_commit\n"
+                   (qdb/wrapper-loop {:bin fake, :log log, :fired (p "data/s3-crash-fired")
+                                      :pid (p "queen.pid"), :wrapper-pid (p "wrapper.pid")})))
+    (let [r   (shell/sh "bash" "-c" (str "bash " run " >> " log " 2>&1"))
+          out (slurp log)]
+      (is (zero? (:exit r)) out)
+      (is (re-find #"queen exited rc=134" out) out)
+      (is (re-find #"restarting without it" out) out)
+      (is (re-find #"started again, crash point: none" out) out)
+      (is (.exists (java.io.File. ^String (p "data/s3-crash-fired")))))))
+

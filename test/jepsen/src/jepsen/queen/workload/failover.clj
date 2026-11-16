@@ -750,14 +750,32 @@
       (sorted-map 0 (one (:membership body))))))
 
 (defn- standby-voters
-  "{group [voter ids]} of the standby as its node 1 answers the membership
-  (one group: its own; several: each group's), or {:status s}."
+  "The standby's membership as its node 1 answers it: {:groups (membership-of
+  the answer)} (one group: its own; several: each group's), or {:status s}."
   [http test]
   (let [r (try (qh/request! http :get (str (qh/broker-url (seed-node test)) ms/path) nil 5000)
                (catch clojure.lang.ExceptionInfo _ nil))]
     (if (= 200 (:status r))
-      (membership-of (:body r))
+      {:groups (membership-of (:body r))}
       {:status (:status r)})))
+
+(defn grown
+  "grow-standby!'s reading of the membership it was answered (standby-voters):
+  :ok? when there are `group-count` groups, every group's voters are `want`,
+  and none is left between the two steps of a change (:joint). The groups are
+  a map keyed by number, which takes no keyword lookup: until 2026-11-16 the
+  answer itself was tested with (:status ...), a ClassCastException on every
+  200, and no --standby-seed run grew its standby (campaign 3)."
+  [members want group-count]
+  (let [groups (:groups members)
+        voters (into (sorted-map) (map (fn [[g m]] [g (:voters m)])) groups)
+        joint  (into (sorted-map) (keep (fn [[g m]] (when (:joint m) [g (:joint m)]))) groups)]
+    {:ok?    (and (some? groups)
+                  (= (long group-count) (count voters))
+                  (every? #(= want %) (vals voters))
+                  (empty? joint))
+     :voters (if groups voters members)
+     :joint  joint}))
 
 (defn- grow-standby!
   "--standby-seed, step 2, on a whole network: the standby's other nodes
@@ -779,24 +797,16 @@
         promote (when (seq others)
                   (seed-change! http test :promote "/promote"
                                 {:ids (mapv #(qdb/node-id test %) others)}))
-        members (standby-voters http test)
         want    (vec (sort (map #(qdb/node-id test %) sb)))
-        voters  (if (:status members)
-                  members
-                  (into (sorted-map) (map (fn [[g m]] [g (:voters m)])) members))
-        joint   (when-not (:status members)
-                  (into (sorted-map) (keep (fn [[g m]] (when (:joint m) [g (:joint m)]))) members))]
+        g       (grown (standby-voters http test) want (:raft-groups test 1))]
     (cond-> {:grown?  (and (every? :done? (remove nil? (conj adds promote)))
-                           (not (contains? voters :status))
-                           (= (long (:raft-groups test 1)) (count voters))
-                           (every? #(= want %) (vals voters))
-                           (empty? joint))
+                           (:ok? g))
              :adds    adds
              :promote promote
-             :voters  voters
+             :voters  (:voters g)
              :healed  (:healed healed)
              :link    (link-brief (qdb/standby-leaders http test))}
-      (seq joint) (assoc :joint joint))))
+      (seq (:joint g)) (assoc :joint (:joint g)))))
 
 (defn nemesis
   "  :seed-standby   --standby-seed: the standby's node 1 takes the source's

@@ -48,6 +48,12 @@
       (let [r (qc test-map [(enq 0 1) (deq 1 s (+ s 1000) 1 :ack :rejected :ext renewed)])]
         (is (not (:valid? r)))
         (is (seq (:ack-refused-under-renewal r)))))
+    (testing "an ack answered after the renewal ran out may have landed after
+              it: refused rightly, not judged (campaign 3, w2-extend-*)"
+      (let [r (qc test-map [(enq 0 1) (deq 1 s (* 10 s) 1 :ack :rejected :ext renewed)])]
+        (is (:valid? r))
+        (is (empty? (:ack-refused-under-renewal r)))
+        (is (= 1 (:ack-refused-after-renewal r)))))
     (testing "a renewal the broker refused extends nothing"
       (let [r (qc test-map [(enq 0 1) (deq 1 s (+ s 1000) 1 :ack :rejected
                                            :ext (assoc renewed :renewed false))

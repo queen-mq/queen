@@ -664,19 +664,46 @@
       {:filled-bytes size
        :left         (str/trim (c/exec :df :-B1 :--output=avail "/opt/queen"))})))
 
+(def full-disk-stop-reasons
+  "Why a node stops when a write of its raft log writer fails for lack of
+  space: the stop manage/recovery.mdx describes (\"At 100% it logs `No space
+  left on device` and stops\"). Any of the writer's writes can hit the full
+  disk: the log's write, its fsync or a truncation, and the vote and state
+  file (log_store.rs; campaign 3 met the state write)."
+  (mapv #(str "raft " % " failed: No space left on device")
+        ["log write" "log fsync" "log truncation" "state write"]))
+
+(def ^:private stop-prefix "raft log writer poisoned; node stops why=")
+
 (def full-disk-stop-line
-  "What a node logs when a write to its raft log fails for lack of space and
-  it stops: the stop manage/recovery.mdx describes (\"At 100% it logs `No
-  space left on device` and stops\"). \"poisoned\" is the log writer's state
-  here, not a panic and not a poisoned lock."
-  #"raft log writer poisoned; node stops why=raft log write failed: No space left on device")
+  "The whole stop line. \"poisoned\" is the log writer's state here, not a
+  panic and not a poisoned lock."
+  (re-pattern (str (java.util.regex.Pattern/quote stop-prefix)
+                   "(" (str/join "|" (map #(java.util.regex.Pattern/quote %)
+                                          full-disk-stop-reasons))
+                   ")")))
+
+(defn- cut-stop-line?
+  "The stop line cut short by the full disk it reports: the line goes on, from
+  where it was cut, with the next line's timestamp (written once the fault
+  freed the disk), or ends there; what it says of the reason is the start of
+  one of full-disk-stop-reasons. Campaign 3, diskfull-pipeline-fix: `...why=raft
+  log write faile2026-11-15T18:00:00.020016484Z  WARN rsm: raft storage
+  pressure changed ...`."
+  [line]
+  (when-let [i (str/index-of line stop-prefix)]
+    (let [tail (subs line (+ i (count stop-prefix)))
+          m    (re-matcher #"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}" tail)
+          said (if (.find m) (subs tail 0 (.start m)) tail)]
+      (boolean (some #(and (str/starts-with? % said) (not= % said)) full-disk-stop-reasons)))))
 
 (defn full-disk-stop-line?
   "Is `line` of a queen.log the stop a full disk causes, in a test whose
-  faults fill disks? Only there is it no finding for the panic checker."
+  faults fill disks? Only there is it no finding for the panic checker: the
+  whole line, or the line the full disk cut short (cut-stop-line?)."
   [faults line]
   (boolean (and (contains? (set faults) :disk-full)
-                (re-find full-disk-stop-line line)
+                (or (re-find full-disk-stop-line line) (cut-stop-line? line))
                 (not (re-find #"panicked at|NA-QLOG-I1" line)))))
 
 (defn disk-full-restart
