@@ -56,6 +56,22 @@ pub(super) fn local_gather(
     }
 }
 
+/// `ctx` under a fresh request id, for one more command of the same request.
+/// A request id names ONE command: the batcher answers a command whose id it
+/// has seen as a replay of that command, without running it
+/// (`finish_delete_chunks`). Until 2026-11-16 a queue's delete
+/// sent its filtered groups' hidden queues and then the queue itself under the
+/// caller's one id, and a group's delete sent its hidden queue under the id
+/// of its own first command: only the first delete ran, every other one was
+/// answered as done, and the queue stayed (same id, same messages, a push of
+/// the same id answered `duplicate`) behind a `deleted: true`.
+pub(super) fn next_command(ctx: &ReqCtx) -> ReqCtx {
+    ReqCtx {
+        request_id: crate::util::uuidv7_bytes(),
+        ..ctx.clone()
+    }
+}
+
 impl RaftFacade {
     pub(super) async fn api_impl(&self, ctx: ReqCtx, req: ApiReq) -> Result<ApiOut, RsmError> {
         match (req.method.as_str(), req.path.as_str()) {
@@ -414,7 +430,7 @@ impl RaftFacade {
                     ));
                 }
                 for hidden in r.readers.iter().filter(|q| crate::rsm::route::is_hidden(q)) {
-                    self.api_delete_queue(ctx.clone(), hidden).await?;
+                    self.api_delete_queue(next_command(&ctx), hidden).await?;
                 }
             }
         }

@@ -2079,3 +2079,108 @@ async fn unread_is_only_what_no_group_and_no_reader_can_take() {
         (2, 0)
     );
 }
+
+/// A queue with filtered groups: its delete takes their hidden queues, then
+/// the queue itself, each as its own command. Until 2026-11-16 every one of
+/// them went with the caller's single request id, and a request id seen
+/// before is a replay the broker answers without running it: the first
+/// hidden queue went, the queue and the other hidden queues stayed (same id,
+/// same messages, a push of the same id answered `duplicate`), and the
+/// answer said `deleted: true`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_queue_with_filtered_groups_is_deleted_whole() {
+    let (facade, _dir) = open("filtered-delete").await;
+    configure(&facade, json!({"queue":"src","options":{}})).await;
+    for g in ["a", "b"] {
+        pop(
+            &facade,
+            "src",
+            Some(g),
+            group_options(Some("data.kind = 'x'"), "all"),
+        )
+        .await
+        .expect("register");
+    }
+    let item = json!([{"queue":"src","partition":"p","transactionId":"t1","payload":{"kind":"x"}}]);
+    let pushed = push(&facade, item.clone()).await;
+    assert_eq!(pushed[0]["status"], "queued", "{pushed}");
+    let (s, body) = api(
+        &facade,
+        "DELETE",
+        "/api/v1/resources/queues/src",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!((s, body["deleted"].clone()), (200, json!(true)), "{body}");
+    let (s, body) = api(
+        &facade,
+        "GET",
+        "/api/v1/resources/queues/src",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(s, 404, "the queue is gone: {body}");
+    for g in ["a", "b"] {
+        let hidden = crate::rsm::route::hidden_queue("src", g);
+        assert!(
+            facade
+                .queue_config_of(crate::config::DEFAULT_TENANT, &hidden)
+                .await
+                .expect("read")
+                .is_none(),
+            "{hidden} stayed"
+        );
+    }
+    let again = push(&facade, item).await;
+    assert_eq!(
+        again[0]["status"], "queued",
+        "a push of the same id makes a new message: {again}"
+    );
+}
+
+/// A filtered group's delete takes its hidden queue with it, as a command of
+/// its own: the group's own first command already has the caller's request
+/// id, and until 2026-11-16 the hidden queue's delete went under it too and
+/// was answered as done without running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_filtered_groups_delete_takes_its_hidden_queue() {
+    let (facade, _dir) = open("filtered-group-delete").await;
+    configure(&facade, json!({"queue":"src","options":{}})).await;
+    pop(
+        &facade,
+        "src",
+        Some("a"),
+        group_options(Some("data.kind = 'x'"), "all"),
+    )
+    .await
+    .expect("register");
+    let hidden = crate::rsm::route::hidden_queue("src", "a");
+    let tenant = crate::config::DEFAULT_TENANT;
+    assert!(
+        facade
+            .queue_config_of(tenant, &hidden)
+            .await
+            .expect("read")
+            .is_some(),
+        "the group made its hidden queue"
+    );
+    let (s, body) = api(
+        &facade,
+        "DELETE",
+        "/api/v1/consumer-groups/a",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert!(
+        facade
+            .queue_config_of(tenant, &hidden)
+            .await
+            .expect("read")
+            .is_none(),
+        "{hidden} stayed: {body}"
+    );
+}

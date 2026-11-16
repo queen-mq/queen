@@ -64,6 +64,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-11-13 (a membership change outlives its request): facade/real.rs
 # rewords the 504 a membership change answers. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): facade/real.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-16 (filtered-group delete): phase2.rs and phase2/admin.rs send each hidden queue's delete as a command of its own (next_command); until now only the first delete of a queue with filtered groups ran. Nothing this page states changes.
 ---
 
 A queue is a named set of partitions that share one configuration. You never have to create one: the first push that names a queue creates it, with the defaults. Configure it when you want other settings.

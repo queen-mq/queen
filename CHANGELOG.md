@@ -136,6 +136,14 @@ past the last entry on disk counts as unknown: the leader sends it again. Nodes 
 that state start again with this release. No acknowledged write was lost: the other nodes held the
 entries. Found by the Jepsen disk-full tests on 2.9.0-beta.1.
 
+**Fixed: deleting a queue with filtered groups deletes it.** The delete answered `deleted: true`,
+but only the first of its filtered groups' hidden queues went: the queue itself stayed, with its id
+and its messages, and a push of a transactionId it held came back `duplicate`. Deleting a filtered
+group could leave its hidden queue the same way. Why: the delete sent each hidden queue's delete
+and then the queue's own under the request's one id, and the broker answers a request id it has
+seen as the replay of that command, without running it. Each one now goes as a command of its own.
+Plain, encrypted and normal-group queues were not affected.
+
 **Fixed: a dead letter always carries its message.** A message dead-lettered by a `failed` ack
 that spent its last retry, or by a `dlq` ack, could be filed without its payload: the DLQ listed it
 with its transaction id and `data: null`, on every node. Such an ack is now refused with a 503 (the

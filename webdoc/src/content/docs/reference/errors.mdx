@@ -122,6 +122,7 @@ sourceOfTruth:
 # This page: the 504 sentence under Raft membership codes says so.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): facade/real.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (a dead letter always carries its message): consume/ack.rs and txn.rs refuse, retryably (503 `retry`, nothing moved), an ack or a transaction that would file a dead letter whose message the node that took it has not read yet: one more case of the `retry` row, which now names it.
+# sourceOfTruth re-read 2026-11-16 (filtered-group delete): phase2.rs and phase2/admin.rs send each hidden queue's delete as a command of its own (next_command); until now only the first delete of a queue with filtered groups ran. Nothing this page states changes.
 ---
 
 When QueenMQ refuses a call it answers a status code and a JSON body with a stable code, and the code

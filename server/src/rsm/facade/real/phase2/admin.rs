@@ -84,7 +84,7 @@ impl RaftFacade {
             for q in queues.iter().filter(|q| !crate::rsm::route::is_hidden(q)) {
                 let hidden = crate::rsm::route::hidden_queue(q, group);
                 if self.queue_config_of(&ctx.tenant, &hidden).await?.is_some() {
-                    self.api_delete_queue_routed(ctx.clone(), &hidden, true)
+                    self.api_delete_queue_routed(super::next_command(&ctx), &hidden, true)
                         .await?;
                 }
             }
