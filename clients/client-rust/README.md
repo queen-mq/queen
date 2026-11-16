@@ -10,6 +10,22 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 serde_json = "1"
 ```
 
+## Upgrading from 2.8
+
+2.9.0 takes `queen-protocol` 1.7.0, whose request types gained fields: `headers` on `PushItem`,
+`TxnPushItem`, `TimerOperation` and `SinkPushItem`, and the variant `KvReason::Expired`. Code that
+writes one of those types as a struct literal no longer compiles: build it with `new(...)` and its
+setters, which work on 2.8 too, or add `headers: None`. A `match` on `KvReason` needs an arm for
+`Expired`.
+
+```rust,no_run
+use queen_mq::TxnPushItem;
+use serde_json::json;
+let item = TxnPushItem::new("shipments", json!({ "orderId": 9137 }))
+    .partition("order-9137")
+    .transaction_id("ship-9137");
+```
+
 ## Quick start
 
 ```rust

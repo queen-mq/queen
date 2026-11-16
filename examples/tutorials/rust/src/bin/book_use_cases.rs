@@ -174,13 +174,10 @@ async fn nightly_worker(queen: Queen) -> queen_mq::Result<&'static str> {
     let committed = queen
         .transaction()
         .guard(&lock) // commits only while the lock is ours
-        .push_item(TxnPushItem {
-            queue: "daily-reports".into(),
-            partition: None,
-            payload: json!({ "day": day, "bookings": 412 }),
-            transaction_id: Some(format!("report-{day}")),
-            trace_id: None,
-        })?
+        .push_item(
+            TxnPushItem::new("daily-reports", json!({ "day": day, "bookings": 412 }))
+                .transaction_id(format!("report-{day}")),
+        )?
         .commit()
         .await;
     sleep_ms(1500).await; // guide:hide
@@ -378,13 +375,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .transaction()
                     .ack(&msg)
                     .kv(shipping)
-                    .push_item(TxnPushItem {
-                        queue: "shipping".into(),
-                        partition: Some(order_id.clone()),
-                        payload: json!({ "orderId": order_id }),
-                        transaction_id: Some(format!("ship-{order_id}")),
-                        trace_id: None,
-                    })?
+                    .push_item(
+                        TxnPushItem::new("shipping", json!({ "orderId": order_id }))
+                            .partition(order_id.clone())
+                            .transaction_id(format!("ship-{order_id}")),
+                    )?
                     .commit()
                     .await?;
                 VERDICTS.lock().unwrap().push(result.success); // guide:hide
@@ -410,13 +405,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let stale = queen
             .transaction()
             .kv(stale)
-            .push_item(TxnPushItem {
-                queue: "shipping".into(),
-                partition: Some("order-2001".into()),
-                payload: json!({}),
-                transaction_id: Some("ship-again".into()),
-                trace_id: None,
-            })?
+            .push_item(
+                TxnPushItem::new("shipping", json!({}))
+                    .partition("order-2001")
+                    .transaction_id("ship-again"),
+            )?
             .commit()
             .await?;
         check(!stale.success, "a transition from a stale version rolls back");

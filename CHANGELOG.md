@@ -3,11 +3,22 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## 2.9.0 - 2026-11-16
 
-**Upgrading: a rolling restart; the new features turn on by themselves once every node runs this
-release (cluster version 8).** Until then a `where`, a reading queue, headers and `link` are
-refused with `cluster_version`, and nothing a node writes changes form.
+**Upgrading from 2.8.1: a rolling restart; the new features turn on by themselves once every node
+runs 2.9.0 (cluster version 8).** Until then a `where`, a reading queue, headers and `link` are
+refused with `cluster_version`, and nothing a node writes changes form. Once the version moves, a
+2.8.1 node no longer starts on the data: to keep the way back open while 2.9.0 proves itself, set
+`QUEEN_RAFT_CLUSTER_VERSION_MS=0` on every node, and remove it when you stay. The JavaScript,
+Python, Go, Rust, PHP and C++ clients move to 2.9.0 and `queen-protocol` to 1.7.0; queenctl stays
+at 2.7.1 and the supervisor at 0.9.0, unchanged.
+
+**Rust: request types gained fields (breaking for struct literals).** `queen-protocol` 1.7.0, which
+the Rust client takes and re-exports, adds `headers` to `PushItem`, `TxnPushItem`, `TimerOperation`
+and `SinkPushItem`, and the variant `KvReason::Expired`. Code that writes one of those types as a
+struct literal no longer compiles: build it with `new(...)` and its setters (`.partition()`,
+`.transaction_id()`, `.headers()`), which work on 2.8.1 too, or add `headers: None`; a `match` on
+`KvReason` needs an arm for `Expired`. The Rust tutorials now build them that way.
 
 **Routing without copies: filtered groups, reading queues and `link`.** A consumer group can take
 only the messages a `where` takes (`.group('billing').where('data.kind', '=', 'order.paid')`),
@@ -54,6 +65,18 @@ takes them and its message fires with them; a dead letter keeps them and its rep
 again. Kafka records keep their headers as before, and their UTF-8 ones are also stored as Queen
 headers. A refused push item now says why, as `error`. Why: without headers, trace context and
 routing facts lived inside payloads.
+
+**A MySQL source, in the broker.** The broker streams MySQL tables into queues by reading the binlog
+the way a replica does, with no other process: `PUT /api/v1/connectors/:name` with `"engine":
+"mysql"`. Each committed row change is a message in the partition named after the row's key, in
+commit order, shaped like the PostgreSQL source's with `gtid` in place of `lsn` and `xid`; the rows
+already there are copied first (`snapshot: "initial"`) while the binlog streams, with no lock. A
+MySQL transaction's changes and the GTID set the source reached commit as one QueenMQ transaction,
+so after a crash nothing is lost and nothing is sent twice. A rename stops the source, an `ALTER` is
+followed, and text is read in its column's charset. It needs MySQL 8.0 or later (8.0, 8.4 and 9.7
+tested; not MariaDB) with GTIDs on and `binlog_row_metadata=FULL`, and `QUEEN_ENCRYPTION_KEY`, which
+seals the stored password. Why: getting changes out of MySQL usually means Debezium, a Kafka
+Connect cluster and Kafka.
 
 **One planner on every thread: the footprint scheduler.** The leader's lanes (`pid % 8`) and its
 one control step are gone. Before a cycle is planned, every command names what it reads and
@@ -161,6 +184,15 @@ snapshot. Why: the start treated the restart the snapshot asks for as a failure 
 was involved, but a FATAL that reads like a broken disk could send an operator to the recovery
 page, and a supervisor that restarts on 75 only left the node down. Found by the Jepsen membership
 tests (in 2.8.1 too).
+
+**Fixed: a change of voters finishes even when its request goes away.** A membership change, such as
+promoting a standby, is made in two steps, and the second ran inside the request: a change whose
+request ended first (its `timeoutMs`, the operator's connection closing, or the follower that
+forwarded it restarting to load a snapshot) stopped between the two. The group stayed joint and
+refused every later change with `409 in_flight` until an operator finished it, and after a deadline
+the leader paused its writes for up to two minutes. The change now runs on its own until both steps
+are taken; a request that ends first answers `504`, and the leader goes on. Found by the Jepsen
+standby test (in 2.8.1 too).
 
 **Fixed: an acquire takes one permit and answers it as new, even when a node's clock runs ahead.**
 When the clock of the node that took an acquire ran ahead of the leader's by more than the lock's

@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "queen-engine"
-version = "2.9.0-beta.3"
+version = "2.9.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -2224,7 +2224,7 @@ dependencies = [
 
 [[package]]
 name = "queen-protocol"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "serde",
  "serde_json",

@@ -134,13 +134,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .ack(&msg) // the input is done
                     .kv_put("orders", &format!("order-{id}"), json!({ "status": "paid" }),
                         Expiry::Seconds(7 * 86400))? // the order's state
-                    .push_item(TxnPushItem { // the next event, same customer
-                        queue: "shipments".into(),
-                        partition: Some(msg.partition.clone()),
-                        payload: json!({ "orderId": id }),
-                        transaction_id: Some(format!("ship-{id}")),
-                        trace_id: None,
-                    })?
+                    .push_item( // the next event, same customer
+                        TxnPushItem::new("shipments", json!({ "orderId": id }))
+                            .partition(msg.partition.clone())
+                            .transaction_id(format!("ship-{id}")),
+                    )?
                     .schedule("reminders", &format!("review-{id}"), Duration::from_secs(86400), // a message tomorrow
                         json!({ "orderId": id, "customer": msg.data["customer"] }).to_string())
                     .commit()
@@ -193,13 +191,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let committed = queen
             .transaction()
             .guard(&lock) // commits only while the lock is ours
-            .push_item(TxnPushItem {
-                queue: "reports".into(),
-                partition: None,
-                payload: json!({ "day": "2026-10-22" }),
-                transaction_id: Some("report-2026-10-22".into()),
-                trace_id: None,
-            })?
+            .push_item(
+                TxnPushItem::new("reports", json!({ "day": "2026-10-22" }))
+                    .transaction_id("report-2026-10-22"),
+            )?
             .commit()
             .await;
         lock.release().await?;
