@@ -156,7 +156,9 @@ cluster beside the old one and move the clients to it.
 \item \textbf{Give every node the same disk size.} A node refuses its own clients' writes at 85\%
 full, but writes accepted by the other nodes keep arriving until its disk is full.
 \item \textbf{Run NTP on every machine.} Leases are timed on the leader's clock, and they stay
-exclusive across a leader change only while the clocks agree within half a second.
+exclusive across a leader change only while the clocks agree within half a second. Further apart,
+nothing is lost or written twice, but a lock or a transaction relayed during a leader change can be
+answered wrongly.
 \end{itemize}
 
 On the site: \href{https://queenmq.com/manage/docker/}{queenmq.com/manage/docker}.

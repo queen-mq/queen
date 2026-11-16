@@ -116,7 +116,7 @@ A 503 means the outcome is not known: the write may still commit (`retry`, `time
 
 - **This is testing, not proof.** Jepsen finds bugs; it cannot show there are none.
 - **The campaigns run the HTTP API on one raft group.** The Kafka port, and several raft groups per node, are not in them.
-- **Clocks.** Lease exclusivity across a change of leader needs the nodes' clocks within 500 ms of each other (`QUEEN_RAFT_MAX_CLOCK_SKEW_MS`).
+- **Clocks.** Keep the nodes' clocks within 500 ms of each other (`QUEEN_RAFT_MAX_CLOCK_SKEW_MS`): lease exclusivity across a change of leader depends on it. Further apart (our Jepsen tests also jump clocks by minutes), nothing is lost or written twice, but some answers can be wrong: a lock renew can answer `lost` while the lock still holds, and the owner's next acquire then answers `already: true` with the old token (a guarded transaction still refuses a stale writer); a transaction a node relayed while the leader changed can be answered rolled back although it committed, once.
 - **Disks.** Losing a majority of the disks for good can lose acked data. Raft survives the loss of a minority, and no more.
 - **A standby cluster** replays the cluster a moment later. Promoting it after the cluster is lost gives up the acked writes it had not read yet.
 - **`/health` is not a write.** A node cut off from the majority answers 200 for five more seconds. To know a cluster can commit, write to it (see [Upgrades and monitoring](/manage/upgrades-monitoring/)).
