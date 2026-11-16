@@ -42,7 +42,12 @@
     4. per permit, a grant invoked after another completed has a higher
        token, and no two grants share one;
     5. an `already` answer names a permit that owner was granted, or may have
-       been (an acquire or a renew of its own with an unknown outcome);
+       been (an acquire or a renew of its own with an unknown outcome); not
+       judged under clock faults: a node whose clock runs past a permit's
+       lifetime judges its own fresh write expired, so a grant or a renew can
+       be answered as nothing (`lost`, made again) while its row holds, and
+       the owner's next acquire is answered `already` with that row's token
+       (rerun of campaign 3, 2026-11-16; fencing held throughout);
     6. leases are exclusive in real time: a permit is not handed to another
        owner before the lease of the grant right before it could have ended
        (unless its holder released, or its state is unknown). Durations, on
@@ -501,7 +506,7 @@
                                   (and (empty? went-back) (empty? two-owners) (empty? nowhere)
                                        (empty? phantom) (empty? missing)
                                        (empty? not-rising) (empty? twice)
-                                       (empty? already-bad) (empty? early)
+                                       (or clock? (empty? already-bad)) (empty? early)
                                        (empty? stale) (empty? bad-slot)))
              :limit             limit
              :grants            (count (filter #(= :acquire (:f %)) grants))
@@ -523,6 +528,7 @@
              :token-not-rising  (take 16 not-rising)
              :token-granted-twice (take 16 twice)
              :already-from-nowhere (take 16 already-bad)
+             :already-judged?   (not clock?)
              :taken-early-count (count early)
              :taken-early       (take 16 early)
              :early-judged?     (not clock?)

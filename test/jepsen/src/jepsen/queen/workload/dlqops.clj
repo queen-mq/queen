@@ -176,15 +176,27 @@
                :replayed-as (get-in r1 [:body :replayedAs :offset])))
       (assoc op :type :fail, :error :empty-dlq))))
 
+(defn delete-outcome
+  "A dead letter's delete's completion type: :ok when answered 200 or 204 and
+  not success false; :fail when refused for certain (a 4xx, or success
+  false); otherwise (a 5xx, a 503 timeout, no leader) unknown, :info: the
+  delete may have been applied. Until 2026-11-16 every answer but 200/204 was
+  :fail, and a dead letter whose delete timed out and did apply counted as
+  lost (rerun of campaign 3, dlqops-pause: q4588)."
+  [r]
+  (cond (:exception r)                                           (unknown-or-fail r)
+        (and (#{200 204} (:status r))
+             (not (false? (get-in r [:body :success]))))         :ok
+        (and (integer? (:status r)) (< (:status r) 500))         :fail
+        :else                                                    :info))
+
 (defn- delete-dlq!
   [client test op]
   (let [page (try (read-dlq! client test) (catch clojure.lang.ExceptionInfo e nil))]
     (if-let [d (and (seq page) (rand/nth page))]
       (let [r (call client :delete (str (:base client) "/api/v1/messages/" (enc (:pid d)) "/" (enc (:txn d)))
                     nil (:client-timeout-ms test))]
-        (assoc op :type (cond (:exception r) (unknown-or-fail r)
-                              (and (#{200 204} (:status r)) (not (false? (get-in r [:body :success])))) :ok
-                              :else :fail)
+        (assoc op :type (delete-outcome r)
                :id (:id d), :txn (:txn d), :value (:v d)
                :answer (when-not (:exception r) [(:status r) (:body r)])))
       (assoc op :type :fail, :error :empty-dlq))))

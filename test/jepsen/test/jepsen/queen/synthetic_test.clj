@@ -414,7 +414,14 @@
   (testing "`already` for an owner that never had the permit"
     (let [r (w11 (w11-history {:extra (acq 5 1 "E" 30 :already? true)}))]
       (is (false? (:valid? r)))
-      (is (= ["E"] (map :owner (:already-from-nowhere r))))))
+      (is (= ["E"] (map :owner (:already-from-nowhere r))))
+      (is (true? (:already-judged? r)))))
+  (testing "the same under clock faults: reported, not judged (rerun of campaign 3:
+            a node with its clock ahead answered a renew that held `lost`)"
+    (let [r (w11 1 {:faults #{:clock}} (w11-history {:extra (acq 5 1 "E" 30 :already? true)}))]
+      (is (true? (:valid? r)) (pr-str r))
+      (is (= ["E"] (map :owner (:already-from-nowhere r))))
+      (is (false? (:already-judged? r)))))
   (testing "a get shows a token older than one already granted"
     (let [r (w11 (w11-history {:get-token 11}))]
       (is (false? (:valid? r)))

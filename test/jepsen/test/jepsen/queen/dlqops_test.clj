@@ -136,3 +136,15 @@
     (testing "with no drain in the history either"
       (let [r (run (concat base unknown tail))]
         (is (some #(= :copy-never-completed (:problem %)) (:replay-problems r)))))))
+
+(deftest delete-answers
+  ; Rerun of campaign 3, dlqops-pause: a delete answered 503 timeout did
+  ; apply, and its dead letter counted as lost.
+  (is (= :ok (w/delete-outcome {:status 200, :body {:deleted 1, :success true}})))
+  (is (= :ok (w/delete-outcome {:status 204, :body nil})))
+  (is (= :fail (w/delete-outcome {:status 404, :body {:error "not found"}})) "refused for certain")
+  (is (= :fail (w/delete-outcome {:status 200, :body {:success false}})))
+  (is (= :info (w/delete-outcome {:status 503, :body {:error "the request deadline elapsed", :code "timeout"}}))
+      "a 503 timeout may have applied")
+  (is (= :info (w/delete-outcome {:status 500, :body {}}))))
+
