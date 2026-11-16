@@ -37,6 +37,8 @@ const FILES = [
   join(WEBDOC, "src", "pages", "index.astro"),
   join(WEBDOC, "src", "components", "Chart.astro"),
   join(WEBDOC, "src", "components", "Header.astro"),
+  join(WEBDOC, "src", "components", "QueenMap.astro"),
+  join(WEBDOC, "src", "lib", "map.ts"),
   join(WEBDOC, "src", "lib", "figure-markdown.ts"),
   join(WEBDOC, "src", "lib", "home.ts"),
 ];

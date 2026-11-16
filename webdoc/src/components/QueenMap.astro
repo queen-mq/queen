@@ -1,0 +1,1783 @@
+---
+/**
+ * The map of QueenMQ (/map/): every core as a yellow icon, every option or
+ * feature of a core as a quiet grey dot that turns yellow when you point at it,
+ * an overlay for the one you click, a field to find an option by a word you
+ * know, and under the map the goals ("I want to...") that number a pattern's
+ * pieces in the order you use them. The words are src/lib/map.ts (also the
+ * page's markdown twin, with every detail); the drawing's numbers are
+ * src/lib/map-geometry.ts (also the page's preview image, src/pages/og/map.png.ts);
+ * the code is the programs that run (src/lib/book-code.ts) or a docs page's own
+ * example.
+ *
+ * The layout is Alice's sketch (2026-11-16), on a 1210-unit grid:
+ *
+ *   Push -> Queue -> a bus to the three ways a queue is read: Connectors (top),
+ *   Pop (middle, on the line), Stream (bottom). The connectors' line goes back
+ *   into Push: a source pushes into queues like any producer.
+ *   Under them, one transaction: it acks the queue, pushes the next messages
+ *   back into Push, writes KV and locks, and schedules timers.
+ *   Ephemeral queues stand apart, their icon dashed: they are outside the log.
+ *
+ * Each box's dots sit on the side with room, and each dot's curve runs into one
+ * point on the box, as in the sketch. Hover a dot or a box to light it and read
+ * one line; click it to read it in full in an overlay (and in the URL, /map/#lease).
+ */
+import { Code } from "./ui/code";
+import { MAP_TITLE, cores, goals, intro, entryById, type CoreId, type MapEntry } from "@/lib/map";
+import { W, VIEW, ICON, NAME_Y, R, boxes, flows, txFlows, NOTE, iconSvg, stepMark } from "@/lib/map-geometry";
+import { sdkCode } from "@/lib/book-code";
+
+const byId = entryById();
+
+const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+/** Text with `inline code` in backticks, as HTML. */
+const inline = (s: string) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
+/** The same text without the backticks, for a tooltip. */
+const plain = (s: string) => s.replace(/`([^`]+)`/g, "$1");
+
+function codeOf(e: MapEntry): { lang: string; code: string } | null {
+  if (e.snippet) return e.snippet;
+  if (e.code) {
+    const js = sdkCode(e.code, "/map/").find((v) => v.lang.id === "js");
+    if (js?.code) return { lang: "js", code: js.code };
+  }
+  return null;
+}
+
+
+/** The overlay's bodies, in the order of the drawing. */
+const LIST_ORDER: CoreId[] = ["push", "queue", "connectors", "pop", "stream", "transaction", "kv", "timers", "ephemeral"];
+const listed = LIST_ORDER.map((id) => cores.find((c) => c.id === id)!);
+
+/** An entry's other names, as [term, broker] pairs. */
+const akaOf = (e: MapEntry) => Object.entries(e.aka ?? {}).flatMap(([where, terms]) => terms.map((t) => [t, where]));
+/** What the find field reads of an entry: its name, its line, its settings' names and its other names. */
+const findText = (e: MapEntry) =>
+  [e.label, plain(e.line), ...(e.settings ?? []).map((s) => s.name), ...akaOf(e).map(([t]) => t)].join(" ").toLowerCase();
+
+/** What the script needs, as data. */
+const data = {
+  entries: Object.fromEntries(
+    [...byId].map(([id, { entry, core }]) => [
+      id,
+      {
+        core: core.id,
+        label: entry.label,
+        line: plain(entry.line),
+        isCore: id === core.id,
+        since: entry.since ?? null,
+        find: findText(entry),
+        aka: akaOf(entry),
+      },
+    ]),
+  ),
+  cores: Object.fromEntries(cores.map((c) => [c.id, { label: c.label, items: c.items.map((i) => i.id) }])),
+  goals: Object.fromEntries(goals.map((g) => [g.id, { label: g.label, lights: g.steps.map((st) => st.id), href: g.href }])),
+};
+---
+
+<section class="qm" data-qm data-qm-data={JSON.stringify(data)} data-pagefind-body data-nb-shortcut-scope aria-labelledby="qm-title">
+  <div class="qm-stage" data-qm-stage>
+    {/* The page is `mode: custom`: no title block above the map. Its title shows
+        in the top bar, beside the logo (Header.astro); the h1 here is for screen
+        readers and search engines. The field to find an option by a word you
+        know (its name, a word of its line, a setting's name, or what another
+        broker calls it) sits in the middle of the top bar on a wide screen, and
+        above the map on a narrow one. */}
+    <h1 class="sr-only" id="qm-title">{MAP_TITLE}</h1>
+    <div class="qm-top">
+      <div class="qm-find" data-qm-find>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.75"></circle><path d="M10.5 10.5L14 14"></path></svg>
+        <input
+          type="search"
+          data-qm-find-input
+          placeholder="Find: retries, exchange, offset…"
+          aria-label="Find an option or a setting on the map, by its name or another broker's name for it"
+          autocomplete="off"
+          spellcheck="false"
+          data-nb-shortcut-for="/"
+        />
+        <span class="qm-find-n" data-qm-find-n aria-live="polite"></span>
+        <kbd class="qm-find-key qm-find-slash" data-nb-shortcut-hint="/">/</kbd>
+        <kbd class="qm-find-key qm-find-esc">Esc</kbd>
+      </div>
+      <p class="qm-find-why" data-qm-find-why></p>
+    </div>
+    <div class="qm-canvas" data-qm-canvas>
+      <svg
+        class="qm-svg"
+        data-qm-svg
+        viewBox={`0 ${VIEW.y} ${W} ${VIEW.h}`}
+        role="group"
+        aria-label="The map of QueenMQ: its parts as boxes, their options as dots"
+        xmlns="http://www.w3.org/2000/svg"
+      >
+        <g class="qm-flows" aria-hidden="true">
+          {
+            flows.map((f) => (
+              <g>
+                <path class="qm-wire" d={f.d} />
+                <path class="qm-head" d={f.head} />
+              </g>
+            ))
+          }
+          <text class="qm-note" x={NOTE.sources.x} y={NOTE.sources.y} text-anchor="middle">sources push in</text>
+        </g>
+
+        <g class="qm-txflows" aria-hidden="true">
+          {
+            txFlows.map((f) => (
+              <g>
+                <path class="qm-wire" d={f.d} />
+                <path class="qm-head" d={f.head} />
+              </g>
+            ))
+          }
+          <text class="qm-note" x={NOTE.ack.x} y={NOTE.ack.y}>ack</text>
+          <text class="qm-note" x={NOTE.next.x} y={NOTE.next.y} text-anchor="middle">next pushes</text>
+        </g>
+
+        {
+          boxes.map((bx) => (
+            <g>
+              <g
+                class:list={["qm-node", "qm-core", bx.core.id === "ephemeral" && "qm-ghost"]}
+                data-id={bx.core.id}
+                tabindex="0"
+                role="button"
+                aria-label={bx.core.label}
+              >
+                <rect class="qm-hit" x={bx.hit.x} y={bx.hit.y} width={bx.hit.w} height={bx.hit.h} />
+                <path class="qm-fanhead" d={bx.fanHead} />
+                <circle class="qm-ring" cx={bx.cx} cy={bx.cy} r={ICON / 2 + 13} />
+                <g
+                  class="qm-icon"
+                  transform={`translate(${bx.cx - ICON / 2} ${bx.cy - ICON / 2}) scale(${ICON / 48})`}
+                  set:html={iconSvg(bx.core.id)}
+                />
+                <text class="qm-node-label" x={bx.cx} y={bx.cy + NAME_Y} text-anchor="middle" dominant-baseline="central">
+                  {bx.core.label}
+                </text>
+              </g>
+              {bx.dots.map((d) => (
+                <g class="qm-node qm-dot" data-id={d.entry.id} tabindex="0" role="button" aria-label={`${d.entry.label}, ${bx.core.label}`}>
+                  <rect class="qm-hit" x={d.hit.x} y={d.hit.y} width={d.hit.w} height={d.hit.h} />
+                  <path class="qm-wire qm-curve" d={d.curve} />
+                  <circle class="qm-ring" cx={d.x} cy={d.y} r={R + 5} />
+                  <circle class="qm-dotc" cx={d.x} cy={d.y} r={R} />
+                  <text class="qm-label" x={d.lx} y={d.y} text-anchor={d.anchor} dominant-baseline="central">
+                    {d.entry.label}
+                    {d.entry.since && <tspan class="qm-since" dx="6">{d.entry.since}</tspan>}
+                  </text>
+                </g>
+              ))}
+            </g>
+          ))
+        }
+
+        {/* A goal numbers its pieces in the order you use them; only the picked goal's numbers show. */}
+        {
+          goals.map((g) => (
+            <g class="qm-steps" data-steps={g.id} aria-hidden="true">
+              {g.steps.map((st, i) => {
+                const m = stepMark(st.id, st.onAckLine);
+                return (
+                  <g class="qm-step-mark">
+                    <circle cx={m.x} cy={m.y} r="10.5" />
+                    <text x={m.x} y={m.y + 0.5} text-anchor="middle" dominant-baseline="central">
+                      {i + 1}
+                    </text>
+                  </g>
+                );
+              })}
+            </g>
+          ))
+        }
+      </svg>
+      <div class="qm-tip" data-qm-tip aria-hidden="true"></div>
+    </div>
+
+    <div class="qm-goals" role="group" aria-label={intro.goalsLabel}>
+      <span class="qm-goals-label">{intro.goalsLabel}</span>
+      {
+        goals.map((g) => (
+          <button type="button" class="qm-goal" data-goal={g.id} aria-pressed="false">
+            {g.label}
+          </button>
+        ))
+      }
+    </div>
+  </div>
+
+  <div class="qm-overlay" data-qm-overlay role="dialog" aria-labelledby="qm-overlay-title" hidden>
+    <button type="button" class="qm-close" data-qm-close aria-label="Close">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"></path></svg>
+    </button>
+    <div data-qm-overlay-body></div>
+  </div>
+
+  {
+    cores.map((core) => (
+      <template data-qm-icon={core.id}>
+        <svg class="qm-title-icon" viewBox="0 0 48 48" aria-hidden="true" set:html={iconSvg(core.id)} />
+      </template>
+    ))
+  }
+
+  {
+    listed.flatMap((core) =>
+      [core, ...core.items].map((e) => {
+        const code = codeOf(e);
+        return (
+          <template data-qm-body={e.id}>
+            <p class="qm-text" set:html={inline(e.line)} />
+            {e.settings && (
+              <table class="qm-settings">
+                <thead>
+                  <tr>
+                    <th>{e.settingsName ?? "Setting"}</th>
+                    <th>{e.settingsHead ?? "Default"}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {e.settings.map((s) => (
+                    <tr>
+                      <td>
+                        <code class="qm-mono">{s.name}</code>
+                      </td>
+                      <td>{s.value}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <p class="qm-k">When to use it</p>
+            <p class="qm-text qm-use" set:html={inline(e.use)} />
+            {e.aka && (
+              <>
+                <p class="qm-k">Other names</p>
+                <ul class="qm-aka">
+                  {Object.entries(e.aka).map(([where, terms]) => (
+                    <li>
+                      <span class="qm-aka-where">{where}</span> {terms.join(", ")}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {code && (
+              <div class="qm-code">
+                <Code code={code.code} lang={code.lang as any} />
+              </div>
+            )}
+            <p class="qm-more">
+              <a class="qm-link" href={e.docs}>
+                Read it in the docs →
+              </a>
+            </p>
+          </template>
+        );
+      }),
+    )
+  }
+
+  {
+    goals.map((g) => (
+      <template data-qm-goal={g.id}>
+        <p class="qm-text" set:html={inline(g.intro)} />
+        <ol class="qm-steps-list">
+          {g.steps.map((st, i) => (
+            <li>
+              <button type="button" class="qm-step" data-jump={st.id}>
+                <span class="qm-step-n">{i + 1}</span>
+                <span class="qm-step-body">
+                  <span class="qm-step-name">{byId.get(st.id)!.entry.label}</span>
+                  <span class="qm-step-text" set:html={inline(st.text)} />
+                </span>
+              </button>
+            </li>
+          ))}
+        </ol>
+        <p class="qm-more">
+          <a class="qm-link" href={g.href}>
+            See it worked out →
+          </a>
+        </p>
+      </template>
+    ))
+  }
+</section>
+
+<style is:global>
+  /* Scoped by the .qm prefix, not by Astro: the overlay and the tooltip are filled by
+     the script, with elements that carry no scope attribute. */
+  .qm {
+    /* The site's yellow. On the light page, thin yellow lines fade into the paper:
+       there the map's yellow is the same hue, a step deeper. */
+    --qm-yellow: color-mix(in srgb, var(--nb-brand) 74%, #1b1a18);
+    --qm-ink: #1b1a18;
+    /* An option at rest: a small warm grey dot, its words a step under a part's
+       name. Yellow is for the nine parts and for what you point at. */
+    --qm-dot: #b3ada5;
+    --qm-soft: #5f5a54;
+    --qm-fg: var(--nb-foreground);
+    --qm-muted: var(--nb-muted-foreground);
+    --qm-w: calc(100vw - 3rem);
+    width: var(--qm-w);
+    margin-left: calc((100% - var(--qm-w)) / 2);
+    padding: 0.5rem 0 0.75rem;
+  }
+
+  [data-mode="dark"] .qm {
+    --qm-yellow: var(--nb-brand);
+    --qm-dot: #6f6a63;
+    --qm-soft: #aaa49c;
+  }
+  .qm-goals {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.375rem;
+    margin-top: 0.75rem;
+  }
+  .qm-goals-label,
+  .qm-eyebrow,
+  .qm-k,
+  .qm-settings th {
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--qm-muted);
+  }
+  .qm-goals-label {
+    margin-right: 0.375rem;
+  }
+  .qm-goal {
+    border: 1px solid var(--nb-line);
+    border-radius: var(--nb-r-ctl);
+    background: transparent;
+    color: var(--qm-fg);
+    padding: calc(0.3125rem - 1px) calc(0.75rem - 1px);
+    font: inherit;
+    font-size: 0.8125rem;
+    line-height: 1.25rem;
+    cursor: pointer;
+  }
+  .qm-goal:hover {
+    border-color: var(--qm-muted);
+  }
+  .qm-goal[aria-pressed="true"] {
+    border-color: var(--qm-yellow);
+    box-shadow: inset 0 0 0 1px var(--qm-yellow);
+  }
+  [data-mode="dark"] .qm-goal[aria-pressed="true"] {
+    box-shadow: none;
+    color: var(--qm-yellow);
+  }
+  .qm-goal:focus-visible {
+    outline: 2px solid var(--nb-ring);
+    outline-offset: 2px;
+  }
+  @media (max-width: 47.99rem) {
+    .qm-goals {
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      scrollbar-width: none;
+      padding-bottom: 0.25rem;
+    }
+    .qm-goals::-webkit-scrollbar {
+      display: none;
+    }
+    .qm-goal,
+    .qm-goals-label {
+      flex: none;
+    }
+  }
+
+  .qm-stage {
+    position: relative;
+    scroll-margin-top: 4.5rem;
+  }
+  /* From 64rem, everything on one screen: the stage fills the window under the
+     header, the goals take the rows they need, and the drawing scales into the
+     rest (the viewBox keeps its proportions and centres it). */
+  @media (min-width: 64rem) {
+    .qm-stage {
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - 4.75rem);
+      height: calc(100dvh - 4.75rem);
+    }
+    .qm-canvas {
+      flex: 1 1 0;
+      min-height: 0;
+    }
+    /* .qm-stage in front: the base .qm-svg rule further down sets height: auto. */
+    .qm-stage .qm-svg {
+      height: 100%;
+    }
+    .qm-goals {
+      flex: none;
+    }
+  }
+  .qm-canvas {
+    position: relative;
+    overflow-x: auto;
+  }
+  .qm-svg {
+    display: block;
+    width: 100%;
+    min-width: 60rem;
+    height: auto;
+    /* A click on the empty map gives the svg the focus; Chrome then draws its
+       focus ring (the system accent colour) around the whole drawing. The svg
+       is not in the tab order: keyboard focus lands on the boxes and dots,
+       which draw their own ring. */
+    outline: none;
+    font-family: var(--nb-font-sans);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* The drawing, in the sketch's language. The message's path (push, the queue,
+     its readers, the ack, the next pushes) is the strongest line on the map; an
+     option's line into its part is a hairline until it or its part is lit. */
+  .qm-wire {
+    fill: none;
+    stroke: var(--qm-fg);
+    stroke-opacity: 0.9;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .qm-curve {
+    stroke-opacity: 0.24;
+    stroke-width: 0.9;
+  }
+  .qm-head {
+    fill: var(--qm-fg);
+    fill-opacity: 0.9;
+    stroke: var(--qm-fg);
+    stroke-opacity: 0.9;
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+  }
+  .qm-fanhead {
+    fill: var(--qm-fg);
+    fill-opacity: 0.35;
+  }
+  .qm-note {
+    fill: var(--qm-fg);
+    fill-opacity: 0.72;
+    font-size: 12.5px;
+  }
+  .qm-icon {
+    color: var(--qm-yellow);
+  }
+  .qm-node-label {
+    fill: var(--qm-fg);
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .qm-dotc {
+    fill: var(--qm-dot);
+  }
+  .qm-label {
+    fill: var(--qm-soft);
+    font-size: 15px;
+  }
+  .qm-since {
+    fill: var(--qm-muted);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .qm-hit {
+    fill: transparent;
+  }
+  .qm-ring {
+    fill: none;
+    stroke: var(--qm-fg);
+    stroke-width: 1.5;
+    opacity: 0;
+  }
+
+  .qm-node {
+    cursor: pointer;
+    outline: none;
+  }
+  /* What the pointer is on, or what was clicked, is highlighted: a ring, its
+     name in bold, its line drawn bright. Nothing else on the map changes. */
+  .qm-node.qm-picked .qm-ring,
+  .qm-node.qm-hover .qm-ring,
+  .qm-core.qm-found .qm-ring,
+  .qm-node:focus-visible .qm-ring {
+    opacity: 1;
+  }
+  .qm-dot.qm-picked .qm-label,
+  .qm-dot.qm-hover .qm-label {
+    font-weight: 600;
+  }
+  .qm-dot.qm-picked .qm-dotc,
+  .qm-dot.qm-hover .qm-dotc,
+  .qm-dot.qm-fan-lit .qm-dotc,
+  .qm-dot.qm-on .qm-dotc,
+  .qm-dot:focus-visible .qm-dotc {
+    fill: var(--qm-yellow);
+  }
+  .qm-dot.qm-picked .qm-label,
+  .qm-dot.qm-hover .qm-label,
+  .qm-dot.qm-fan-lit .qm-label,
+  .qm-dot.qm-on .qm-label,
+  .qm-dot:focus-visible .qm-label {
+    fill: var(--qm-fg);
+  }
+  .qm-dot.qm-picked .qm-curve,
+  .qm-dot.qm-hover .qm-curve,
+  .qm-dot.qm-fan-lit .qm-curve {
+    stroke-opacity: 1;
+    stroke-width: 1.8;
+  }
+  .qm-core.qm-picked .qm-fanhead,
+  .qm-core.qm-hover .qm-fanhead {
+    fill-opacity: 1;
+  }
+  /* A goal ("I want to") lights its pieces and steps the other dots back; the
+     icons never do. The dot under the pointer stays bright. */
+  .qm-svg.qm-focus .qm-dot:not(.qm-on):not(.qm-hover) {
+    opacity: 0.25;
+  }
+  .qm-svg.qm-focus .qm-flows,
+  .qm-svg.qm-focus .qm-txflows {
+    opacity: 0.35;
+  }
+  .qm-svg.qm-focus .qm-core:not(.qm-on) .qm-fanhead {
+    opacity: 0.4;
+  }
+  .qm-dot.qm-on .qm-curve {
+    stroke-opacity: 1;
+    stroke-width: 1.8;
+  }
+  .qm-svg.qm-tx-on .qm-txflows {
+    opacity: 1;
+  }
+  .qm-svg.qm-tx-on .qm-txflows .qm-wire {
+    stroke-opacity: 1;
+    stroke-width: 2.6;
+  }
+  .qm-svg.qm-tx-on .qm-txflows .qm-head {
+    fill-opacity: 1;
+  }
+
+  /* A goal's numbers on the map: only the picked goal's show. */
+  .qm-steps {
+    display: none;
+  }
+  .qm-steps.qm-on {
+    display: inline;
+  }
+  .qm-step-mark circle {
+    fill: var(--qm-yellow);
+  }
+  .qm-step-mark text {
+    fill: var(--qm-ink);
+    font-size: 12.5px;
+    font-weight: 700;
+  }
+
+  /* The find field: in the middle of the top bar on a wide screen (the bar is
+     3.5rem tall and sticky, so the field stays in it), above the map on a
+     narrow one. The page's title in the bar (Header.astro) stops short of it. */
+  .qm-top {
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+    width: min(19rem, 100%);
+    margin-bottom: 0.75rem;
+  }
+  @media (min-width: 64rem) {
+    .qm-top {
+      position: fixed;
+      z-index: 31;
+      top: 0.625rem;
+      left: 50%;
+      margin: 0;
+      transform: translateX(-50%);
+    }
+    [data-page-title] {
+      max-width: calc(50vw - 15rem);
+    }
+  }
+  .qm-find {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    height: 2.25rem;
+    padding: 0 0.5rem 0 0.625rem;
+    border: 1px solid var(--nb-line);
+    border-radius: var(--nb-r-ctl);
+    background: var(--nb-background);
+    color: var(--qm-fg);
+    font-size: 0.8125rem;
+  }
+  .qm-find:focus-within,
+  .qm-find.qm-find-on {
+    border-color: var(--qm-muted);
+  }
+  .qm-find svg {
+    flex: none;
+    width: 15px;
+    height: 15px;
+    fill: none;
+    stroke: var(--qm-muted);
+    stroke-width: 1.6;
+    stroke-linecap: round;
+  }
+  .qm-find input {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    outline: none;
+    appearance: none;
+  }
+  .qm-find input::-webkit-search-cancel-button {
+    display: none;
+  }
+  .qm-find input::placeholder {
+    color: var(--qm-muted);
+  }
+  .qm-find-n {
+    color: var(--qm-muted);
+    white-space: nowrap;
+  }
+  /* Why a word matched, when it is another broker's name for something: under
+     the field, in the bar's middle a small panel over the top of the map. */
+  .qm-find-why {
+    margin: -0.25rem 0 0;
+    color: var(--qm-muted);
+    font-size: 0.75rem;
+    line-height: 1.4;
+  }
+  @media (min-width: 64rem) {
+    .qm-find-why {
+      position: absolute;
+      top: calc(100% + 0.375rem);
+      left: 0;
+      right: 0;
+      margin: 0;
+      padding: 0.375rem 0.625rem;
+      border: 1px solid var(--nb-line);
+      border-radius: var(--nb-r-ctl);
+      background: var(--nb-background);
+    }
+  }
+  .qm-find-why:empty {
+    display: none;
+  }
+  .qm-find-why b {
+    color: var(--qm-fg);
+    font-weight: 500;
+  }
+  .qm-find-key {
+    border: 1px solid var(--nb-line);
+    border-radius: 4px;
+    padding: 0 0.3125rem;
+    color: var(--qm-muted);
+    font-family: var(--nb-font-mono);
+    font-size: 0.6875rem;
+    line-height: 1.125rem;
+  }
+  .qm-find-esc,
+  .qm-find.qm-find-on .qm-find-slash {
+    display: none;
+  }
+  .qm-find.qm-find-on .qm-find-esc {
+    display: inline;
+  }
+  /* No keyboard to press them on a touch screen. */
+  @media (hover: none) {
+    .qm-find-key {
+      display: none !important;
+    }
+  }
+
+  /* The tooltip: one line, while the pointer is on a dot or a box. */
+  .qm-tip {
+    position: absolute;
+    z-index: 2;
+    opacity: 0;
+    visibility: hidden;
+    transition:
+      opacity 140ms ease,
+      visibility 0s linear 140ms;
+    max-width: 17rem;
+    border-radius: 8px;
+    background: var(--nb-foreground);
+    color: var(--nb-background);
+    padding: 0.5rem 0.6875rem;
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    pointer-events: none;
+  }
+  .qm-tip.qm-tip-on {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 140ms ease;
+  }
+  .qm-tip strong {
+    display: block;
+    margin-bottom: 0.125rem;
+    font-weight: 600;
+  }
+
+  /* No motion, only soft changes: what lights up or steps back fades over a
+     fifth of a second instead of switching at once. Off for readers who ask
+     their system for less motion. */
+  .qm-ring,
+  .qm-dot {
+    transition: opacity 200ms ease;
+  }
+  .qm-label {
+    transition:
+      font-weight 200ms ease,
+      fill 200ms ease;
+  }
+  .qm-dotc {
+    transition: fill 200ms ease;
+  }
+  .qm-wire {
+    transition:
+      stroke-opacity 200ms ease,
+      stroke-width 200ms ease;
+  }
+  .qm-head,
+  .qm-fanhead {
+    transition:
+      fill-opacity 200ms ease,
+      opacity 200ms ease;
+  }
+  .qm-flows,
+  .qm-txflows {
+    transition: opacity 220ms ease;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .qm *,
+    .qm-tip {
+      transition: none !important;
+    }
+  }
+
+  /* On a phone the map keeps a readable size and pans sideways. */
+  @media (max-width: 47.99rem) {
+    .qm-svg {
+      min-width: 80rem;
+    }
+  }
+
+  /* The overlay: what a click chose, over the map, on the side away from it.
+     On a phone, a sheet from the bottom. */
+  .qm-overlay {
+    position: fixed;
+    z-index: 30;
+    top: 4.5rem;
+    right: 1.5rem;
+    width: min(27rem, calc(100vw - 3rem));
+    max-height: calc(100vh - 6rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--nb-line);
+    border-radius: var(--nb-r-card);
+    background: var(--nb-card);
+    padding: 1.25rem 1.25rem 1.5rem;
+  }
+  .qm-overlay[data-side="left"] {
+    right: auto;
+    left: 1.5rem;
+  }
+  /* A goal's overlay is narrower: the outer lists' dots and their numbers stay
+     in sight beside it (Push's on the left, Pop's and Stream's on the right). */
+  .qm-overlay[data-kind="goal"] {
+    width: min(clamp(16.5rem, 26vw, 22rem), calc(100vw - 3rem));
+  }
+  .qm-overlay[hidden] {
+    display: none;
+  }
+  @media (max-width: 47.99rem) {
+    .qm-overlay,
+    .qm-overlay[data-side="left"] {
+      top: auto;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      width: auto;
+      max-height: 78vh;
+      border-width: 1px 0 0;
+      border-radius: var(--nb-r-card) var(--nb-r-card) 0 0;
+    }
+  }
+  .qm-close {
+    float: right;
+    display: grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    margin: -0.375rem -0.375rem 0 0.75rem;
+    border: 0;
+    border-radius: var(--nb-r-ctl);
+    background: transparent;
+    color: var(--qm-muted);
+    cursor: pointer;
+  }
+  .qm-close:hover {
+    background: var(--nb-muted);
+    color: var(--qm-fg);
+  }
+  .qm-close:focus-visible {
+    outline: 2px solid var(--nb-ring);
+    outline-offset: 1px;
+  }
+  .qm-close svg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+  }
+  .qm-eyebrow {
+    margin: 0;
+  }
+  .qm-head-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-height: 1.625rem;
+    margin-right: 2.25rem;
+  }
+  .qm-nav {
+    display: flex;
+    align-items: center;
+    gap: 0.125rem;
+    margin-left: auto;
+    color: var(--qm-muted);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .qm-nav span {
+    padding: 0 0.25rem;
+  }
+  .qm-nav button {
+    display: grid;
+    place-items: center;
+    width: 1.625rem;
+    height: 1.625rem;
+    border: 0;
+    border-radius: var(--nb-r-ctl);
+    background: transparent;
+    color: var(--qm-muted);
+    cursor: pointer;
+  }
+  .qm-nav button:hover {
+    background: var(--nb-muted);
+    color: var(--qm-fg);
+  }
+  .qm-nav button:focus-visible,
+  .qm-step:focus-visible,
+  .qm-copylink:focus-visible {
+    outline: 2px solid var(--nb-ring);
+    outline-offset: 1px;
+  }
+  .qm-nav svg,
+  .qm-copylink svg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .qm-nav svg {
+    width: 14px;
+    height: 14px;
+  }
+  .qm-steps-list {
+    margin: 0.875rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .qm-steps-list li + li {
+    border-top: 1px solid var(--nb-line);
+  }
+  .qm-step {
+    display: grid;
+    grid-template-columns: 1.375rem 1fr;
+    gap: 0.75rem;
+    width: 100%;
+    padding: 0.625rem 0;
+    border: 0;
+    border-radius: 4px;
+    background: none;
+    color: var(--qm-fg);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .qm-steps-list li:first-child .qm-step {
+    padding-top: 0.25rem;
+  }
+  .qm-step:hover .qm-step-name {
+    text-decoration: underline;
+  }
+  .qm-step-n {
+    display: grid;
+    place-items: center;
+    width: 1.375rem;
+    height: 1.375rem;
+    margin-top: 0.0625rem;
+    border-radius: 999px;
+    background: var(--qm-yellow);
+    color: var(--qm-ink);
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+  .qm-step-name,
+  .qm-step-text {
+    display: block;
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+  .qm-step-name {
+    font-weight: 600;
+  }
+  .qm-step-text {
+    color: var(--qm-muted);
+  }
+  .qm-copylink {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    border: 0;
+    padding: 0;
+    background: none;
+    color: var(--qm-muted);
+    font: inherit;
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+  .qm-copylink:hover {
+    color: var(--qm-fg);
+  }
+  .qm-copylink svg {
+    width: 13px;
+    height: 13px;
+  }
+  button.qm-eyebrow {
+    border: 0;
+    background: none;
+    padding: 0;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button.qm-eyebrow:hover {
+    color: var(--qm-fg);
+  }
+  .qm-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.375rem 0 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
+    color: var(--qm-fg);
+  }
+  .qm-title-box {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .qm-title-icon {
+    width: 1.625rem;
+    height: 1.625rem;
+    flex: none;
+    color: var(--qm-yellow);
+  }
+  .qm-title-dot {
+    flex: none;
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 999px;
+    background: var(--qm-yellow);
+  }
+  .qm-text {
+    margin: 0.75rem 0 0;
+    font-size: 0.9375rem;
+    line-height: 1.6;
+    color: var(--qm-fg);
+  }
+  .qm-hint {
+    color: var(--qm-muted);
+    font-size: 0.875rem;
+  }
+  .qm-k {
+    margin: 1rem 0 0;
+  }
+  .qm-use {
+    margin-top: 0.25rem;
+  }
+  .qm-aka {
+    margin: 0.375rem 0 0;
+    padding: 0;
+    list-style: none;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    color: var(--qm-fg);
+  }
+  .qm-aka li + li {
+    margin-top: 0.125rem;
+  }
+  .qm-aka-where {
+    color: var(--qm-muted);
+  }
+  .qm-settings {
+    width: 100%;
+    margin: 1rem 0 0;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+    line-height: 1.45;
+  }
+  .qm-settings th {
+    padding: 0 0.75rem 0.375rem 0;
+    text-align: left;
+  }
+  .qm-settings td {
+    padding: 0.375rem 0.75rem 0.375rem 0;
+    vertical-align: top;
+    border-top: 1px solid var(--nb-line);
+    color: var(--qm-fg);
+  }
+  .qm-settings td:last-child,
+  .qm-settings th:last-child {
+    padding-right: 0;
+  }
+  .qm-mono {
+    font-family: var(--nb-font-mono);
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+  }
+  .qm-code {
+    margin-top: 1rem;
+  }
+  .qm-code pre {
+    font-size: 0.75rem;
+  }
+  .qm-more {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin: 1rem 0 0;
+    font-size: 0.875rem;
+  }
+  .qm-link {
+    color: var(--qm-fg);
+    font-weight: 500;
+    text-decoration: none;
+  }
+  .qm-link:hover {
+    text-decoration: underline;
+  }
+  .qm-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    margin-top: 0.625rem;
+  }
+  .qm-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    border: 0;
+    border-radius: 999px;
+    background: var(--nb-muted);
+    color: var(--qm-fg);
+    padding: 0.25rem 0.625rem;
+    font: inherit;
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+  .qm-chip:hover {
+    background: var(--nb-selected);
+  }
+  .qm-chip::before {
+    content: "";
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 999px;
+    background: var(--qm-yellow);
+  }
+  .qm-chip-core::before {
+    width: 0.75rem;
+    border-radius: 2px;
+  }
+  .qm-since-badge {
+    margin-left: 0.375rem;
+    color: var(--qm-muted);
+    font-size: 0.6875rem;
+    font-weight: 600;
+  }
+
+</style>
+
+<script>
+  /**
+   * The map's behaviour. Nothing here is needed to read the page: without it the
+   * page's markdown twin says everything.
+   *
+   * Three states. `hovered`: the dot or box under the pointer (or the keyboard
+   * focus); it is highlighted where it stands and its line shows in a tooltip,
+   * and nothing else changes: leave it and the map is as before. `pinned`: what a
+   * click, a goal or the URL's #fragment chose; the overlay shows it, on the side
+   * of the screen away from it (a goal: the side that hides fewest of its
+   * numbers), and ← → walk a part's dots. `found`: what the find field matches;
+   * those dots light and the others step back, as for a goal. A click on the
+   * empty map, the overlay's close button or Escape unpins.
+   */
+  import { onShortcut, syncShortcutHints } from "@cloudflare/nimbus-docs/client";
+
+  interface Data {
+    entries: Record<
+      string,
+      { core: string; label: string; line: string; isCore: boolean; since: string | null; find: string; aka: [string, string][] }
+    >;
+    cores: Record<string, { label: string; items: string[] }>;
+    goals: Record<string, { label: string; lights: string[]; href: string }>;
+  }
+
+  for (const root of document.querySelectorAll<HTMLElement>("[data-qm]")) init(root);
+
+  function init(root: HTMLElement): void {
+    const data = JSON.parse(root.dataset.qmData ?? "{}") as Data;
+    const svg = root.querySelector<SVGSVGElement>("[data-qm-svg]");
+    const canvas = root.querySelector<HTMLElement>("[data-qm-canvas]");
+    const tip = root.querySelector<HTMLElement>("[data-qm-tip]");
+    const overlay = root.querySelector<HTMLElement>("[data-qm-overlay]");
+    const overlayBody = root.querySelector<HTMLElement>("[data-qm-overlay-body]");
+    const close = root.querySelector<HTMLButtonElement>("[data-qm-close]");
+    const stage = root.querySelector<HTMLElement>("[data-qm-stage]");
+    const findBox = root.querySelector<HTMLElement>("[data-qm-find]");
+    const findInput = root.querySelector<HTMLInputElement>("[data-qm-find-input]");
+    const findN = root.querySelector<HTMLElement>("[data-qm-find-n]");
+    const findWhy = root.querySelector<HTMLElement>("[data-qm-find-why]");
+    if (!svg || !canvas || !tip || !overlay || !overlayBody || !close || !stage || !findBox || !findInput || !findN || !findWhy) return;
+
+    const nodes = new Map<string, SVGGElement>();
+    for (const n of svg.querySelectorAll<SVGGElement>("[data-id]")) nodes.set(n.dataset.id!, n);
+    const goalButtons = [...root.querySelectorAll<HTMLButtonElement>("[data-goal]")];
+    const stepGroups = [...svg.querySelectorAll<SVGGElement>("[data-steps]")];
+
+    let pinned: string | null = null;
+    let hovered: string | null = null;
+    let found: Set<string> | null = null;
+
+    const known = (key: string | null): key is string => !!key && (key in data.entries || key in data.goals);
+
+    /** What a key lights: an entry and its box (a box: all its dots); a goal: its pieces and their boxes. */
+    function lit(key: string | null): { ids: Set<string>; tx: boolean } {
+      const ids = new Set<string>();
+      if (!known(key)) return { ids, tx: false };
+      const goal = data.goals[key];
+      if (goal) {
+        for (const id of goal.lights) {
+          ids.add(id);
+          ids.add(data.entries[id].core);
+        }
+        return { ids, tx: goal.lights.includes("transaction") };
+      }
+      const e = data.entries[key];
+      ids.add(key);
+      ids.add(e.core);
+      if (e.isCore) for (const id of data.cores[key].items) ids.add(id);
+      return { ids, tx: e.core === "transaction" };
+    }
+
+    /** What the find field lights: the dots and parts it matched, and the dots' parts. */
+    function litFound(hits: Set<string>): { ids: Set<string>; tx: boolean } {
+      const ids = new Set<string>();
+      for (const id of hits) {
+        ids.add(id);
+        ids.add(data.entries[id].core);
+      }
+      return { ids, tx: false };
+    }
+
+    /**
+     * Only a goal or the find field dims the map, to show some pieces together. A
+     * box or a dot, hovered or clicked, is highlighted where it stands: its ring,
+     * its bold name, its line; a box also brightens the lines to its dots, and the
+     * transaction its own lines.
+     */
+    function paint(): void {
+      const goal = !found && pinned && pinned in data.goals ? pinned : null;
+      const { ids, tx } = found ? litFound(found) : lit(goal);
+      svg!.classList.toggle("qm-focus", !!found || ids.size > 0);
+      for (const g of stepGroups) g.classList.toggle("qm-on", g.dataset.steps === goal);
+      svg!.classList.toggle("qm-tx-on", tx || pinned === "transaction" || hovered === "transaction");
+      for (const [id, n] of nodes) {
+        const e = data.entries[id];
+        n.classList.toggle("qm-on", ids.has(id));
+        n.classList.toggle("qm-picked", id === pinned);
+        n.classList.toggle("qm-hover", id === hovered);
+        n.classList.toggle("qm-fan-lit", !!e && !e.isCore && (e.core === hovered || e.core === pinned));
+        n.classList.toggle("qm-found", !!found?.has(id));
+      }
+      for (const b of goalButtons) b.setAttribute("aria-pressed", String(b.dataset.goal === pinned));
+    }
+
+    function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, text?: string): HTMLElementTagNameMap[K] {
+      const e = document.createElement(tag);
+      e.className = cls;
+      if (text !== undefined) e.textContent = text;
+      return e;
+    }
+
+    function jump(key: string, label: string, cls = "qm-chip"): HTMLButtonElement {
+      const b = el("button", cls, label);
+      b.type = "button";
+      b.addEventListener("click", () => pin(key));
+      return b;
+    }
+
+    const ICON_PREV = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5L5.5 8L10 12.5"/></svg>`;
+    const ICON_NEXT = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8L6 12.5"/></svg>`;
+    const ICON_LINK =
+      `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 9.5l3-3"/>` +
+      `<path d="M7.5 4.5l1-1a2.83 2.83 0 0 1 4 4l-1 1"/><path d="M8.5 11.5l-1 1a2.83 2.83 0 0 1-4-4l1-1"/></svg>`;
+
+    /** "2 of 11" with the arrows to the dot before and after, in its part. */
+    function navOf(key: string, items: string[]): HTMLElement {
+      const i = items.indexOf(key);
+      const n = items.length;
+      const nav = el("div", "qm-nav");
+      const arrow = (dir: number, icon: string, word: string) => {
+        const b = el("button", "");
+        b.type = "button";
+        b.dataset.step = String(dir);
+        b.innerHTML = icon;
+        b.setAttribute("aria-label", `${word}: ${data.entries[items[(i + dir + n) % n]].label}`);
+        b.addEventListener("click", () => stepBy(dir));
+        return b;
+      };
+      nav.append(arrow(-1, ICON_PREV, "Previous"), el("span", "", `${i + 1} of ${n}`), arrow(1, ICON_NEXT, "Next"));
+      return nav;
+    }
+
+    /** The dot before or after the open one, in its part; around at the ends. */
+    function stepBy(dir: number): void {
+      const e = pinned ? data.entries[pinned] : null;
+      if (!e || e.isCore) return;
+      const items = data.cores[e.core].items;
+      const next = items[(items.indexOf(pinned!) + dir + items.length) % items.length];
+      const keep = overlay!.contains(document.activeElement);
+      pin(next);
+      if (keep) overlay!.querySelector<HTMLButtonElement>(`.qm-nav button[data-step="${dir}"]`)?.focus();
+    }
+
+    /** "Copy link": the map's address with this item, to send to someone. */
+    function copyLink(key: string): HTMLButtonElement {
+      const b = el("button", "qm-copylink");
+      b.type = "button";
+      b.innerHTML = ICON_LINK;
+      const word = el("span", "", "Copy link");
+      b.append(word);
+      let reset = 0;
+      b.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(`${location.origin}${location.pathname}#${key}`);
+        } catch {
+          return;
+        }
+        word.textContent = "Copied";
+        window.clearTimeout(reset);
+        reset = window.setTimeout(() => (word.textContent = "Copy link"), 1500);
+      });
+      return b;
+    }
+
+    function show(key: string): void {
+      const out: Node[] = [];
+      const goal = data.goals[key];
+      if (goal) {
+        out.push(el("p", "qm-eyebrow", "I want to"));
+        const title = el("p", "qm-title", goal.label);
+        title.id = "qm-overlay-title";
+        out.push(title);
+        const body = root.querySelector<HTMLTemplateElement>(`template[data-qm-goal="${key}"]`);
+        if (body) out.push(body.content.cloneNode(true));
+      } else {
+        const e = data.entries[key];
+        const core = data.cores[e.core];
+        if (e.isCore) out.push(el("p", "qm-eyebrow", "A part of QueenMQ"));
+        else {
+          const row = el("div", "qm-head-row");
+          row.append(jump(e.core, core.label, "qm-eyebrow"), navOf(key, core.items));
+          out.push(row);
+        }
+        const title = el("p", "qm-title");
+        title.id = "qm-overlay-title";
+        if (e.isCore) {
+          const chip = el("span", "qm-title-box", e.label);
+          const icon = root.querySelector<HTMLTemplateElement>(`template[data-qm-icon="${key}"]`);
+          if (icon) chip.prepend(icon.content.cloneNode(true));
+          title.append(chip);
+        }
+        else title.append(el("span", "qm-title-dot"), document.createTextNode(e.label));
+        if (e.since) title.append(el("span", "qm-since-badge", e.since));
+        out.push(title);
+        const body = root.querySelector<HTMLTemplateElement>(`template[data-qm-body="${key}"]`);
+        if (body) out.push(body.content.cloneNode(true));
+        if (e.isCore && core.items.length) {
+          out.push(el("p", "qm-k", "Its dots"));
+          const chips = el("div", "qm-chips");
+          for (const id of core.items) chips.append(jump(id, data.entries[id].label));
+          out.push(chips);
+        }
+      }
+      overlayBody!.replaceChildren(...out);
+      for (const b of overlayBody!.querySelectorAll<HTMLButtonElement>("[data-jump]")) b.addEventListener("click", () => pin(b.dataset.jump!));
+      overlayBody!.querySelector(".qm-more")?.append(copyLink(key));
+      overlay!.scrollTop = 0;
+      // The site's own copy button on the overlay's code, as on every code block
+      // of the docs: the site adds it to the code blocks it finds on this event.
+      document.dispatchEvent(new Event("nimbus:remount"));
+    }
+
+    /**
+     * The overlay opens on the half of the screen away from what it is about; a
+     * goal's, on the side where it hides fewest of the goal's numbers.
+     */
+    function side(key: string): "left" | "right" {
+      if (key in data.goals) {
+        const marks = [...svg!.querySelectorAll(`[data-steps="${key}"] .qm-step-mark`)].map((m) => m.getBoundingClientRect());
+        const hidden = (at: "left" | "right") => {
+          overlay!.dataset.side = at;
+          const o = overlay!.getBoundingClientRect();
+          return marks.filter((r) => r.right > o.left && r.left < o.right && r.bottom > o.top && r.top < o.bottom).length;
+        };
+        return hidden("left") < hidden("right") ? "left" : "right";
+      }
+      const node = nodes.get(key);
+      if (!node) return "right";
+      const r = node.getBoundingClientRect();
+      return r.left + r.width / 2 > window.innerWidth / 2 ? "left" : "right";
+    }
+
+    function pin(key: string | null, opts: { focus?: boolean } = {}): void {
+      pinned = known(key) ? key : null;
+      tip!.classList.remove("qm-tip-on");
+      // A goal and the find field both light pieces: the last one asked wins.
+      if (pinned && pinned in data.goals) clearFind();
+      paint();
+      if (pinned) {
+        show(pinned);
+        overlay!.dataset.kind = pinned in data.goals ? "goal" : "entry";
+        overlay!.hidden = false;
+        overlay!.dataset.side = side(pinned);
+        if (opts.focus) close!.focus();
+      } else {
+        overlay!.hidden = true;
+      }
+      history.replaceState(null, "", pinned ? `#${pinned}` : location.pathname + location.search);
+    }
+
+    // The find field: every word typed must be in a dot's or a part's name, its
+    // line, a setting's name or what another broker calls it. Under the field,
+    // the other brokers' names it matched, so "exchange" says why it lit what it
+    // lit. Enter opens the first match; Escape closes the overlay, then clears
+    // the words, then leaves the field.
+    function onFind(): void {
+      const words = findInput!.value.toLowerCase().split(/\s+/).filter(Boolean);
+      const has = (text: string) => words.every((w) => text.toLowerCase().includes(w));
+      found = words.length ? new Set(Object.keys(data.entries).filter((id) => has(data.entries[id].find))) : null;
+      if (found && pinned && pinned in data.goals) pin(null);
+      findBox!.classList.toggle("qm-find-on", !!found);
+      findN!.textContent = !found ? "" : found.size ? `${found.size} on the map` : "No match";
+      // Other brokers' names that matched, by broker: "RabbitMQ: exchange, binding".
+      const by = new Map<string, Set<string>>();
+      for (const id of found ?? []) {
+        for (const [term, where] of data.entries[id].aka) if (has(term)) by.set(where, (by.get(where) ?? new Set()).add(term));
+      }
+      findWhy!.replaceChildren();
+      // The word as typed first, then the shortest: "exchange" before "topic exchange".
+      const q = words.join(" ");
+      const rank = (t: string) => (t.toLowerCase() === q ? 0 : 1) * 1000 + t.length;
+      const brokers = [...by].sort(([, a], [, b]) => Math.min(...[...a].map(rank)) - Math.min(...[...b].map(rank)));
+      brokers.slice(0, 3).forEach(([where, terms], i) => {
+        if (i) findWhy!.append(" · ");
+        const list = [...terms].sort((x, y) => rank(x) - rank(y));
+        findWhy!.append(el("b", "", where), `: ${list.slice(0, 3).join(", ")}${list.length > 3 ? ", …" : ""}`);
+      });
+      if (by.size > 3) findWhy!.append(" · …");
+      paint();
+    }
+    function clearFind(): void {
+      if (!findInput!.value && !found) return;
+      findInput!.value = "";
+      onFind();
+    }
+    findInput.addEventListener("input", onFind);
+    findInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") {
+        // The overlay first (Enter may have opened it), then the words, then the field.
+        ev.stopPropagation();
+        if (pinned) pin(null);
+        else if (findInput!.value) clearFind();
+        else findInput!.blur();
+      } else if (ev.key === "Enter" && found?.size) {
+        ev.preventDefault();
+        pin([...found][0]);
+      }
+    });
+    // "/" to find, and the arrows to walk a part's dots, while the map has the focus:
+    // single keys follow the reader's choice for the site's shortcuts.
+    onShortcut(
+      "/",
+      (ev) => {
+        ev.preventDefault();
+        findInput!.focus();
+        findInput!.select();
+      },
+      { within: root },
+    );
+    for (const [key, dir] of [
+      ["ArrowLeft", -1],
+      ["ArrowRight", 1],
+    ] as const) {
+      onShortcut(
+        key,
+        (ev) => {
+          const e = pinned && !overlay!.hidden ? data.entries[pinned] : null;
+          if (!e || e.isCore) return;
+          ev.preventDefault();
+          stepBy(dir);
+        },
+        { within: root },
+      );
+    }
+    syncShortcutHints(root);
+
+    // -----------------------------------------------------------------------
+    // Where the tooltip goes. It hides nothing the reader may want next: no
+    // icon, no name, no dot and no dot's words (lines it may cover), and not the
+    // open overlay. A dot's tooltip sits beside its whole list, at the dot's
+    // height, on the side of the words when there is room: the pointer walks
+    // down the list and every next dot stays in sight. The place is chosen for
+    // the whole list, sized for its longest text, so it does not jump from one
+    // dot to the next. Where neither side has room it goes over or under the
+    // list; a narrower tooltip only when the widest fits nowhere near. Only the
+    // end of a list far from that place (the low steps of the queue's
+    // staircase) puts each tooltip beside its own dot instead.
+    // -----------------------------------------------------------------------
+
+    type Box = { l: number; t: number; r: number; b: number };
+    type Where = "right" | "left" | "below" | "above";
+    const GAP = 12; // between the tooltip and what it is about, in px
+    const PAD = 6; // kept clear around what it must not cover
+    const EDGE = 4; // from the canvas's edges
+    const TIP_REM = [17, 15, 13, 11]; // its widths, widest first
+    const FAR = 140; // a dot leaves its list's place only when that is farther than this, in px
+    const STAY = 60; // and when its own place is nearer by this much
+
+    const union = (a: Box, b: Box): Box => ({ l: Math.min(a.l, b.l), t: Math.min(a.t, b.t), r: Math.max(a.r, b.r), b: Math.max(a.b, b.b) });
+    const grow = (a: Box, p: number): Box => ({ l: a.l - p, t: a.t - p, r: a.r + p, b: a.b + p });
+    /** How far the eye goes between two boxes; 0 when they touch. Along a row is easy, so up or down counts twice. */
+    const apart = (a: Box, b: Box) => Math.hypot(Math.max(0, a.l - b.r, b.l - a.r), 2 * Math.max(0, a.t - b.b, b.t - a.b));
+    const mid = (b: Box) => (b.t + b.b) / 2;
+
+    /** A box on the screen in the canvas's coordinates: those of the tooltip's left and top. */
+    function local(r: DOMRect, origin: DOMRect): Box {
+      const dx = canvas!.scrollLeft - origin.left;
+      return { l: r.left + dx, t: r.top - origin.top, r: r.right + dx, b: r.bottom - origin.top };
+    }
+
+    /** What a node shows: a dot and its words, or an icon and its name; not its line or its hit area. */
+    function ink(node: SVGGElement, origin: DOMRect): Box {
+      let box: Box | null = null;
+      for (const part of node.querySelectorAll(".qm-dotc, .qm-label, .qm-icon, .qm-node-label")) {
+        const b = local(part.getBoundingClientRect(), origin);
+        box = box ? union(box, b) : b;
+      }
+      return box ?? local(node.getBoundingClientRect(), origin);
+    }
+
+    /** The top of the free band nearest to `want` for a box w by h at x, between top and bottom; null if none. */
+    function freeTop(x: number, w: number, h: number, want: number, blocks: Box[], top: number, bottom: number): number | null {
+      const bands: [number, number][] = [];
+      let from = top;
+      for (const b of blocks.filter((k) => k.r > x && k.l < x + w).sort((p, q) => p.t - q.t)) {
+        if (b.t >= bottom) break;
+        bands.push([from, b.t]);
+        from = Math.max(from, b.b);
+      }
+      bands.push([from, bottom]);
+      let best: number | null = null;
+      for (const [lo, hi] of bands) {
+        if (hi - lo < h) continue;
+        const y = Math.min(Math.max(want, lo), hi - h);
+        if (best === null || Math.abs(y - want) < Math.abs(best - want)) best = y;
+      }
+      return best;
+    }
+
+    function fillTip(key: string): void {
+      const e = data.entries[key];
+      tip!.replaceChildren(el("strong", "", e.label), document.createTextNode(e.line));
+    }
+
+    /** The tooltip's height for an entry at a width, measured once (again once the fonts arrive). */
+    const heights = new Map<string, number>();
+    document.fonts?.addEventListener("loadingdone", () => heights.clear());
+    function tipHeight(key: string, w: number): number {
+      const k = `${key} ${w}`;
+      let h = heights.get(k);
+      if (h === undefined) {
+        fillTip(key);
+        tip!.style.width = `${w}px`;
+        h = tip!.offsetHeight;
+        heights.set(k, h);
+      }
+      return h;
+    }
+
+    function placeTip(node: SVGGElement): void {
+      const key = node.dataset.id!;
+      const e = data.entries[key];
+      if (!e) return;
+      const origin = canvas!.getBoundingClientRect();
+      const inks = new Map<string, Box>();
+      for (const [id, n] of nodes) inks.set(id, ink(n, origin));
+      const item = inks.get(key)!;
+      // A dot is placed with its list; a part on its own.
+      const rows = (e.isCore ? [key] : data.cores[e.core].items).map((id) => ({ id, box: inks.get(id)! }));
+      const list = rows.map((r) => r.box).reduce(union);
+      const blocks = [...inks.values()].map((b) => grow(b, PAD));
+      if (!overlay!.hidden) blocks.push(grow(local(overlay!.getBoundingClientRect(), origin), PAD));
+      for (const extra of svg!.querySelectorAll(".qm-steps.qm-on .qm-step-mark")) {
+        const r = extra.getBoundingClientRect();
+        if (r.width) blocks.push(grow(local(r, origin), PAD));
+      }
+      const view: Box = {
+        l: canvas!.scrollLeft + EDGE,
+        r: canvas!.scrollLeft + canvas!.clientWidth - EDGE,
+        t: Math.max(0, -origin.top) + EDGE,
+        b: Math.min(canvas!.clientHeight, window.innerHeight - origin.top) - EDGE,
+      };
+      // The side of a dot's words; a part has none.
+      const words: Where | null = e.isCore
+        ? null
+        : node.querySelector(".qm-label")?.getAttribute("text-anchor") === "end"
+          ? "left"
+          : "right";
+      const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+
+      // The list's place, the same for every dot of it: every place tried is
+      // scored by how far the eye goes from each dot to its tooltip, on average,
+      // and must be free for every dot.
+      type Spot = { where: Where; x: number; y: number; w: number; h: number; cost: number };
+      const side = (where: Where) => where === "left" || where === "right";
+      // A dot's tooltip level with its list on the side of its words is best; one
+      // that is not level with it (over, under, or off to a side) costs a little;
+      // one level with it on the other side lies over its lines and costs more. A
+      // part's sides come before over and under it. A narrower tooltip costs a little.
+      const extra = (where: Where, i: number, level: boolean) =>
+        (!words ? (side(where) ? 0 : 10) : !level || !side(where) ? 10 : where === words ? 0 : 40) + i * 4;
+      const levelWith = (y: number, h: number, b: Box) => y < b.b && y + h > b.t;
+      const j = rows.findIndex((r) => r.id === key);
+      let home: (Spot & { near: number[]; far: number[] }) | null = null;
+      for (const [i, size] of TIP_REM.entries()) {
+        const w = Math.round(size * rem);
+        const h = Math.max(...rows.map((r) => tipHeight(r.id, w)));
+        // Beside the list: next to it, at the canvas's edge, or just past anything
+        // in the way. Over or under it: lined up with it or with an edge.
+        const near = blocks.filter((b) => b.b > list.t - h && b.t < list.b + h);
+        const xs: Record<Where, number[]> = {
+          right: [list.r + GAP, view.r - w, ...near.map((b) => b.r)].filter((x) => x >= list.r + GAP && x <= view.r - w),
+          left: [list.l - GAP - w, view.l, ...near.map((b) => b.l - w)].filter((x) => x >= view.l && x <= list.l - GAP - w),
+          below: [],
+          above: [],
+        };
+        for (const x of [list.l, list.r - w, view.l, view.r - w]) {
+          const at = Math.min(Math.max(x, view.l), view.r - w);
+          xs.below.push(at);
+          xs.above.push(at);
+        }
+        for (const where of ["right", "left", "below", "above"] as Where[]) {
+          for (const x of new Set(xs[where])) {
+            const ys: number[] = [];
+            if (side(where)) {
+              for (const r of rows) {
+                const y = freeTop(x, w, h, mid(r.box) - h / 2, blocks, view.t, view.b);
+                if (y === null) break;
+                ys.push(y);
+              }
+            } else {
+              const y =
+                where === "below"
+                  ? freeTop(x, w, h, list.b + GAP, blocks, list.b + GAP, view.b)
+                  : freeTop(x, w, h, list.t - GAP - h, blocks, view.t, list.t - GAP);
+              if (y !== null) ys.push(...rows.map(() => y));
+            }
+            if (ys.length < rows.length) continue;
+            const far = rows.map((r, k) => apart({ l: x, t: ys[k], r: x + w, b: ys[k] + h }, r.box));
+            // A place that leaps (over a part's icon, say) between two neighbour
+            // dots costs that leap: walking down a list, the tooltip should glide.
+            let leaps = 0;
+            for (let k = 1; k < rows.length; k++) {
+              leaps += Math.max(0, Math.abs(ys[k] - ys[k - 1]) - Math.abs(mid(rows[k].box) - mid(rows[k - 1].box)));
+            }
+            const more = extra(where, i, ys.some((y) => levelWith(y, h, list)));
+            const cost = (far.reduce((s, d) => s + d, 0) + leaps) / rows.length + more;
+            if (!home || cost < home.cost) home = { where, x, y: ys[j], w, h, cost, near: far, far: far.map((d) => d + more) };
+          }
+        }
+      }
+
+      // A place beside a dot itself: on the queue's staircase each step down is
+      // further right, so a low step has room just past its own dot.
+      function beside(r: { id: string; box: Box }): Spot | null {
+        let spot: Spot | null = null;
+        for (const [i, size] of TIP_REM.entries()) {
+          const w = Math.round(size * rem);
+          const h = tipHeight(r.id, w);
+          for (const [where, x] of [
+            ["right", r.box.r + GAP],
+            ["left", r.box.l - GAP - w],
+          ] as [Where, number][]) {
+            if (x < view.l || x + w > view.r) continue;
+            const y = freeTop(x, w, h, mid(r.box) - h / 2, blocks, view.t, view.b);
+            if (y === null) continue;
+            const cost = apart({ l: x, t: y, r: x + w, b: y + h }, r.box) + extra(where, i, levelWith(y, h, r.box));
+            if (!spot || cost < spot.cost) spot = { where, x, y, w, h, cost };
+          }
+        }
+        return spot;
+      }
+      // A dot leaves its list's place for its own only when the list's is far from
+      // it and its own much nearer, and only with every dot after it in the list:
+      // the tail of the staircase changes sides once, not back and forth.
+      const leaves = (k: number) => {
+        if (!home || home.near[k] < FAR) return null;
+        const spot = beside(rows[k]);
+        return spot && spot.cost + STAY < home.far[k] ? spot : null;
+      };
+      let own = e.isCore ? null : leaves(j);
+      for (let k = j + 1; own && k < rows.length; k++) if (!leaves(k)) own = null;
+
+      fillTip(key);
+      tip!.classList.add("qm-tip-on");
+      const best = own ?? home;
+      if (!best) {
+        // Nowhere free (a very small window): next to the item, as before.
+        const w = Math.round(TIP_REM[0] * rem);
+        const h = tipHeight(key, w);
+        fillTip(key);
+        tip!.style.width = `${w}px`;
+        tip!.style.left = `${Math.min(Math.max(item.r + GAP, view.l), view.r - w)}px`;
+        tip!.style.top = `${Math.min(Math.max(mid(item) - h / 2, view.t), view.b - h)}px`;
+        return;
+      }
+      const h = tipHeight(key, best.w);
+      fillTip(key);
+      tip!.style.width = `${best.w}px`;
+      let y = best.y;
+      if (best === home && side(best.where)) {
+        // Beside the list: at the dot's own height, as near as the free bands allow.
+        y = freeTop(best.x, best.w, h, mid(item) - h / 2, blocks, view.t, view.b) ?? y;
+      } else if (best.where === "above") {
+        // Placed for the list's longest text: a shorter one keeps to the list.
+        y += best.h - h;
+      }
+      tip!.style.left = `${best.x}px`;
+      tip!.style.top = `${y}px`;
+    }
+
+    let leaving = 0;
+    function hover(node: SVGGElement | null): void {
+      window.clearTimeout(leaving);
+      hovered = node ? node.dataset.id! : null;
+      // The open item needs no tooltip: the overlay already says it.
+      if (node && hovered !== pinned) placeTip(node);
+      else tip!.classList.remove("qm-tip-on");
+      paint();
+    }
+
+    // Leaving a dot for the empty map waits a moment: a pointer on its way to
+    // the next dot does not switch everything off and on again.
+    function leave(): void {
+      window.clearTimeout(leaving);
+      leaving = window.setTimeout(() => hover(null), 110);
+    }
+
+    const nodeOf = (t: EventTarget | null) => (t instanceof Element ? t.closest<SVGGElement>("[data-id]") : null);
+
+    svg.addEventListener("pointerover", (ev) => {
+      if (ev.pointerType !== "mouse") return;
+      const n = nodeOf(ev.target);
+      if (n && n.dataset.id !== hovered) hover(n);
+    });
+    svg.addEventListener("pointerout", (ev) => {
+      if (ev.pointerType !== "mouse") return;
+      const from = nodeOf(ev.target);
+      const to = nodeOf(ev.relatedTarget);
+      if (from && from !== to) {
+        if (to) hover(to);
+        else leave();
+      }
+    });
+    svg.addEventListener("pointerleave", () => leave());
+    svg.addEventListener("click", (ev) => {
+      const n = nodeOf(ev.target);
+      pin(n ? n.dataset.id! : null);
+    });
+    svg.addEventListener("focusin", (ev) => {
+      const n = nodeOf(ev.target);
+      if (n && n.matches(":focus-visible")) hover(n);
+    });
+    svg.addEventListener("focusout", () => {
+      if (hovered) hover(null);
+    });
+    svg.addEventListener("keydown", (ev) => {
+      const n = nodeOf(ev.target);
+      if (n && (ev.key === "Enter" || ev.key === " ")) {
+        ev.preventDefault();
+        pin(n.dataset.id!, { focus: true });
+      }
+    });
+    root.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Escape") return;
+      const focused = document.activeElement;
+      if (focused instanceof SVGElement && svg.contains(focused)) focused.blur();
+      hover(null);
+      if (pinned) pin(null);
+      else clearFind();
+    });
+    for (const b of goalButtons) {
+      b.addEventListener("click", () => pin(pinned === b.dataset.goal ? null : b.dataset.goal!));
+    }
+    close.addEventListener("click", () => pin(null));
+
+    // A link to /map/#lease, from another page.
+    function fromHash(): void {
+      const key = decodeURIComponent(location.hash.slice(1));
+      if (!known(key)) return;
+      pin(key);
+      stage!.scrollIntoView({ block: "start" });
+    }
+    window.addEventListener("hashchange", fromHash);
+    fromHash();
+  }
+</script>

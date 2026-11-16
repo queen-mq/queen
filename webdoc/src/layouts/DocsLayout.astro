@@ -119,10 +119,13 @@ const breadcrumbLd =
 // WebPage node carries no @id, so this is the node that joins each page to
 // that graph. `dateModified` is the same git date as the "Updated" line and
 // the sitemap's <lastmod>. No `datePublished`: nothing records it.
+// A `mode: custom` page (the map, /map/) draws its own body without the
+// title block, and is still an article: scripts/check-seo.mjs wants this node
+// on every indexable page but the homepage.
 const siteUrl = Astro.site ? new URL("/", Astro.site).href : null;
 const pageUrl = Astro.site ? new URL(Astro.url.pathname, Astro.site).href : null;
 const articleLd =
-  siteUrl && pageUrl && !isCustom
+  siteUrl && pageUrl
     ? {
         "@type": "TechArticle",
         "@id": `${pageUrl}#article`,
@@ -165,7 +168,7 @@ const hasPagination = Astro.slots.has("pagination");
 
 <BaseLayout title={title} description={description} noindex={noindex || draft} markdownUrl={markdownUrl} socialImage={socialImage} lastUpdated={lastUpdated} head={headWithBreadcrumbs} collection={collection} entryId={entryId}>
   <div class="flex flex-col min-h-screen">
-    {hasHeader ? <slot name="header" /> : <Header collection={collection} entryId={entryId} showSidebar={showSidebar} sidebarUnder={showSidebar && !isCustom} />}
+    {hasHeader ? <slot name="header" /> : <Header collection={collection} entryId={entryId} showSidebar={showSidebar} sidebarUnder={showSidebar && !isCustom} title={isCustom ? title : undefined} />}
 
     {isCustom ? (
       <main id="main-content" class="flex-1">

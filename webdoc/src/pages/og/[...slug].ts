@@ -2,7 +2,8 @@ import { getCollection } from "astro:content";
 import { OGImageRoute } from "astro-og-canvas";
 import { ogCardConfig } from "./_og-card-config";
 
-const entries = await getCollection("docs", (entry) => !entry.data.draft);
+// The map draws its own preview image, the map itself: ./map.png.ts.
+const entries = await getCollection("docs", (entry) => !entry.data.draft && entry.id !== "map");
 
 const pages = Object.fromEntries(
   entries.map((entry) => [

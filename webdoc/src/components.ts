@@ -25,6 +25,7 @@ import { LinkCard } from "./components/ui/link-card";
 import { PackageManagers } from "./components/ui/package-managers";
 import Partition from "./components/Partition.astro";
 import PreforkMemory from "./components/PreforkMemory.astro";
+import QueenMap from "./components/QueenMap.astro";
 import Render from "./components/Render.astro";
 import Result from "./components/Result.astro";
 import RollingUpdate from "./components/RollingUpdate.astro";
@@ -61,6 +62,7 @@ export const components = {
   PackageManagers,
   Partition,
   PreforkMemory,
+  QueenMap,
   Render,
   Result,
   RollingUpdate,

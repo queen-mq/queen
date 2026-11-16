@@ -73,6 +73,12 @@ export const hero = {
     more: "See the talk",
     href: "/talks/coming-from-another-broker/",
   },
+  /** The map, for a reader who wants every part and option on one screen. */
+  map: {
+    label: "New to QueenMQ?",
+    more: "See everything it does on one map",
+    href: "/map/",
+  },
   /** Under the buttons, small: "ACID" and its price on the same screen. */
   limit: {
     text:

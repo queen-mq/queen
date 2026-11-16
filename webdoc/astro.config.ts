@@ -115,6 +115,7 @@ const nimbusConfig = defineNimbusConfig({
     // run it, the exhaustive tables, how it works inside, and the evidence.
     items: [
       { label: "The little book (PDF)", link: "/book/" },
+      { label: "Everything on one map", link: "/map/" },
       { label: "Introduction", icon: "ph:rocket-launch", autogenerate: { directory: "introduction" } },
       { label: "Writing applications", icon: "ph:code", autogenerate: { directory: "writing-applications" } },
       { label: "Patterns", icon: "ph:app-window", autogenerate: { directory: "patterns" } },

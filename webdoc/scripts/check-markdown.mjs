@@ -92,6 +92,7 @@ const REGISTERED_COMPONENTS = (() => {
 const HANDLED = new Map([
   ["Render", "src/lib/markdown-partials.ts (expanded to the partial's markdown)"],
   ["SdkCode", "src/lib/markdown-partials.ts (expanded to one fence per SDK language)"],
+  ["QueenMap", "src/lib/markdown-partials.ts (expanded to every box and dot of the map, with its code)"],
   ["Fig", "src/lib/markdown-partials.ts (componentMap: the figure's alt text, caption)"],
   ["BookDownload", "src/lib/markdown-partials.ts (componentMap: the edition and its PDF link)"],
   ["Chart", "src/lib/markdown-partials.ts (componentMap: alt text, caption, source)"],

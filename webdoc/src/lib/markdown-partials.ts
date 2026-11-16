@@ -62,6 +62,7 @@ import { renderEntryAsMarkdown } from "@cloudflare/nimbus-docs/runtime";
 import { SCHEMATICS, describeSchematic } from "./schematic-models";
 import { figureMarkdown } from "@/lib/figure-markdown";
 import { sdkCode } from "@/lib/book-code";
+import { cores, goals, entryById, type MapEntry } from "@/lib/map";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -117,7 +118,7 @@ export async function renderEntryMarkdown(entry: MarkdownEntry): Promise<string>
 
   // The page's own fences come out first, so a `<Render />` inside a code
   // sample is never expanded and no fence is touched by the downleveler.
-  const protectedBody = expandSdkCode(protectFences(entry.body ?? "", fences), fences, where);
+  const protectedBody = expandQueenMap(expandSdkCode(protectFences(entry.body ?? "", fences), fences, where), fences);
   const expanded = expand(protectedBody, { partials, fences, stack: [], where });
   assertNoUnexpandedRender(expanded, where);
 
@@ -399,6 +400,54 @@ function expandSdkCode(text: string, store: string[], where: string): string {
       return `${v.lang.label}:\n\n${FENCE_TOKEN(store.length - 1)}`;
     });
     return `\n${blocks.join("\n\n")}\n`;
+  });
+}
+
+/** A `<QueenMap />` tag on a line of its own. */
+const MAP_TAG = /^[ \t]*<QueenMap\b[^>]*\/>[ \t]*$/gm;
+
+/**
+ * `<QueenMap />` becomes every box and dot of the map (src/lib/map.ts) as
+ * sections: what it is, its settings, when to use it, its other names, its
+ * code and its docs link; then the goals, each with its steps in order. The
+ * code is the JavaScript the drawing's panel shows, lifted into the fence
+ * store like `<SdkCode />`'s.
+ */
+function expandQueenMap(text: string, store: string[]): string {
+  return text.replace(MAP_TAG, () => {
+    const byId = entryById();
+    const section = (e: MapEntry, level: string): string => {
+      const parts = [`${level} ${e.label}${e.since ? ` (new in ${e.since})` : ""}`, e.line];
+      if (e.settings?.length) {
+        parts.push(
+          [`| ${e.settingsName ?? "Setting"} | ${e.settingsHead ?? "Default"} |`, "| --- | --- |", ...e.settings.map((s) => `| \`${s.name}\` | ${s.value} |`)].join("\n"),
+        );
+      }
+      parts.push(`**When to use it:** ${e.use}`);
+      if (e.aka) {
+        const names = Object.entries(e.aka).map(([where, terms]) => `${where}: ${terms.join(", ")}`);
+        parts.push(`**Other names:** ${names.join("; ")}.`);
+      }
+      const code = e.snippet ?? (e.code ? { lang: "js", code: sdkCode(e.code, "/map/").find((v) => v.lang.id === "js")?.code ?? "" } : null);
+      if (code?.code) {
+        store.push("```" + code.lang + "\n" + code.code + "\n```");
+        parts.push(FENCE_TOKEN(store.length - 1));
+      }
+      parts.push(`[Read it in the docs](${e.docs})`);
+      return parts.join("\n\n");
+    };
+    const out: string[] = [];
+    for (const core of cores) {
+      out.push(section(core, "##"));
+      for (const item of core.items) out.push(section(item, "###"));
+    }
+    out.push("## I want to");
+    for (const g of goals) {
+      out.push(`### ${g.label}`, g.intro);
+      out.push(g.steps.map((s, i) => `${i + 1}. ${byId.get(s.id)!.entry.label}: ${s.text}`).join("\n"));
+      out.push(`[See it worked out](${g.href})`);
+    }
+    return `\n${out.join("\n\n")}\n`;
   });
 }
 

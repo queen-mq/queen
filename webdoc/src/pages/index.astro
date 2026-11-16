@@ -135,6 +135,13 @@ const cardStatic = "block rounded-card bg-card p-5";
             >
               {hero.talk.label} <span class="text-muted-foreground">{hero.talk.more}</span> →
             </a>
+            {/* The map, on the line under it: every part and option on one screen. */}
+            <a
+              href={hero.map.href}
+              class="mt-2 block w-fit text-[0.9375rem] font-medium text-foreground/85 no-underline transition-colors hover:text-foreground"
+            >
+              {hero.map.label} <span class="text-muted-foreground">{hero.map.more}</span> →
+            </a>
             <p data-md class="mt-8 text-[0.8125rem] leading-relaxed text-muted-foreground">
               {hero.limit.text}{" "}
               <a

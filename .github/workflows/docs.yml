@@ -155,6 +155,9 @@ jobs:
       - name: README code
         run: pnpm check:readme
 
+      - name: Every link of the map leads to a page and a heading
+        run: pnpm check:map
+
       # Only a build of master that passed every gate above is published.
       - name: Keep the site for the deploy
         if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'

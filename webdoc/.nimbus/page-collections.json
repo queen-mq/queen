@@ -64,6 +64,7 @@
     "src/content/docs/manage/tenants.mdx",
     "src/content/docs/manage/terraform.mdx",
     "src/content/docs/manage/upgrades-monitoring.mdx",
+    "src/content/docs/map.mdx",
     "src/content/docs/patterns/delayed-messages.mdx",
     "src/content/docs/patterns/index.mdx",
     "src/content/docs/patterns/last-value.mdx",

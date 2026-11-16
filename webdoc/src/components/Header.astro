@@ -32,12 +32,18 @@ interface Props {
    * scrolls, so the hero runs up under the bar. Only the homepage sets it.
    */
   transparentTop?: boolean;
+  /**
+   * The page's title, beside the logo: a full-width page (`mode: custom`, the
+   * map) has no title block, and the bar is where its name reads best. The
+   * page keeps its own h1 for screen readers, so this one is hidden from them.
+   */
+  title?: string;
 }
 
 // `entryId` is part of Props as a forward-compat hook (the version-switcher
 // recipe reads it) but the base Header doesn't use it, so leave it off the
 // destructure to avoid an unused-var warning.
-const { collection, showSidebar = true, sidebarUnder = false, transparentTop = false } = Astro.props;
+const { collection, showSidebar = true, sidebarUnder = false, transparentTop = false, title } = Astro.props;
 
 // Normalize trailing slash so isActive matches sidebar hrefs.
 const currentSlug = Astro.url.pathname.replace(/\/$/, "") || "/";
@@ -70,8 +76,8 @@ const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent";
     <div aria-hidden="true" class="pointer-events-none hidden lg:block absolute inset-y-0 left-0 w-(--nb-sidebar-width) bg-zone" />
   )}
   <div class="relative mx-auto flex items-center justify-between h-14 px-4 lg:px-6">
-    <div class="flex items-center gap-3">
-      <a href="/" class="group flex items-center" aria-label={config.title}>
+    <div class="flex items-center gap-3 min-w-0">
+      <a href="/" class="group flex shrink-0 items-center" aria-label={config.title}>
         {/*
           The logo, inlined (assets/logo.py writes src/assets/): the petals
           keep their yellow and the letters take the text colour of the
@@ -104,6 +110,16 @@ const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent";
           />
         )}
       </a>
+
+      {title && (
+        <span
+          aria-hidden="true"
+          data-page-title
+          class="min-w-0 truncate ml-1 pl-4 border-l border-line text-[0.9375rem] font-semibold leading-6 tracking-[-0.01em] text-foreground"
+        >
+          {title}
+        </span>
+      )}
 
       {showSections ? (
         <nav aria-label="Sections" class="hidden md:flex items-center gap-1 ml-4 pl-4 border-l border-line h-6">

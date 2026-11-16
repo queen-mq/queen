@@ -61,6 +61,7 @@ export function homepageBody(): string {
     "",
   );
   lines.push(`${hero.talk.label} [${hero.talk.more}](${url(hero.talk.href)})`, "");
+  lines.push(`${hero.map.label} [${hero.map.more}](${url(hero.map.href)})`, "");
   lines.push(`${hero.limit.text} ${link(hero.limit.link)}`, "");
 
   // The guide: every step in every language, since a reader of the markdown has
