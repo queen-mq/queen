@@ -11,8 +11,8 @@ ignoredBuiltDependencies: # pnpm 10
 # node is named "Queen MQ" (it carried the page title, which search engines
 # read as the site name), and the WebSite and every WebPage's isPartOf carry
 # the @id the site-wide graph in astro.config.ts declares. The key is pinned
-# to 0.8.2: bumping nimbus-docs fails the install until the patch is redone
+# to 0.20.0: bumping nimbus-docs fails the install until the patch is redone
 # with `pnpm patch @cloudflare/nimbus-docs@<new>` (or dropped, if upstream
 # names the WebSite node itself). scripts/check-seo.mjs checks the name.
 patchedDependencies:
-  '@cloudflare/nimbus-docs@0.8.2': patches/@cloudflare__nimbus-docs@0.8.2.patch
+  '@cloudflare/nimbus-docs@0.20.0': patches/@cloudflare__nimbus-docs@0.20.0.patch

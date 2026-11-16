@@ -57,7 +57,8 @@
  */
 
 import { getCollection } from "astro:content";
-import { renderEntryAsMarkdown } from "@cloudflare/nimbus-docs";
+// Nimbus loads Sätteri by name from the prerender bundle; keep it a direct dependency.
+import { renderEntryAsMarkdown } from "@cloudflare/nimbus-docs/runtime";
 import { SCHEMATICS, describeSchematic } from "./schematic-models";
 import { figureMarkdown } from "@/lib/figure-markdown";
 import { sdkCode } from "@/lib/book-code";

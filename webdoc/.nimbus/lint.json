@@ -22,5 +22,11 @@
     "nimbus/bare-url": "warn"
   },
   "collections": {},
-  "site": "https://queenmq.com"
+  "site": "https://queenmq.com",
+  "markdownFeatures": {
+    "gfm": true,
+    "smartPunctuation": true
+  },
+  "base": "",
+  "configHash": "d4f6c7e23d975e224f815ba758434f7cd4ed77d42a32ca38bd6b666851791dff"
 }

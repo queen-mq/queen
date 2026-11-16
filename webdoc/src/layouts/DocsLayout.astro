@@ -5,7 +5,7 @@
  * Named slots for overrides (all optional, defaults render otherwise):
  *   header, sidebar, toc, page-title, content-footer, pagination
  */
-import { Icon } from "astro-icon/components";
+import Icon from "@cloudflare/nimbus-docs/components/Icon.astro";
 import BaseLayout from "./BaseLayout.astro";
 import Header from "@/components/Header.astro";
 import { Banner } from "@/components/ui/banner";
@@ -16,7 +16,7 @@ import { Pagination } from "@/components/ui/pagination";
 import { PageActions } from "@/components/ui/page-actions";
 import { Badge } from "@/components/ui/badge";
 import type { DocsPageProps } from "@cloudflare/nimbus-docs/types";
-import { getVersionStatus, getVersionAlternates } from "@cloudflare/nimbus-docs";
+import { getVersionStatus, getVersionAlternates } from "@cloudflare/nimbus-docs/runtime";
 import { config } from "virtual:nimbus/config";
 
 type Props = DocsPageProps & {

@@ -1,8 +1,7 @@
 diff --git a/src/components/NimbusHead.astro b/src/components/NimbusHead.astro
-index b55b9cbfdceee677d9e907d4e9a2d0eadea6147d..a78f5c42f7025534e4fa2b1f39fca858f4ea9d10 100644
 --- a/src/components/NimbusHead.astro
 +++ b/src/components/NimbusHead.astro
-@@ -178,7 +178,13 @@ const structuredData = canonical
+@@ -263,7 +263,13 @@
    ? JSON.stringify({
        "@context": "https://schema.org",
        "@type": isHomePage ? "WebSite" : "WebPage",
@@ -17,11 +16,11 @@ index b55b9cbfdceee677d9e907d4e9a2d0eadea6147d..a78f5c42f7025534e4fa2b1f39fca858
        ...(resolvedDescription ? { description: resolvedDescription } : {}),
        url: canonical,
        inLanguage: lang,
-@@ -187,6 +193,7 @@ const structuredData = canonical
+@@ -272,6 +278,7 @@
          ? {}
          : {
              isPartOf: {
 +              ...(Astro.site ? { "@id": new URL("/#website", Astro.site).href } : {}),
                "@type": "WebSite",
                name: config.title,
-               url: Astro.site ? new URL("/", Astro.site).href : config.site,
+               url: Astro.site

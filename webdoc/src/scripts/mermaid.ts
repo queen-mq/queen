@@ -87,7 +87,8 @@ function openDiagram(container: HTMLElement) {
 	if (svg) {
 		svg.removeAttribute("style");
 		svg.setAttribute("width", "100%");
-		svg.setAttribute("height", "auto");
+		svg.removeAttribute("height");
+		svg.style.height = "auto";
 	}
 
 	const body = d.querySelector(".mermaid-dialog-body");

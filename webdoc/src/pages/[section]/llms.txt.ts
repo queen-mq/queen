@@ -16,7 +16,7 @@
  * contain; this route just renders one file per section it returns.
  */
 
-import { getIndexedTopLevel, type IndexedEntry } from "@cloudflare/nimbus-docs";
+import { getIndexedTopLevel, type IndexedEntry } from "@cloudflare/nimbus-docs/runtime";
 import { config } from "virtual:nimbus/config";
 
 export const prerender = true;
@@ -52,7 +52,7 @@ export async function GET({ props }: { props: SectionProps }) {
   for (const item of members) {
     const description = item.description ? ` — ${item.description}` : "";
     lines.push(
-      `- [${item.title}](${new URL(item.markdownUrl, config.site).href})${description}`,
+      `- [${item.title}](${new URL(item.markdownUrl ?? item.url, config.site).href})${description}`,
     );
   }
 

@@ -14,7 +14,7 @@
  *     without an `index.mdx`, where the group is a pure visual section
  *     divider over its children.
  */
-import { Icon } from "astro-icon/components";
+import Icon from "@cloudflare/nimbus-docs/components/Icon.astro";
 import { cn } from "@/lib/cn";
 import type { HTMLAttributes } from "astro/types";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
@@ -33,7 +33,7 @@ interface Props extends HTMLAttributes<"div"> {
   indexIsCurrent?: boolean;
   /** True when `indexHref` is an off-site URL — render with target="_blank" rel="noopener". */
   indexIsExternal?: boolean;
-  /** Optional leading icon (astro-icon name) rendered before the label. */
+  /** Optional leading icon (Iconify name) rendered before the label. */
   icon?: string;
 }
 
