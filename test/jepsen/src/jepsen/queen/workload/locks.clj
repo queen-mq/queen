@@ -38,7 +38,14 @@
     2. one owner per token, and every record carries a token its owner was
        answered;
     3. no phantom: no record of a step that rolled back or was refused, and
-       the record of every :ok step is there;
+       the record of every :ok step is there. Under clock faults, the record
+       of a step answered rolled back with `duplicate` is counted
+       (:phantom-after-clock-jump), not judged: its push found its own
+       transactionId, so the step had committed once; a leader that takes
+       over with its clock far ahead (beyond the 500 ms the cluster allows)
+       retires the answers its predecessor kept for a relayed retry, and the
+       retry runs again (campaign 4, x-lock-all, 2026-11-16: a clock 155 s
+       ahead; W5 counts the same retry's `rejected_ack`);
     4. per permit, a grant invoked after another completed has a higher
        token, and no two grants share one;
     5. an `already` answer names a permit that owner was granted, or may have
@@ -419,6 +426,12 @@
                                               (= :fail (:type s)) {:record r, :why :failed-step
                                                                    :error (:error s)}))))
                               vec)
+                retried? (fn [ph] (and clock?
+                                       (= :failed-step (:why ph))
+                                       (= :rolled-back (get-in ph [:error 0]))
+                                       (= "duplicate" (get-in ph [:error 1]))))
+                at-clock (filterv retried? phantom)
+                phantom  (vec (remove retried? phantom))
                 rec-ids  (set (map :id all-recs))
                 missing  (->> steps
                               (filter #(and (ok? %) (<= (:time %) end-inv)))
@@ -524,6 +537,7 @@
              :token-from-nowhere (take 16 nowhere)
              :phantom-count     (count phantom)
              :phantom           (take 16 phantom)
+             :phantom-after-clock-jump {:count (count at-clock), :sample (take 4 at-clock)}
              :ok-step-missing   (take 16 missing)
              :token-not-rising  (take 16 not-rising)
              :token-granted-twice (take 16 twice)

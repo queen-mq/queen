@@ -422,6 +422,26 @@
     (let [r (w11 (w11-history {:records (update w11-records 0 conj (rec 0 11 "C" "s4" 3))}))]
       (is (false? (:valid? r)))
       (is (= 1 (:phantom-count r)))))
+  (testing "under clock faults, a `duplicate` rollback whose record exists is counted, not
+            judged (campaign 4, x-lock-all: a leader 155 s ahead ran a relayed retry again)"
+    (let [h     (w11-history {:extra   (step 1 0 "B" 20 "s6" :fail
+                                             :error [:rolled-back "duplicate" nil nil])
+                              :records (update w11-records 0 conj (rec 0 20 "B" "s6" 3))})
+          clock (w11 1 {:faults #{:clock :kill}} h)
+          none  (w11 h)]
+      (is (true? (:valid? clock)) (pr-str clock))
+      (is (= 0 (:phantom-count clock)))
+      (is (= 1 (:count (:phantom-after-clock-jump clock))))
+      (is (false? (:valid? none)) "without clock faults it is judged")
+      (is (= 1 (:phantom-count none)))))
+  (testing "under clock faults, the record of a step the guard refused is still judged"
+    (let [r (w11 1 {:faults #{:clock}}
+                 (w11-history {:extra   (step 1 0 "B" 20 "s6" :fail
+                                              :error [:rolled-back "kv_precondition" "version" 21])
+                               :records (update w11-records 0 conj (rec 0 20 "B" "s6" 3))}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (:phantom-count r)))
+      (is (= 0 (:count (:phantom-after-clock-jump r))))))
   (testing "phantom: a record no step wrote"
     (let [r (w11 (w11-history {:records (assoc-in w11-records [0 2 :id] "zzz")}))]
       (is (false? (:valid? r)))
