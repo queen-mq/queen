@@ -9,6 +9,11 @@ on:
       # The tooling that produces the mirror commit is part of what gets
       # mirrored. Without these, a fix to the split logic never re-runs the
       # job it fixes, and a stale mirror cannot be repaired by repairing it.
+      # GitHub matches these paths against the first 300 files a push
+      # changes: a bigger push (2.9.0's reached master with a 600-file Jepsen
+      # archive) runs nothing here, the mirror stays behind, and the tag's
+      # publish then finds no release ancestor. A push that changes this file
+      # runs the mirror again.
       - '.github/scripts/split-php-client.py'
       - '.github/workflows/release-php-client.yml'
     tags:
