@@ -1137,6 +1137,21 @@ async fn a_parked_fetch_answers_empty_when_another_partition_of_its_queue_is_wri
         vec![json!({"queue":"log","partition":"a","payload":{"n":0}})],
     )
     .await;
+    // A push is answered before apply sends its append wakes ("after the
+    // answer like every wake", apply.rs): a fetch that arms its watch in
+    // between takes this first write's wake for a write made while it waits
+    // (tests CI, 2026-11-17: answered after 8 ms). A KV write appends nothing
+    // and applies after those wakes are out.
+    f.kv(
+        ctx(),
+        crate::rsm::facade::KvReq {
+            ops: vec![
+                json!({"op":"put","ns":"n","key":"after-the-first-push","value":1,"forever":true}),
+            ],
+        },
+    )
+    .await
+    .expect("kv put");
     let g = f.clone();
     let parked = tokio::spawn(async move {
         let t = Instant::now();
