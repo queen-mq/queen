@@ -2290,6 +2290,9 @@ async fn a_change_whose_caller_is_gone_between_its_two_steps_still_finishes() {
             cluster_config(&ports[..1], id)
         })
     });
+    // Until node 1 has elected itself a proposal is answered NotLeader (on
+    // a loaded machine, often): wait for it to lead, as every test here does.
+    assert_eq!(tokio::task::block_in_place(|| leader_of(&nodes)), 0);
     propose_all(nodes[0].as_ref().unwrap(), &entries[..N as usize]).await;
     let joiner = RaftOpts {
         join: true,
