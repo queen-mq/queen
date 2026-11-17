@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## 2.9.0 - 2026-11-16
+## 2.9.0 - 2026-11-17
 
 **Upgrading from 2.8.1: a rolling restart; the new features turn on by themselves once every node
 runs 2.9.0 (cluster version 8).** Until then a `where`, a reading queue, headers and `link` are
