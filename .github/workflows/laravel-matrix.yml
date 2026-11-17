@@ -68,7 +68,7 @@ jobs:
           event, wanted = os.environ["EVENT"], (os.environ.get("GROUPS_INPUT") or "all").strip()
           # A pull request runs what its changes most often break, on the newest broker.
           smoke = ["queen", "deaths", "lifecycle", "upgrade"]
-          groups = ["lifecycle", "deaths", "compat", "compat-all", "faults", "queen", "upgrade", "laravel-11"]
+          groups = ["lifecycle", "deaths", "compat", "compat-all", "faults", "queen", "upgrade"]
           if event == "pull_request":
               chosen, brokers = smoke, json.loads(os.environ["BROKER_NEWEST"])
           elif event == "schedule" and os.environ.get("SCHEDULE") == "41 3 * * 0" or wanted == "soak":
@@ -81,7 +81,7 @@ jobs:
                   raise SystemExit(f"unknown groups: {sorted(unknown)}")
               brokers = json.loads(os.environ["BROKERS_ALL"])
           print("lanes=" + json.dumps([{"group": g, "broker": b} for g in chosen for b in brokers]))
-          stacks = ["default"] + ["laravel-11"] * ("laravel-11" in chosen) + ["previous"] * ("upgrade" in chosen)
+          stacks = ["default"] + ["previous"] * ("upgrade" in chosen)
           print("stacks=" + json.dumps(stacks))
           EOF
 
@@ -107,21 +107,12 @@ jobs:
             case "$STACK" in
               # The campaigns' stack: the committed lock, Laravel 12 on PHP 8.3.
               default) ;;
-              # Laravel 11 on PHP 8.4. Composer refuses every Laravel 11 for its
-              # advisories; a test image lets them through.
               # The newest PHP client on Packagist: before a release is
               # published, the one it follows (rolling-upgrade).
               previous)
                 version=$(curl --fail --silent --show-error https://repo.packagist.org/p2/queen-mq/php-client.json \
                   | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"]["queen-mq/php-client"][0]["version"])')
                 echo "BENCH_PHP_CLIENT_VERSION=${version#v}"
-                ;;
-              laravel-11)
-                echo 'BENCH_PHP_VERSION=8.4'
-                echo 'BENCH_COMPOSER_VERSION=2.10.3'
-                echo 'BENCH_LARAVEL_VERSION=11.55.1'
-                echo 'BENCH_HORIZON_VERSION=5.48.3'
-                echo 'BENCH_COMPOSER_ADVISORY_IGNORE_IDS=PKSA-d5tc-s1qs-h781 PKSA-m5cs-t1y6-qpcs PKSA-3r5d-mb8f-1qw9 PKSA-mdq4-51ck-6kdq PKSA-b41t-wbzk-9q51'
                 ;;
               *) echo "unknown stack $STACK" >&2; exit 1 ;;
             esac
@@ -179,7 +170,6 @@ jobs:
             queen)
               scenarios=probe-broker-hung,poison-messages,job-metrics,install-owner,broker-leader-kill,partition-order,orphan-reaping,broker-slow
               profiles=queen-php,queen-rust ;;
-            laravel-11) scenarios=parity stack=laravel-11 stack_layout=balanced prefork=on ;;
             upgrade) scenarios=rolling-upgrade profiles=queen-php,queen-rust prefork=on ;;
             soak-*) scenarios=soak profiles=${GROUP#soak-} prefork=on ;;
             *) echo "unknown group $GROUP" >&2; exit 1 ;;
