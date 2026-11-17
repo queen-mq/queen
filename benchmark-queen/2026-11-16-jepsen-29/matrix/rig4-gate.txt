@@ -1,0 +1,15 @@
+# campaign 3, rig 4, gate: 14 tests
+rt-reading-kill                   --workload reading --nemesis kill --time-limit 300 --rate 200 --final-time-limit 300
+rt-reading-pause                  --workload reading --nemesis pause --time-limit 300 --rate 200 --final-time-limit 300
+rt-reading-restart                --workload reading --nemesis restart --time-limit 300 --rate 200 --final-time-limit 300
+te8-pause                         --workload txnelle --nemesis pause --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-member                        --workload txnelle --nemesis membership --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te1-kill                          --workload txnelle --nemesis kill --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=1
+dlqops-part                       --workload dlqops --nemesis partition --time-limit 300 --rate 200
+kvttl-kill                        --workload kvttl --nemesis kill --time-limit 300 --rate 200
+kvttl-part                        --workload kvttl --nemesis partition --time-limit 300 --rate 200
+seek-pause                        --workload seek --nemesis pause --time-limit 300 --rate 200
+pgsink-lz-kill                    --workload pgsink --lazyfs --nemesis kill --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+fr-reading-none                   --workload reading --binary --pad-bytes 600 --nemesis none --time-limit 300 --rate 200
+fr-reading-kill                   --workload reading --binary --pad-bytes 600 --nemesis kill --time-limit 300 --rate 200
+fr-reading-part                   --workload reading --binary --pad-bytes 600 --nemesis partition --time-limit 300 --rate 200

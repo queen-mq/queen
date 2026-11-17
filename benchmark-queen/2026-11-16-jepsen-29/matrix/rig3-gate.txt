@@ -1,0 +1,17 @@
+# campaign 3, rig 3, gate: 16 tests
+rt-reading-none                   --workload reading --nemesis none --time-limit 300 --rate 200 --final-time-limit 300
+rt-reading-lz-kill                --workload reading --lazyfs --nemesis kill --time-limit 300 --rate 200 --final-time-limit 300
+te8-part                          --workload txnelle --nemesis partition --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-restart                       --workload txnelle --nemesis restart --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te1-none                          --workload txnelle --nemesis none --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=1
+ten6-g3-kill                      --workload tenants --tenants 6 --raft-groups 3 --nemesis kill --time-limit 300 --rate 200
+ten6-g3-clock                     --workload tenants --tenants 6 --raft-groups 3 --nemesis clock --time-limit 300 --rate 200
+scoped-none                       --workload scoped --via-proxy --nemesis none --time-limit 300 --rate 200
+kvttl-none                        --workload kvttl --nemesis none --time-limit 300 --rate 200
+kvttl-deaf                        --workload kvttl --nemesis leader-deaf --time-limit 300 --rate 200
+pgsource-kill                     --workload pgsource --nemesis kill --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsource-pause                    --workload pgsource --nemesis pause --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsource-lz-kill                  --workload pgsource --lazyfs --nemesis kill --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsink-part                       --workload pgsink --nemesis partition --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsink-pause                      --workload pgsink --nemesis pause --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+diskfull-log                      --workload log --nemesis disk-full --db-targets one,minority --time-limit 300 --rate 200 --nemesis-interval 20

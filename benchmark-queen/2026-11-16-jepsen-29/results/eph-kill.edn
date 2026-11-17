@@ -1,0 +1,98 @@
+{:faults {:corrupt-outcomes {},
+          :upgrades {},
+          :corrupt-not-back [],
+          :valid? true,
+          :disk-fills 0,
+          :member-final nil,
+          :member-removals {},
+          :disk-full-restarts {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {},
+          :upgrade-final nil},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? false,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches [], :excused []},
+ :lazyfs {:valid? true},
+ :encryption {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:pushes {:ok 20575, :info 1594, :fail 6892},
+            :valid? false,
+            :out-of-order (),
+            :cod-delivered-twice (56
+                                  61
+                                  77
+                                  78
+                                  5319
+                                  5357
+                                  7081
+                                  7105
+                                  7109
+                                  10857
+                                  10925
+                                  11121
+                                  11147
+                                  11177
+                                  11182
+                                  11207),
+            :push-errors {[:push :jepsen.queen.http/io] 3,
+                          [:push :jepsen.queen.http/refused] 6805,
+                          [:push 503] 1678},
+            :loss-judged? false,
+            :deliveries {"gl" 20348, "gc" 20353},
+            :missing {"gl" {:count 281,
+                            :sample (0 1 6 9 11 14 5312 5684)},
+                      "gc" {:count 252,
+                            :sample (0 9 11 14 62 1431 1432 1435)}},
+            :invented (),
+            :reordered-at-handover {:count 108,
+                                    :sample ({:pop 437,
+                                              :partition "e6",
+                                              :first 97,
+                                              :then 93}
+                                             {:pop 441,
+                                              :partition "e3",
+                                              :first 96,
+                                              :then 83}
+                                             {:pop 456,
+                                              :partition "e7",
+                                              :first 87,
+                                              :then 77}
+                                             {:pop 459,
+                                              :partition "e4",
+                                              :first 60,
+                                              :then 49})}},
+ :planner {:valid? true,
+           :total {},
+           :per-node {"n1" {}, "n2" {}, "n3" {}, "n4" {}, "n5" {}}},
+ :stats {:valid? true,
+         :count 58357,
+         :ok-count 41445,
+         :fail-count 15318,
+         :info-count 1594,
+         :by-f {:pop {:valid? true,
+                      :count 29296,
+                      :ok-count 20870,
+                      :fail-count 8426,
+                      :info-count 0},
+                :push {:valid? true,
+                       :count 29061,
+                       :ok-count 20575,
+                       :fail-count 6892,
+                       :info-count 1594}}}}

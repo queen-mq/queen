@@ -1,0 +1,110 @@
+{:faults {:corrupt-outcomes {},
+          :upgrades {},
+          :corrupt-not-back [],
+          :valid? true,
+          :disk-fills 0,
+          :member-final nil,
+          :member-removals {},
+          :disk-full-restarts {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {},
+          :upgrade-final nil},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? false,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches [], :excused []},
+ :lazyfs {:valid? true},
+ :encryption {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:pushes {:ok 28859, :fail 364},
+            :valid? false,
+            :out-of-order (),
+            :cod-delivered-twice (52
+                                  7537
+                                  7850
+                                  7877
+                                  12521
+                                  12601
+                                  12602
+                                  12603
+                                  12614
+                                  12616
+                                  12623
+                                  12629
+                                  12637
+                                  12650
+                                  12651
+                                  12661),
+            :push-errors {[:push :jepsen.queen.http/refused] 364},
+            :loss-judged? true,
+            :deliveries {"gl" 28906, "gc" 28880},
+            :missing {"gl" {:count 19,
+                            :sample (7807
+                                     12596
+                                     13156
+                                     13158
+                                     13160
+                                     13341
+                                     13359
+                                     13437)},
+                      "gc" {:count 19,
+                            :sample (7522
+                                     7695
+                                     7696
+                                     7964
+                                     7997
+                                     8001
+                                     12698
+                                     13251)}},
+            :invented (),
+            :reordered-at-handover {:count 120,
+                                    :sample ({:pop 29679,
+                                              :partition "e7",
+                                              :first 7538,
+                                              :then 7521}
+                                             {:pop 29891,
+                                              :partition "e5",
+                                              :first 7546,
+                                              :then 7537}
+                                             {:pop 30426,
+                                              :partition "e0",
+                                              :first 7714,
+                                              :then 7711}
+                                             {:pop 30448,
+                                              :partition "e5",
+                                              :first 7709,
+                                              :then 7707})}},
+ :planner {:valid? true,
+           :total {},
+           :per-node {"n1" {}, "n2" {}, "n3" {}, "n4" {}, "n5" {}}},
+ :stats {:valid? true,
+         :count 58700,
+         :ok-count 57974,
+         :fail-count 726,
+         :info-count 0,
+         :by-f {:pop {:valid? true,
+                      :count 29477,
+                      :ok-count 29115,
+                      :fail-count 362,
+                      :info-count 0},
+                :push {:valid? true,
+                       :count 29223,
+                       :ok-count 28859,
+                       :fail-count 364,
+                       :info-count 0}}}}

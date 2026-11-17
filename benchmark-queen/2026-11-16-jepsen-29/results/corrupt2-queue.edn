@@ -1,0 +1,262 @@
+{:faults {:corrupt-outcomes {[:qlog :booted nil] 5,
+                             [:qlog :refused :rejoin] 2,
+                             [:qlog :refused :restore] 5,
+                             [:store :refused :rejoin] 4,
+                             [:store :refused :restore] 2},
+          :upgrades {},
+          :corrupt-not-back [],
+          :valid? true,
+          :disk-fills 0,
+          :member-final nil,
+          :member-removals {},
+          :disk-full-restarts {},
+          :corrupt-trials 18,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {1 13},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {},
+          :upgrade-final nil},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches [], :excused []},
+ :lazyfs {:valid? true},
+ :encryption {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:total-queue {:ok-count 23928,
+                          :duplicated-count 0,
+                          :valid? true,
+                          :lost-count 0,
+                          :lost #{},
+                          :acknowledged-count 23772,
+                          :recovered #{26920
+                                       26988
+                                       26984
+                                       21287
+                                       21289
+                                       17028
+                                       16522
+                                       16554
+                                       21349
+                                       16493
+                                       17098
+                                       21407
+                                       17031
+                                       21369
+                                       16520
+                                       26907
+                                       17082
+                                       16613
+                                       26955
+                                       16989
+                                       21411
+                                       17103
+                                       26913
+                                       16489
+                                       26943
+                                       21295
+                                       17034
+                                       17025
+                                       26910
+                                       17069
+                                       16590
+                                       26936
+                                       17094
+                                       17021
+                                       17017
+                                       21292
+                                       16542
+                                       16507
+                                       26929
+                                       26934
+                                       26981
+                                       21294
+                                       16609
+                                       21340
+                                       16545
+                                       16488
+                                       21431
+                                       16618
+                                       16525
+                                       26864
+                                       26892
+                                       21428
+                                       17087
+                                       17041
+                                       16481
+                                       16588
+                                       26940
+                                       26923
+                                       21302
+                                       16564
+                                       21291
+                                       21290
+                                       17039
+                                       21385
+                                       21424
+                                       16456
+                                       17023
+                                       21308
+                                       17100
+                                       26852
+                                       17123
+                                       26868
+                                       21286
+                                       16551
+                                       17072
+                                       21322
+                                       16499
+                                       21336
+                                       26798
+                                       17016
+                                       16544
+                                       16487
+                                       16505
+                                       21317
+                                       21381
+                                       17055
+                                       16567
+                                       16519
+                                       16510
+                                       17084
+                                       26890
+                                       21374
+                                       16530
+                                       16535
+                                       26932
+                                       16547
+                                       16495
+                                       26898
+                                       16571
+                                       16583
+                                       21355
+                                       16491
+                                       16485
+                                       16576
+                                       17046
+                                       16562
+                                       21389
+                                       26795
+                                       16604
+                                       26927
+                                       26925
+                                       16539
+                                       17029
+                                       21393
+                                       17114
+                                       26918
+                                       21422
+                                       17081
+                                       16498
+                                       26924
+                                       26894
+                                       17074
+                                       17073
+                                       16557
+                                       26921
+                                       17052
+                                       16559
+                                       26861
+                                       17038
+                                       21299
+                                       21352
+                                       17077
+                                       16501
+                                       21398
+                                       16514
+                                       26899
+                                       17060
+                                       26928
+                                       16584
+                                       26926
+                                       21305
+                                       26895
+                                       21416
+                                       17071
+                                       26987
+                                       26876
+                                       21288
+                                       21359
+                                       26953
+                                       26972
+                                       26973
+                                       21320
+                                       26893
+                                       26879
+                                       21315
+                                       17126},
+                          :attempt-count 27262,
+                          :unexpected #{},
+                          :unexpected-count 0,
+                          :recovered-count 156,
+                          :duplicated #{}},
+            :queue {:lease-overlaps (),
+                    :ack-refused-under-renewal (),
+                    :payload-mismatch (),
+                    :valid? true,
+                    :noop-ack-examples (),
+                    :acked-twice (),
+                    :acked-twice-count 0,
+                    :lease-overlap-count 0,
+                    :partial-acks 0,
+                    :acked 23928,
+                    :ack-refused-after-renewal 0,
+                    :redeliveries 1,
+                    :pop-skips (),
+                    :offset-value-mismatch (),
+                    :ack-unknown 0,
+                    :pop-skip-count 0,
+                    :noop-acks 0,
+                    :deliveries 23928,
+                    :pop-internal-gaps (),
+                    :pop-skips-excused 0,
+                    :redelivered-after-ack-count 0,
+                    :ack-rejected 0,
+                    :redelivered-after-ack (),
+                    :renewals {}},
+            :valid? true},
+ :planner {:valid? true,
+           :total {:parallel 2658,
+                   :serial 60524,
+                   :fallback 0,
+                   :late 0,
+                   :spread 0,
+                   :taken_back 0},
+           :per-node {"n1" {:parallel 2658,
+                            :serial 60524,
+                            :fallback 0,
+                            :late 0,
+                            :spread 0,
+                            :taken_back 0},
+                      "n2" {},
+                      "n3" {},
+                      "n4" {},
+                      "n5" {}}},
+ :stats {:valid? true,
+         :count 54369,
+         :ok-count 47321,
+         :fail-count 6888,
+         :info-count 160,
+         :by-f {:dequeue {:valid? true,
+                          :count 27107,
+                          :ok-count 23549,
+                          :fail-count 3558,
+                          :info-count 0},
+                :enqueue {:valid? true,
+                          :count 27262,
+                          :ok-count 23772,
+                          :fail-count 3330,
+                          :info-count 160}}}}

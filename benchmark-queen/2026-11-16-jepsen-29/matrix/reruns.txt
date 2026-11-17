@@ -1,0 +1,6 @@
+# campaign 4 reruns, rig 1, 2026-11-17: the ephemeral fix (5543add64) and the seek harness (fc0b6f978)
+eph-restart                       --workload ephemeral --nemesis restart --time-limit 300 --rate 200
+eph-kill                          --workload ephemeral --nemesis kill --time-limit 300 --rate 200
+eph-part                          --workload ephemeral --nemesis partition --time-limit 300 --rate 200
+eph-pause                         --workload ephemeral --nemesis pause --time-limit 300 --rate 200
+seek-kill                         --workload seek --nemesis kill --time-limit 300 --rate 200

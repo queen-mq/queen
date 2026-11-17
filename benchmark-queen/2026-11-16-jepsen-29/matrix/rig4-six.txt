@@ -1,0 +1,17 @@
+# campaign 3, rig 4, six: 16 tests
+sb-kv-planned-smoke         --workload failover --standby-nodes 3 --failover planned --w12-kv --nemesis none --time-limit 180 --rate 200
+sb-groups-planned-smoke     --workload failover --standby-nodes 3 --failover planned --tenants 4 --raft-groups 2 --txn --nemesis none --time-limit 180 --rate 200
+sb-kv-crash-kill            --workload failover --standby-nodes 3 --failover crash --w12-kv --txn --nemesis kill --time-limit 300 --rate 200
+sb-kv-planned-kill          --workload failover --standby-nodes 3 --failover planned --w12-kv --txn --nemesis kill --time-limit 300 --rate 200
+sb-seed-crash-pause         --workload failover --standby-nodes 3 --failover crash --standby-seed --nemesis pause --time-limit 300 --rate 200
+sb-seed-kv-crash-kill       --workload failover --standby-nodes 3 --failover crash --standby-seed --w12-kv --txn --nemesis kill --time-limit 300 --rate 200
+sb-groups-planned-kill      --workload failover --standby-nodes 3 --failover planned --tenants 4 --raft-groups 2 --txn --nemesis kill --time-limit 300 --rate 200
+sb-up-sbfirst-planned       --workload failover --standby-nodes 3 --failover planned --failover-at 250 --nemesis upgrade --bin-old /root/bin/queen-old --upgrade-mode standby-first --upgrade-interval 20 --time-limit 400 --rate 200
+sb-up-kv-planned            --workload failover --standby-nodes 3 --failover planned --failover-at 250 --w12-kv --txn --nemesis upgrade --bin-old /root/bin/queen-old --upgrade-mode standby-first --upgrade-interval 20 --time-limit 400 --rate 200
+fo-crash-kill           --workload failover --standby-nodes 3 --failover crash --nemesis kill --time-limit 300 --rate 200
+fo-crash-restart        --workload failover --standby-nodes 3 --failover crash --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+fo-planned-part         --workload failover --standby-nodes 3 --failover planned --nemesis partition --time-limit 300 --rate 200
+fo-crash-txn-kill       --workload failover --standby-nodes 3 --failover crash --txn --nemesis kill --time-limit 300 --rate 200
+fo-planned-txn-part     --workload failover --standby-nodes 3 --failover planned --txn --nemesis partition --time-limit 300 --rate 200
+fo-crash-txn-kill-2     --workload failover --standby-nodes 3 --failover crash --txn --nemesis kill --time-limit 300 --rate 200
+fo-behind-txn-part      --workload failover --standby-nodes 3 --failover crash-behind --txn --nemesis partition --time-limit 300 --rate 200

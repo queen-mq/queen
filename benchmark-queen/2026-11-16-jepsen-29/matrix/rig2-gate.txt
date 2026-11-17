@@ -1,0 +1,16 @@
+# campaign 3, rig 2, gate: 15 tests
+rt-reading-part                   --workload reading --nemesis partition --time-limit 300 --rate 200 --final-time-limit 300
+rt-reading-member                 --workload reading --nemesis membership --time-limit 300 --rate 200 --final-time-limit 300
+te8-none                          --workload txnelle --nemesis none --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-clock                         --workload txnelle --nemesis clock --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-lz-kill                       --workload txnelle --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te1-part                          --workload txnelle --nemesis partition --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=1
+ten6-g3-deaf                      --workload tenants --tenants 6 --raft-groups 3 --nemesis leader-deaf --time-limit 300 --rate 200
+scoped-part                       --workload scoped --via-proxy --nemesis partition --time-limit 300 --rate 200
+kvttl-pause                       --workload kvttl --nemesis pause --time-limit 300 --rate 200
+pgsource-none                     --workload pgsource --nemesis none --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsource-part                     --workload pgsource --nemesis partition --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsource-restart                  --workload pgsource --nemesis restart --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsink-none                       --workload pgsink --nemesis none --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+pgsink-restart                    --workload pgsink --nemesis restart --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+diskfull-queue                    --workload queue --nemesis disk-full --db-targets one,minority --time-limit 300 --rate 200 --nemesis-interval 20

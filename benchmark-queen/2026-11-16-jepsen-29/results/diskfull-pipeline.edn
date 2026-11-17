@@ -1,0 +1,307 @@
+{:faults {:corrupt-outcomes {},
+          :upgrades {},
+          :corrupt-not-back [],
+          :valid? true,
+          :disk-fills 0,
+          :member-final nil,
+          :member-removals {},
+          :disk-full-restarts {:stopped 13},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {},
+          :upgrade-final nil},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true,
+         :count 0,
+         :matches [],
+         :excused [{:node "n1",
+                    :line "2026-11-16T17:28:42.149802772Z ERROR rsm: raft log writer poisoned; node stops why=raft log write failed: No space left on device (os error 28)"}
+                   {:node "n1",
+                    :line "2026-11-16T17:30:59.27709051Z ERROR rsm: raft log writer poisoned; node stops why=raft log write failed: No space left on device (os error 28)"}
+                   {:node "n2",
+                    :line "2026-11-16T17:27:19.11119539Z ERROR rsm: raft log writer poisoned; node stops why=raft state write failed: No space left on device (os error 28)"}
+                   {:node "n2",
+                    :line "2026-11-16T17:30:32.417189311Z ERROR rsm: raft log writer poisoned; node stops why=raft log write failed: No space left on device (os error 28)"}
+                   {:node "n4",
+                    :line "2026-11-16T17:27:15.77891677Z ERROR rsm: raft log writer poisoned; node stops why=raft log write failed: No space left on device (os error 28)"}
+                   {:node "n4",
+                    :line "2026-11-16T17:29:33.268812078Z ERROR rsm: raft log writer poisoned; node stops why=raft log write failed: No space left on device (os error 28)"}
+                   {:node "n5",
+                    :line "2026-11-16T17:30:33.259239628Z ERROR rsm: raft log writer poisoned; node stops why=raft log write failed: No space left on device (os error 28)"}]},
+ :lazyfs {:valid? true},
+ :encryption {:valid? true},
+ :ex {:valid? true,
+      :exceptions ({:count 9,
+                    :class clojure.lang.ExceptionInfo,
+                    :example {:index 92,
+                              :time 441732103,
+                              :type :info,
+                              :process :nemesis,
+                              :f :fill-disk,
+                              :value :minority,
+                              :exception {:via [{:type clojure.lang.ExceptionInfo,
+                                                 :message "Command exited with non-zero status 1 on node n2:\nsudo -k -S -u root bash -c \"cd /; fallocate -l 36019105792 /opt/queen/fill\"\n\nSTDIN:\nnull\n\nSTDOUT:\n\n\nSTDERR:\nfallocate: fallocate failed: No space left on device\n",
+                                                 :data {:type :jepsen.control/nonzero-exit,
+                                                        :cmd "sudo -k -S -u root bash -c \"cd /; fallocate -l 36019105792 /opt/queen/fill\"",
+                                                        :out "",
+                                                        :err "fallocate: fallocate failed: No space left on device\n",
+                                                        :exit 1,
+                                                        :host "n2",
+                                                        :action {:cmd "sudo -k -S -u root bash -c \"cd /; fallocate -l 36019105792 /opt/queen/fill\""}},
+                                                 :at [clj_commons.slingshot.support$stack_trace
+                                                      invoke
+                                                      "support.clj"
+                                                      202]}],
+                                          :trace [[clj_commons.slingshot.support$stack_trace
+                                                   invoke
+                                                   "support.clj"
+                                                   202]
+                                                  [jepsen.control.core$throw_on_nonzero_exit
+                                                   invokeStatic
+                                                   "core.clj"
+                                                   166]
+                                                  [jepsen.control.core$throw_on_nonzero_exit
+                                                   invoke
+                                                   "core.clj"
+                                                   161]
+                                                  [jepsen.control$exec_STAR_
+                                                   invokeStatic
+                                                   "control.clj"
+                                                   145]
+                                                  [jepsen.control$exec_STAR_
+                                                   doInvoke
+                                                   "control.clj"
+                                                   142]
+                                                  [clojure.lang.RestFn
+                                                   applyTo
+                                                   "RestFn.java"
+                                                   140]
+                                                  [clojure.core$apply
+                                                   invokeStatic
+                                                   "core.clj"
+                                                   667]
+                                                  [clojure.core$apply
+                                                   invoke
+                                                   "core.clj"
+                                                   662]
+                                                  [jepsen.control$exec
+                                                   invokeStatic
+                                                   "control.clj"
+                                                   161]
+                                                  [jepsen.control$exec
+                                                   doInvoke
+                                                   "control.clj"
+                                                   155]
+                                                  [clojure.lang.RestFn
+                                                   invoke
+                                                   "RestFn.java"
+                                                   460]
+                                                  [jepsen.queen.nemesis$fill_disk_BANG_
+                                                   invokeStatic
+                                                   "nemesis.clj"
+                                                   663]
+                                                  [jepsen.queen.nemesis$fill_disk_BANG_
+                                                   invoke
+                                                   "nemesis.clj"
+                                                   650]
+                                                  [jepsen.queen.nemesis$disk_full_nemesis$reify__6050$fn__6054
+                                                   invoke
+                                                   "nemesis.clj"
+                                                   778]
+                                                  [clojure.core$partial$fn__5927
+                                                   invoke
+                                                   "core.clj"
+                                                   2645]
+                                                  [jepsen.control$with_nodes_STAR_$fn__12652
+                                                   invoke
+                                                   "control.clj"
+                                                   305]
+                                                  [clojure.lang.AFn
+                                                   applyToHelper
+                                                   "AFn.java"
+                                                   154]
+                                                  [clojure.lang.AFn
+                                                   applyTo
+                                                   "AFn.java"
+                                                   144]
+                                                  [clojure.core$apply
+                                                   invokeStatic
+                                                   "core.clj"
+                                                   667]
+                                                  [clojure.core$with_bindings_STAR_
+                                                   invokeStatic
+                                                   "core.clj"
+                                                   1994]
+                                                  [clojure.core$with_bindings_STAR_
+                                                   doInvoke
+                                                   "core.clj"
+                                                   1994]
+                                                  [clojure.lang.RestFn
+                                                   applyTo
+                                                   "RestFn.java"
+                                                   145]
+                                                  [clojure.core$apply
+                                                   invokeStatic
+                                                   "core.clj"
+                                                   671]
+                                                  [clojure.core$bound_fn_STAR_$fn__5837
+                                                   doInvoke
+                                                   "core.clj"
+                                                   2024]
+                                                  [clojure.lang.RestFn
+                                                   invoke
+                                                   "RestFn.java"
+                                                   411]
+                                                  [dom_top.core$real_pmap_helper$build_thread__211$fn__212
+                                                   invoke
+                                                   "core.clj"
+                                                   169]
+                                                  [clojure.lang.AFn
+                                                   applyToHelper
+                                                   "AFn.java"
+                                                   152]
+                                                  [clojure.lang.AFn
+                                                   applyTo
+                                                   "AFn.java"
+                                                   144]
+                                                  [clojure.core$apply
+                                                   invokeStatic
+                                                   "core.clj"
+                                                   667]
+                                                  [clojure.core$with_bindings_STAR_
+                                                   invokeStatic
+                                                   "core.clj"
+                                                   1994]
+                                                  [clojure.core$with_bindings_STAR_
+                                                   doInvoke
+                                                   "core.clj"
+                                                   1994]
+                                                  [clojure.lang.RestFn
+                                                   invoke
+                                                   "RestFn.java"
+                                                   428]
+                                                  [clojure.lang.AFn
+                                                   applyToHelper
+                                                   "AFn.java"
+                                                   156]
+                                                  [clojure.lang.RestFn
+                                                   applyTo
+                                                   "RestFn.java"
+                                                   135]
+                                                  [clojure.core$apply
+                                                   invokeStatic
+                                                   "core.clj"
+                                                   671]
+                                                  [clojure.core$bound_fn_STAR_$fn__5837
+                                                   doInvoke
+                                                   "core.clj"
+                                                   2024]
+                                                  [clojure.lang.RestFn
+                                                   invoke
+                                                   "RestFn.java"
+                                                   400]
+                                                  [clojure.lang.AFn
+                                                   run
+                                                   "AFn.java"
+                                                   22]
+                                                  [java.lang.Thread
+                                                   run
+                                                   "Thread.java"
+                                                   1583]],
+                                          :cause "Command exited with non-zero status 1 on node n2:\nsudo -k -S -u root bash -c \"cd /; fallocate -l 36019105792 /opt/queen/fill\"\n\nSTDIN:\nnull\n\nSTDOUT:\n\n\nSTDERR:\nfallocate: fallocate failed: No space left on device\n",
+                                          :data {:type :jepsen.control/nonzero-exit,
+                                                 :cmd "sudo -k -S -u root bash -c \"cd /; fallocate -l 36019105792 /opt/queen/fill\"",
+                                                 :out "",
+                                                 :err "fallocate: fallocate failed: No space left on device\n",
+                                                 :exit 1,
+                                                 :host "n2",
+                                                 :action {:cmd "sudo -k -S -u root bash -c \"cd /; fallocate -l 36019105792 /opt/queen/fill\""}}},
+                              :error "indeterminate: Command exited with non-zero status 1 on node n2:\nsudo -k -S -u root bash -c \"cd /; fallocate -l 36019105792 /opt/queen/fill\"\n\nSTDIN:\nnull\n\nSTDOUT:\n\n\nSTDERR:\nfallocate: fallocate failed: No space left on device\n"}})},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:twice (),
+            :out-records 19480,
+            :final-reads-agree true,
+            :late-transactions 0,
+            :valid? true,
+            :lost-count 0,
+            :phantom (),
+            :counter-reads 235,
+            :lost (),
+            :transactions-ok 19480,
+            :transactions-info 37,
+            :twice-count 0,
+            :counter-mismatch [],
+            :inputs 19445,
+            :transactions-fail 0,
+            :bound-violation-count 0,
+            :bound-violations (),
+            :ok-txn-missing (),
+            :phantom-count 0},
+ :planner {:valid? true,
+           :total {:parallel 16161,
+                   :serial 44030,
+                   :fallback 0,
+                   :late 0,
+                   :spread 15723,
+                   :taken_back 0},
+           :per-node {"n1" {:parallel 4024,
+                            :serial 11480,
+                            :fallback 0,
+                            :late 0,
+                            :spread 3946,
+                            :taken_back 0},
+                      "n2" {},
+                      "n3" {},
+                      "n4" {:parallel 3739,
+                            :serial 9454,
+                            :fallback 0,
+                            :late 0,
+                            :spread 3596,
+                            :taken_back 0},
+                      "n5" {:parallel 8398,
+                            :serial 23096,
+                            :fallback 0,
+                            :late 0,
+                            :spread 8181,
+                            :taken_back 0}}},
+ :stats {:valid? true,
+         :count 49888,
+         :ok-count 39856,
+         :fail-count 5139,
+         :info-count 4893,
+         :by-f {:enqueue {:valid? true,
+                          :count 24373,
+                          :ok-count 19445,
+                          :fail-count 72,
+                          :info-count 4856},
+                :final-read {:valid? true,
+                             :count 10,
+                             :ok-count 10,
+                             :fail-count 0,
+                             :info-count 0},
+                :process {:valid? true,
+                          :count 25212,
+                          :ok-count 20166,
+                          :fail-count 5009,
+                          :info-count 37},
+                :read-counters {:valid? true,
+                                :count 293,
+                                :ok-count 235,
+                                :fail-count 58,
+                                :info-count 0}}}}

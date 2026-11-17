@@ -154,8 +154,8 @@ group 1. Pin a big tenant before it writes, because a tenant cannot move while i
 \queenfig{tenants-groups}{Tenants through the proxy, each in one raft group.}
 
 \why{tenants share machines, not data. One leader per tenant keeps each tenant's transaction a
-single log entry, and more groups spread the tenants' writes over more leaders. Raft groups were
-not part of the Jepsen tests, which ran one group.}
+single log entry, and more groups spread the tenants' writes over more leaders. The Jepsen tests
+run six tenants in three raft groups, and a standby that follows several groups.}
 
 Three things to know: every node needs the same secrets; the membership routes are closed on the
 proxy's port, so call them on 6632; and keep \texttt{QUEEN\_PROXY\_SPOOL\_DIR} on the data volume,

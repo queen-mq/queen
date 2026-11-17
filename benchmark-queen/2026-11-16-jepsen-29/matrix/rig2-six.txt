@@ -1,0 +1,15 @@
+# campaign 3, rig 2, six: 14 tests
+sb-kv-crash-smoke           --workload failover --standby-nodes 3 --failover crash --w12-kv --nemesis none --time-limit 180 --rate 200
+sb-groups-crash-smoke       --workload failover --standby-nodes 3 --failover crash --tenants 4 --raft-groups 2 --txn --nemesis none --time-limit 180 --rate 200
+sb-kv-crash-part            --workload failover --standby-nodes 3 --failover crash --w12-kv --txn --nemesis partition --time-limit 300 --rate 200
+sb-kv-behind                --workload failover --standby-nodes 3 --failover crash-behind --w12-kv --txn --nemesis none --time-limit 300 --rate 200
+sb-seed-crash-lz-kill       --workload failover --standby-nodes 3 --failover crash --standby-seed --lazyfs --nemesis kill --time-limit 300 --rate 200
+sb-groups-crash-kill        --workload failover --standby-nodes 3 --failover crash --tenants 4 --raft-groups 2 --txn --nemesis kill --time-limit 300 --rate 200
+sb-groups-behind            --workload failover --standby-nodes 3 --failover crash-behind --tenants 4 --raft-groups 2 --txn --nemesis none --time-limit 300 --rate 200
+sb-up-sbfirst-crash         --workload failover --standby-nodes 3 --failover crash --failover-at 250 --nemesis upgrade --bin-old /root/bin/queen-old --upgrade-mode standby-first --upgrade-interval 20 --time-limit 400 --rate 200
+fo-crash-part           --workload failover --standby-nodes 3 --failover crash --nemesis partition --time-limit 300 --rate 200
+fo-crash-clock          --workload failover --standby-nodes 3 --failover crash --nemesis clock --time-limit 300 --rate 200
+fo-planned-pause        --workload failover --standby-nodes 3 --failover planned --nemesis pause --time-limit 300 --rate 200
+fo-crash-txn-part       --workload failover --standby-nodes 3 --failover crash --txn --nemesis partition --time-limit 300 --rate 200
+fo-crash-kill-2         --workload failover --standby-nodes 3 --failover crash --nemesis kill --time-limit 300 --rate 200
+fo-behind               --workload failover --standby-nodes 3 --failover crash-behind --nemesis none --time-limit 300 --rate 200

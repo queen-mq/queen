@@ -60,7 +60,7 @@ export const hero = {
   },
   /** The proof, one short claim per pill, each a link to the page that backs it. */
   proof: [
-    { label: "226 Jepsen tests passed", href: "/benchmarks/jepsen/" },
+    { label: "568 Jepsen tests passed", href: "/benchmarks/jepsen/" },
     { label: "3M msg/s on three nodes", href: "/benchmarks/queen-vs-kafka/" },
     { label: "In production at Smartness", href: "/introduction/about/" },
     { label: "Rust, one binary, Apache-2.0", href: "https://github.com/queen-mq/queen" },
@@ -325,8 +325,8 @@ export const provenSection = {
 export const proven: { title: string; body: string; href: string }[] = [
   { title: "In production", body: "At Smartness, where QueenMQ is built.", href: "/introduction/about/" },
   {
-    title: "226 Jepsen tests",
-    body: "On 2.7, all passed. No acknowledged message lost, no lease held twice.",
+    title: "568 Jepsen tests",
+    body: "On 2.9, all passed. No acknowledged message lost, no lease held twice.",
     href: "/benchmarks/jepsen/",
   },
   { title: "Rust, Apache-2.0", body: "Written in Rust. Open source under Apache-2.0.", href: "https://github.com/queen-mq/queen" },

@@ -1,0 +1,11 @@
+2026-11-17T06:08:13Z orchestrate-7 start: jepsen-ctl, src md5 919f6dcbb220910f8211aa84f14b596a
+2026-11-17T06:08:17Z build start
+   Compiling queen-pg v2.0.0 (/root/src7/connectors/queen-pg)
+   Compiling queen-proxy v1.6.0 (/root/src7/proxy)
+    Finished `release` profile [optimized] target(s) in 11m 07s
+2026-11-17T06:19:27Z broker: 73d4cb26439c834680e4688edcfa2ce4 (campaign 4's: 94dd10fc4fd8d222abbc64a88f0655fb)
+2026-11-17T06:19:37Z nodes: jepsen-n1 jepsen-n2 jepsen-n3 jepsen-n4 jepsen-n5 
+2026-11-17T06:21:21Z first test: Everything looks good! ヽ(‘ー`)ノ
+2026-11-17T06:50:32Z reruns done: 5 tests, 5 valid; powering the rig off
+ssh: connect to host n6 port 22: Connection timed out
+Shutdown scheduled for Tue 2026-11-17 06:52:44 UTC, use 'shutdown -c' to cancel.

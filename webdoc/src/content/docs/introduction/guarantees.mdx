@@ -88,7 +88,7 @@ A broker that promises "all or nothing" has to keep the promise exactly when som
 | Timers | A timer fires at most once, never after a cancel that reported removing it, and never before its delay. |
 | Every answered write, with two exceptions below | Survives kill -9 and power loss. |
 
-The campaign on the code of 2.7.0 ran 226 tests, all of 2.6.0's but its 31 standby failovers, and all were valid. [Jepsen](/benchmarks/jepsen/) lists every campaign, every fault, and every bug the earlier campaigns found and we fixed.
+The campaign on the code of 2.9.0 ran 568 tests, every one the harness has, the standby failovers among them, and all were valid: 561 at their first run, 5 again after the fixes their first run led to, and 2 with wrong answers under clock jumps of minutes counted, as the Clocks item below says. [Jepsen](/benchmarks/jepsen/) lists every campaign, every fault, and every bug the campaigns found and we fixed.
 
 <Why>"exactly once" and "no message lost" are easy to write and hard to keep. A test that kills, cuts and pauses the nodes while it checks every answer is the only way we know to find out whether we keep them.</Why>
 
@@ -116,7 +116,7 @@ A 503 means the outcome is not known: the write may still commit (`retry`, `time
 ## Where the guarantees stop
 
 - **This is testing, not proof.** Jepsen finds bugs; it cannot show there are none.
-- **The campaigns run the HTTP API on one raft group.** The Kafka port, and several raft groups per node, are not in them.
+- **Not every path is in the campaigns.** They run the HTTP API, the Kafka port, and several raft groups per node in 16 tests; no test pops several partitions at once (`autopilot`), starts a group at `new` or at a time, sends KV `delete` or `getPrefix`, or reads a MySQL source.
 - **Clocks.** Keep the nodes' clocks within 500 ms of each other (`QUEEN_RAFT_MAX_CLOCK_SKEW_MS`): lease exclusivity across a change of leader depends on it. Further apart (our Jepsen tests also jump clocks by minutes), nothing is lost or written twice, but some answers can be wrong: a lock renew can answer `lost` while the lock still holds, and the owner's next acquire then answers `already: true` with the old token (a guarded transaction still refuses a stale writer); a transaction a node relayed while the leader changed can be answered rolled back although it committed, once.
 - **Disks.** Losing a majority of the disks for good can lose acked data. Raft survives the loss of a minority, and no more.
 - **A standby cluster** replays the cluster a moment later. Promoting it after the cluster is lost gives up the acked writes it had not read yet.

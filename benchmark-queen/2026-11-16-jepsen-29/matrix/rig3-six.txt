@@ -1,0 +1,15 @@
+# campaign 3, rig 3, six: 14 tests
+sb-seed-crash-smoke         --workload failover --standby-nodes 3 --failover crash --standby-seed --nemesis none --time-limit 240 --rate 200
+sb-kv-crash-lz-kill         --workload failover --standby-nodes 3 --failover crash --w12-kv --txn --lazyfs --nemesis kill --time-limit 300 --rate 200
+sb-seed-crash-part          --workload failover --standby-nodes 3 --failover crash --standby-seed --nemesis partition --time-limit 300 --rate 200
+sb-seed-planned-kill        --workload failover --standby-nodes 3 --failover planned --standby-seed --nemesis kill --time-limit 300 --rate 200
+sb-groups-crash-pause       --workload failover --standby-nodes 3 --failover crash --tenants 4 --raft-groups 2 --txn --nemesis pause --time-limit 300 --rate 200
+sb-up-srcfirst-planned      --workload failover --standby-nodes 3 --failover planned --failover-at 250 --nemesis upgrade --bin-old /root/bin/queen-old --upgrade-mode source-first --upgrade-interval 20 --time-limit 400 --rate 200
+sb-up-mid-crash             --workload failover --standby-nodes 3 --failover crash --failover-at 130 --nemesis upgrade --bin-old /root/bin/queen-old --upgrade-mode standby-first --upgrade-interval 40 --time-limit 300 --rate 200
+fo-planned-smoke        --workload failover --standby-nodes 3 --failover planned --nemesis none --time-limit 180 --rate 200
+fo-crash-lz-kill        --workload failover --standby-nodes 3 --failover crash --lazyfs --nemesis kill --time-limit 300 --rate 200
+fo-planned-kill         --workload failover --standby-nodes 3 --failover planned --nemesis kill --time-limit 300 --rate 200
+fo-planned-restart      --workload failover --standby-nodes 3 --failover planned --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+fo-planned-txn-kill     --workload failover --standby-nodes 3 --failover planned --txn --nemesis kill --time-limit 300 --rate 200
+fo-crash-lz-kill-2      --workload failover --standby-nodes 3 --failover crash --lazyfs --nemesis kill --time-limit 300 --rate 200
+fo-behind-kill          --workload failover --standby-nodes 3 --failover crash-behind --nemesis kill --time-limit 300 --rate 200

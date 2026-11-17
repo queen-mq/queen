@@ -1,0 +1,192 @@
+{:faults {:corrupt-outcomes {},
+          :upgrades {},
+          :corrupt-not-back [],
+          :valid? true,
+          :disk-fills 0,
+          :member-final nil,
+          :member-removals {},
+          :disk-full-restarts {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {},
+          :upgrade-final nil},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches [], :excused []},
+ :lazyfs {:valid? true},
+ :encryption {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:info-causes {[:txn "IllegalStateException" :fatal] 931,
+                          [:txn "InvalidTxnStateException" :fatal] 9,
+                          [:txn "TimeoutException" :abort-failed] 2},
+            :plots? true,
+            :valid? true,
+            :poll-skip {:count 1,
+                        :errs ({:key 47,
+                                :delta 14,
+                                :skipped (23
+                                          24
+                                          29
+                                          30
+                                          31
+                                          33
+                                          32
+                                          34
+                                          35
+                                          36
+                                          37
+                                          38
+                                          39),
+                                :ops [{:index 1842,
+                                       :time 190553807768,
+                                       :type :ok,
+                                       :process 360,
+                                       :f :poll,
+                                       :value [[:poll
+                                                {47 [[10 21] [11 22]]}]]}
+                                      {:index 2018,
+                                       :time 210959353701,
+                                       :type :ok,
+                                       :process 360,
+                                       :f :txn,
+                                       :value [[:poll {}]
+                                               [:poll
+                                                {34 [[3 5]],
+                                                 37 [[32 45]
+                                                     [33 46]
+                                                     [34 47]
+                                                     [35 48]
+                                                     [36 49]
+                                                     [37 50]
+                                                     [38 51]
+                                                     [39 52]
+                                                     [40 53]
+                                                     [41 54]],
+                                                 47 [[25 40]
+                                                     [26 41]
+                                                     [27 45]
+                                                     [28 46]
+                                                     [29 47]]}]
+                                               [:send 51 [nil 54]]],
+                                       :rebalance-log [{:keys [32
+                                                               33
+                                                               34
+                                                               35
+                                                               36
+                                                               37
+                                                               38
+                                                               39
+                                                               40
+                                                               41
+                                                               42
+                                                               43
+                                                               44
+                                                               45
+                                                               46
+                                                               47]}]}]})},
+            :worst-realtime-lag {:time 321.584422604,
+                                 :process 914,
+                                 :key 21,
+                                 :lag 260.142748314},
+            :fail-causes {[:jepsen.queen.workload.kafka/init-failed
+                           "TimeoutException"] 98,
+                          [:jepsen.queen.workload.kafka/no-topic
+                           "jepsen-t4"] 3,
+                          [:txn "TimeoutException" :aborted] 1,
+                          [:txn "CommitFailedException" :aborted] 1},
+            :kafka-model-valid? true,
+            :error-types [:poll-skip],
+            :bad-error-types []},
+ :planner {:valid? true,
+           :total {:parallel 845,
+                   :serial 5784,
+                   :fallback 0,
+                   :late 0,
+                   :spread 823,
+                   :taken_back 0},
+           :per-node {"n1" {:parallel 4,
+                            :serial 41,
+                            :fallback 0,
+                            :late 0,
+                            :spread 3,
+                            :taken_back 0},
+                      "n2" {:parallel 88,
+                            :serial 797,
+                            :fallback 0,
+                            :late 0,
+                            :spread 85,
+                            :taken_back 0},
+                      "n3" {:parallel 117,
+                            :serial 1802,
+                            :fallback 0,
+                            :late 0,
+                            :spread 110,
+                            :taken_back 0},
+                      "n4" {:parallel 514,
+                            :serial 2377,
+                            :fallback 0,
+                            :late 0,
+                            :spread 509,
+                            :taken_back 0},
+                      "n5" {:parallel 122,
+                            :serial 767,
+                            :fallback 0,
+                            :late 0,
+                            :spread 116,
+                            :taken_back 0}}},
+ :stats {:valid? true,
+         :count 2253,
+         :ok-count 1137,
+         :fail-count 107,
+         :info-count 1009,
+         :by-f {:assign {:valid? true,
+                         :count 28,
+                         :ok-count 25,
+                         :fail-count 3,
+                         :info-count 0},
+                :crash {:valid? false,
+                        :count 67,
+                        :ok-count 0,
+                        :fail-count 0,
+                        :info-count 67},
+                :debug-topic-partitions {:valid? true,
+                                         :count 10,
+                                         :ok-count 10,
+                                         :fail-count 0,
+                                         :info-count 0},
+                :poll {:valid? true,
+                       :count 670,
+                       :ok-count 232,
+                       :fail-count 24,
+                       :info-count 414},
+                :send {:valid? true,
+                       :count 403,
+                       :ok-count 380,
+                       :fail-count 21,
+                       :info-count 2},
+                :subscribe {:valid? true,
+                            :count 11,
+                            :ok-count 10,
+                            :fail-count 1,
+                            :info-count 0},
+                :txn {:valid? true,
+                      :count 1064,
+                      :ok-count 480,
+                      :fail-count 58,
+                      :info-count 526}}}}

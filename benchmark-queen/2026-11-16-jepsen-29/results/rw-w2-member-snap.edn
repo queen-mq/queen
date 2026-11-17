@@ -1,0 +1,406 @@
+{:faults {:corrupt-outcomes {},
+          :upgrades {},
+          :corrupt-not-back [],
+          :valid? true,
+          :disk-fills 0,
+          :member-final {:leader nil,
+                         :term 5,
+                         :voters [1 2 3 4 5],
+                         :learners []},
+          :member-removals {[200 nil] 6, [nil nil] 2, [503 "retry"] 2},
+          :disk-full-restarts {},
+          :corrupt-trials 0,
+          :member-rejoins {true 6},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {:member-cycle 4,
+                       :member-double 4,
+                       :member-heal 1},
+          :member-skipped {},
+          :upgrade-final nil},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches [], :excused []},
+ :lazyfs {:valid? true},
+ :encryption {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:total-queue {:ok-count 3862,
+                          :duplicated-count 0,
+                          :valid? true,
+                          :lost-count 0,
+                          :lost #{},
+                          :acknowledged-count 3568,
+                          :recovered #{5415
+                                       5403
+                                       6158
+                                       4544
+                                       5480
+                                       4994
+                                       5889
+                                       5866
+                                       5870
+                                       5835
+                                       4496
+                                       4582
+                                       5841
+                                       4527
+                                       5004
+                                       5413
+                                       5009
+                                       4606
+                                       6060
+                                       5375
+                                       4533
+                                       5399
+                                       5429
+                                       6125
+                                       4949
+                                       5007
+                                       5871
+                                       6190
+                                       5476
+                                       6172
+                                       5855
+                                       6136
+                                       4883
+                                       6115
+                                       5424
+                                       4965
+                                       4595
+                                       4945
+                                       5800
+                                       4578
+                                       6074
+                                       5860
+                                       5849
+                                       5412
+                                       5459
+                                       5896
+                                       5824
+                                       4950
+                                       5885
+                                       5785
+                                       5818
+                                       5439
+                                       5881
+                                       5863
+                                       6083
+                                       5409
+                                       5897
+                                       5411
+                                       5221
+                                       4593
+                                       4517
+                                       5791
+                                       6095
+                                       5434
+                                       4942
+                                       4931
+                                       5391
+                                       4930
+                                       5427
+                                       6188
+                                       5869
+                                       4974
+                                       5384
+                                       5874
+                                       5894
+                                       5443
+                                       4557
+                                       5893
+                                       5447
+                                       5887
+                                       6133
+                                       5804
+                                       4928
+                                       6178
+                                       5873
+                                       5817
+                                       5444
+                                       5374
+                                       4973
+                                       5371
+                                       6191
+                                       5834
+                                       6440
+                                       4929
+                                       5478
+                                       4608
+                                       4979
+                                       5055
+                                       4971
+                                       5884
+                                       5790
+                                       5803
+                                       5036
+                                       5387
+                                       6196
+                                       5054
+                                       5677
+                                       4922
+                                       6155
+                                       5406
+                                       4927
+                                       6165
+                                       5352
+                                       5807
+                                       5383
+                                       6148
+                                       4925
+                                       4995
+                                       4981
+                                       4985
+                                       6088
+                                       5797
+                                       5038
+                                       5017
+                                       5788
+                                       5043
+                                       5417
+                                       5367
+                                       5395
+                                       4937
+                                       5810
+                                       5781
+                                       4509
+                                       5847
+                                       5393
+                                       5353
+                                       5858
+                                       4588
+                                       5472
+                                       4441
+                                       5856
+                                       5452
+                                       4956
+                                       5891
+                                       4983
+                                       5051
+                                       5868
+                                       5848
+                                       6179
+                                       5451
+                                       5389
+                                       5355
+                                       6157
+                                       5041
+                                       4538
+                                       5372
+                                       6113
+                                       4515
+                                       4563
+                                       5392
+                                       5363
+                                       5440
+                                       6076
+                                       4980
+                                       5048
+                                       6193
+                                       4884
+                                       5382
+                                       5867
+                                       5029
+                                       5468
+                                       5779
+                                       5470
+                                       5386
+                                       4996
+                                       5361
+                                       5448
+                                       5402
+                                       6142
+                                       5796
+                                       6059
+                                       4502
+                                       4948
+                                       5030
+                                       5396
+                                       5898
+                                       5786
+                                       5405
+                                       6123
+                                       5741
+                                       5837
+                                       6080
+                                       6087
+                                       4520
+                                       5385
+                                       5778
+                                       5481
+                                       5378
+                                       5843
+                                       4958
+                                       5892
+                                       5808
+                                       5455
+                                       5039
+                                       5792
+                                       5446
+                                       5805
+                                       4543
+                                       6075
+                                       5045
+                                       4967
+                                       4960
+                                       6180
+                                       5001
+                                       5033
+                                       5011
+                                       4976
+                                       5467
+                                       4999
+                                       5056
+                                       5015
+                                       4940
+                                       5813
+                                       5380
+                                       5883
+                                       5432
+                                       5895
+                                       5783
+                                       6108
+                                       5851
+                                       5463
+                                       6163
+                                       5408
+                                       5013
+                                       5400
+                                       4977
+                                       4964
+                                       4986
+                                       5812
+                                       5441
+                                       5431
+                                       5872
+                                       5838
+                                       4493
+                                       5876
+                                       4547
+                                       4997
+                                       6465
+                                       4586
+                                       4943
+                                       5360
+                                       5879
+                                       5369
+                                       4938
+                                       6077
+                                       5423
+                                       5390
+                                       4500
+                                       4438
+                                       4611
+                                       4603
+                                       6169
+                                       6106
+                                       5025
+                                       5825
+                                       4594
+                                       5366
+                                       6184
+                                       6176
+                                       5394
+                                       5832
+                                       4577
+                                       4613
+                                       5289
+                                       5388
+                                       4579
+                                       5776
+                                       5425
+                                       5474
+                                       5784
+                                       5050
+                                       5857
+                                       5878
+                                       5026
+                                       4562
+                                       5854
+                                       5466
+                                       5453
+                                       5877
+                                       4963
+                                       6092
+                                       5290
+                                       6122
+                                       5462},
+                          :attempt-count 28157,
+                          :unexpected #{},
+                          :unexpected-count 0,
+                          :recovered-count 294,
+                          :duplicated #{}},
+            :queue {:lease-overlaps (),
+                    :ack-refused-under-renewal (),
+                    :payload-mismatch (),
+                    :valid? true,
+                    :noop-ack-examples (),
+                    :acked-twice (),
+                    :acked-twice-count 0,
+                    :lease-overlap-count 0,
+                    :partial-acks 0,
+                    :acked 3860,
+                    :ack-refused-after-renewal 0,
+                    :redeliveries 8,
+                    :pop-skips (),
+                    :offset-value-mismatch (),
+                    :ack-unknown 2,
+                    :pop-skip-count 0,
+                    :noop-acks 0,
+                    :deliveries 3862,
+                    :pop-internal-gaps (),
+                    :pop-skips-excused 0,
+                    :redelivered-after-ack-count 0,
+                    :ack-rejected 0,
+                    :redelivered-after-ack (),
+                    :renewals {}},
+            :valid? true},
+ :planner {:valid? true,
+           :total {:parallel 185,
+                   :serial 8476,
+                   :fallback 0,
+                   :late 1,
+                   :spread 0,
+                   :taken_back 0},
+           :per-node {"n1" {},
+                      "n2" {:parallel 122,
+                            :serial 2721,
+                            :fallback 0,
+                            :late 1,
+                            :spread 0,
+                            :taken_back 0},
+                      "n3" {},
+                      "n4" {:parallel 63,
+                            :serial 5755,
+                            :fallback 0,
+                            :late 0,
+                            :spread 0,
+                            :taken_back 0},
+                      "n5" {}}},
+ :stats {:valid? true,
+         :count 57007,
+         :ok-count 7464,
+         :fail-count 49122,
+         :info-count 421,
+         :by-f {:dequeue {:valid? true,
+                          :count 28850,
+                          :ok-count 3896,
+                          :fail-count 24953,
+                          :info-count 1},
+                :enqueue {:valid? true,
+                          :count 28157,
+                          :ok-count 3568,
+                          :fail-count 24169,
+                          :info-count 420}}}}

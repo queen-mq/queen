@@ -1,0 +1,15 @@
+# campaign 3, rig 1, six: 14 tests
+sb-seed-planned-smoke       --workload failover --standby-nodes 3 --failover planned --standby-seed --nemesis none --time-limit 240 --rate 200
+sb-kv-crash-pause           --workload failover --standby-nodes 3 --failover crash --w12-kv --txn --nemesis pause --time-limit 300 --rate 200
+sb-seed-crash-kill          --workload failover --standby-nodes 3 --failover crash --standby-seed --nemesis kill --time-limit 300 --rate 200
+sb-seed-crash-snapkill      --workload failover --standby-nodes 3 --failover crash --standby-seed --nemesis snap-kill --time-limit 300 --rate 200
+sb-groups-crash-part        --workload failover --standby-nodes 3 --failover crash --tenants 4 --raft-groups 2 --txn --nemesis partition --time-limit 300 --rate 200
+sb-groups-seed-kv-kill      --workload failover --standby-nodes 3 --failover crash --tenants 4 --raft-groups 2 --txn --standby-seed --w12-kv --nemesis kill --time-limit 300 --rate 200
+sb-up-srcfirst-crash        --workload failover --standby-nodes 3 --failover crash --failover-at 250 --nemesis upgrade --bin-old /root/bin/queen-old --upgrade-mode source-first --upgrade-interval 20 --time-limit 400 --rate 200
+fo-crash-smoke          --workload failover --standby-nodes 3 --failover crash --nemesis none --time-limit 180 --rate 200
+fo-crash-pause          --workload failover --standby-nodes 3 --failover crash --nemesis pause --time-limit 300 --rate 200
+fo-crash-all            --workload failover --standby-nodes 3 --failover crash --nemesis all --time-limit 300 --rate 200
+fo-planned-lz-kill      --workload failover --standby-nodes 3 --failover planned --lazyfs --nemesis kill --time-limit 300 --rate 200
+fo-crash-txn-lz-kill    --workload failover --standby-nodes 3 --failover crash --txn --lazyfs --nemesis kill --time-limit 300 --rate 200
+fo-crash-part-2         --workload failover --standby-nodes 3 --failover crash --nemesis partition --time-limit 300 --rate 200
+fo-behind-txn           --workload failover --standby-nodes 3 --failover crash-behind --txn --nemesis none --time-limit 300 --rate 200

@@ -1,0 +1,597 @@
+{:faults {:corrupt-outcomes {},
+          :upgrades {},
+          :corrupt-not-back [],
+          :valid? true,
+          :disk-fills 0,
+          :member-final nil,
+          :member-removals {},
+          :disk-full-restarts {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {},
+          :upgrade-final nil},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches [], :excused []},
+ :lazyfs {:valid? true},
+ :encryption {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:info-causes {[:send "TimeoutException"] 69},
+            :plots? true,
+            :valid? true,
+            :poll-skip {:count 28,
+                        :errs ({:key 230,
+                                :delta 18,
+                                :skipped (45
+                                          46
+                                          47
+                                          48
+                                          49
+                                          50
+                                          51
+                                          52
+                                          53
+                                          54
+                                          55
+                                          56
+                                          57
+                                          58
+                                          59
+                                          60
+                                          61),
+                                :ops [{:index 34830,
+                                       :time 99527320906,
+                                       :type :ok,
+                                       :process 57,
+                                       :f :poll,
+                                       :value [[:poll
+                                                {230 [[41 42]
+                                                      [42 43]
+                                                      [43 44]]}]]}
+                                      {:index 35318,
+                                       :time 100861710708,
+                                       :type :ok,
+                                       :process 57,
+                                       :f :poll,
+                                       :value [[:poll
+                                                {229 [[34 35]
+                                                      [35 36]
+                                                      [36 37]
+                                                      [37 38]
+                                                      [38 39]
+                                                      [39 40]
+                                                      [40 41]],
+                                                 230 [[61 62]
+                                                      [62 63]
+                                                      [63 64]
+                                                      [64 66]
+                                                      [65 67]
+                                                      [66 68]
+                                                      [67 69]
+                                                      [68 70]
+                                                      [69 71]
+                                                      [70 72]
+                                                      [71 73]
+                                                      [72 74]
+                                                      [73 75]
+                                                      [74 76]
+                                                      [75 77]
+                                                      [76 78]
+                                                      [77 79]
+                                                      [78 80]
+                                                      [79 81]
+                                                      [80 82]
+                                                      [81 83]
+                                                      [82 84]
+                                                      [83 85]]}]],
+                                       :rebalance-log [{:keys [228
+                                                               229
+                                                               230
+                                                               231]}]}]}
+                               {:key 444,
+                                :delta 20,
+                                :skipped (167
+                                          168
+                                          169
+                                          170
+                                          171
+                                          172
+                                          173
+                                          174
+                                          175
+                                          176
+                                          177
+                                          178
+                                          179
+                                          180
+                                          181
+                                          182
+                                          183
+                                          184
+                                          185),
+                                :ops [{:index 69752,
+                                       :time 271532333147,
+                                       :type :ok,
+                                       :process 121,
+                                       :f :poll,
+                                       :value [[:poll
+                                                {444 [[162 165]
+                                                      [163 166]]}]]}
+                                      {:index 70134,
+                                       :time 272600812603,
+                                       :type :ok,
+                                       :process 121,
+                                       :f :poll,
+                                       :value [[:poll
+                                                {444 [[183 186]
+                                                      [184 187]
+                                                      [185 188]
+                                                      [186 189]
+                                                      [187 190]
+                                                      [188 191]
+                                                      [189 192]
+                                                      [190 193]
+                                                      [191 194]
+                                                      [192 195]
+                                                      [193 196]
+                                                      [194 197]
+                                                      [195 198]
+                                                      [196 199]
+                                                      [197 200]
+                                                      [198 201]
+                                                      [199 202]
+                                                      [200 203]
+                                                      [201 204]
+                                                      [202 205]
+                                                      [203 206]
+                                                      [204 207]],
+                                                 445 [[80 81]
+                                                      [81 82]
+                                                      [82 83]
+                                                      [83 84]
+                                                      [84 85]
+                                                      [85 86]
+                                                      [86 87]
+                                                      [87 88]
+                                                      [88 89]]}]],
+                                       :rebalance-log [{:keys [444
+                                                               445]}]}]}
+                               {:key 176,
+                                :delta 23,
+                                :skipped (98
+                                          99
+                                          100
+                                          101
+                                          102
+                                          103
+                                          104
+                                          105
+                                          106
+                                          107
+                                          108
+                                          109
+                                          110
+                                          111
+                                          112
+                                          113
+                                          114
+                                          115
+                                          116
+                                          117
+                                          118
+                                          119),
+                                :ops [{:index 28752,
+                                       :time 82220575058,
+                                       :type :ok,
+                                       :process 70,
+                                       :f :poll,
+                                       :value [[:poll {176 [[96 97]]}]]}
+                                      {:index 29590,
+                                       :time 84479301604,
+                                       :type :ok,
+                                       :process 70,
+                                       :f :poll,
+                                       :value [[:poll
+                                                {176 [[119 120]
+                                                      [120 121]
+                                                      [121 122]]}]],
+                                       :rebalance-log [{:revoked [160
+                                                                  161
+                                                                  162
+                                                                  163
+                                                                  178
+                                                                  179
+                                                                  186
+                                                                  187
+                                                                  192
+                                                                  193]}
+                                                       {:keys [160
+                                                               161
+                                                               162
+                                                               163
+                                                               176
+                                                               177
+                                                               186
+                                                               187
+                                                               192
+                                                               193]}]}]}
+                               {:key 50,
+                                :delta 23,
+                                :skipped (21
+                                          22
+                                          23
+                                          24
+                                          25
+                                          26
+                                          27
+                                          28
+                                          29
+                                          30
+                                          31
+                                          32
+                                          33
+                                          34
+                                          35
+                                          36
+                                          37
+                                          38
+                                          39
+                                          40
+                                          41
+                                          42),
+                                :ops [{:index 5091,
+                                       :time 16518710445,
+                                       :type :ok,
+                                       :process 17,
+                                       :f :poll,
+                                       :value [[:poll {50 [[19 20]]}]]}
+                                      {:index 6151,
+                                       :time 19977079021,
+                                       :type :ok,
+                                       :process 17,
+                                       :f :poll,
+                                       :value [[:poll {50 [[42 43]]}]],
+                                       :rebalance-log [{:revoked [48
+                                                                  49]}
+                                                       {:keys [50 51]}]}]}
+                               {:key 221,
+                                :delta 27,
+                                :skipped (60
+                                          61
+                                          62
+                                          63
+                                          64
+                                          65
+                                          66
+                                          67
+                                          68
+                                          69
+                                          70
+                                          72
+                                          71
+                                          73
+                                          74
+                                          75
+                                          76
+                                          77
+                                          78
+                                          79
+                                          80
+                                          81
+                                          82
+                                          83
+                                          84
+                                          85),
+                                :ops [{:index 34072,
+                                       :time 97216306703,
+                                       :type :ok,
+                                       :process 53,
+                                       :f :poll,
+                                       :value [[:poll
+                                                {221 [[57 58] [58 59]]}]]}
+                                      {:index 34503,
+                                       :time 98483680738,
+                                       :type :ok,
+                                       :process 53,
+                                       :f :poll,
+                                       :value [[:poll
+                                                {221 [[85 86]
+                                                      [86 87]
+                                                      [87 88]]}]],
+                                       :rebalance-log [{:keys [220
+                                                               221]}]}]}
+                               {:key 466,
+                                :delta 29,
+                                :skipped (128
+                                          129
+                                          130
+                                          131
+                                          132
+                                          133
+                                          134
+                                          135
+                                          136
+                                          137
+                                          138
+                                          139
+                                          140
+                                          141
+                                          142
+                                          143
+                                          144
+                                          145
+                                          146
+                                          147
+                                          148
+                                          149
+                                          150
+                                          151
+                                          152
+                                          153
+                                          154
+                                          155),
+                                :ops [{:index 75197,
+                                       :time 287112631887,
+                                       :type :ok,
+                                       :process 152,
+                                       :f :poll,
+                                       :value [[:poll
+                                                {466 [[126 127]]}]]}
+                                      {:index 75724,
+                                       :time 288387272222,
+                                       :type :ok,
+                                       :process 152,
+                                       :f :poll,
+                                       :value [[:poll
+                                                {465 [[9 11]],
+                                                 466 [[155 156]
+                                                      [156 157]
+                                                      [157 158]
+                                                      [158 159]]}]]}]}
+                               {:key 221,
+                                :delta 50,
+                                :skipped (11
+                                          12
+                                          13
+                                          14
+                                          15
+                                          16
+                                          17
+                                          18
+                                          19
+                                          20
+                                          21
+                                          22
+                                          23
+                                          24
+                                          25
+                                          26
+                                          27
+                                          28
+                                          29
+                                          30
+                                          31
+                                          32
+                                          33
+                                          34
+                                          35
+                                          36
+                                          37
+                                          38
+                                          39
+                                          40
+                                          41
+                                          42
+                                          43
+                                          44
+                                          45
+                                          46
+                                          47
+                                          48
+                                          49
+                                          50
+                                          51
+                                          52
+                                          53
+                                          54
+                                          55
+                                          56
+                                          57
+                                          58
+                                          59),
+                                :ops [{:index 33652,
+                                       :time 96083766219,
+                                       :type :ok,
+                                       :process 57,
+                                       :f :poll,
+                                       :value [[:poll
+                                                {220 [[5 6] [6 7]],
+                                                 221 [[8 9] [9 10]]}]]}
+                                      {:index 34135,
+                                       :time 97418743771,
+                                       :type :ok,
+                                       :process 57,
+                                       :f :poll,
+                                       :value [[:poll
+                                                {221 [[59 60]
+                                                      [60 61]
+                                                      [61 62]
+                                                      [62 63]
+                                                      [63 64]
+                                                      [64 65]
+                                                      [65 66]
+                                                      [66 67]
+                                                      [67 68]
+                                                      [68 69]
+                                                      [69 70]]}]],
+                                       :rebalance-log [{:keys [221]}]}]}
+                               {:key 108,
+                                :delta 53,
+                                :skipped (52
+                                          53
+                                          54
+                                          55
+                                          56
+                                          57
+                                          58
+                                          59
+                                          60
+                                          61
+                                          62
+                                          63
+                                          64
+                                          65
+                                          66
+                                          67
+                                          68
+                                          69
+                                          70
+                                          71
+                                          72
+                                          73
+                                          74
+                                          75
+                                          76
+                                          77
+                                          78
+                                          79
+                                          80
+                                          81
+                                          82
+                                          83
+                                          84
+                                          85
+                                          86
+                                          87
+                                          88
+                                          89
+                                          90
+                                          91
+                                          92
+                                          93
+                                          94
+                                          95
+                                          96
+                                          97
+                                          98
+                                          99
+                                          100
+                                          101
+                                          102
+                                          103),
+                                :ops [{:index 15492,
+                                       :time 45970680807,
+                                       :type :ok,
+                                       :process 22,
+                                       :f :poll,
+                                       :value [[:poll {108 [[50 51]]}]]}
+                                      {:index 16834,
+                                       :time 49600428253,
+                                       :type :ok,
+                                       :process 22,
+                                       :f :poll,
+                                       :value [[:poll
+                                                {108 [[103 104]
+                                                      [104 105]
+                                                      [105 106]
+                                                      [106 107]]}]],
+                                       :rebalance-log [{:keys [107
+                                                               108
+                                                               109]}]}]})},
+            :worst-realtime-lag {:time 339.646173997,
+                                 :process 166,
+                                 :key 10,
+                                 :lag 338.75087812},
+            :fail-causes {[:poll "IllegalStateException"] 3842,
+                          [:poll "TimeoutException"] 4},
+            :kafka-model-valid? true,
+            :error-types [:poll-skip],
+            :bad-error-types []},
+ :planner {:valid? true,
+           :total {:parallel 139,
+                   :serial 26318,
+                   :fallback 0,
+                   :late 0,
+                   :spread 0,
+                   :taken_back 0},
+           :per-node {"n1" {:parallel 6,
+                            :serial 351,
+                            :fallback 0,
+                            :late 0,
+                            :spread 0,
+                            :taken_back 0},
+                      "n2" {:parallel 10,
+                            :serial 1998,
+                            :fallback 0,
+                            :late 0,
+                            :spread 0,
+                            :taken_back 0},
+                      "n3" {:parallel 14,
+                            :serial 2949,
+                            :fallback 0,
+                            :late 0,
+                            :spread 0,
+                            :taken_back 0},
+                      "n4" {:parallel 7,
+                            :serial 3708,
+                            :fallback 0,
+                            :late 0,
+                            :spread 0,
+                            :taken_back 0},
+                      "n5" {:parallel 102,
+                            :serial 17312,
+                            :fallback 0,
+                            :late 0,
+                            :spread 0,
+                            :taken_back 0}}},
+ :stats {:valid? true,
+         :count 38499,
+         :ok-count 34490,
+         :fail-count 3846,
+         :info-count 163,
+         :by-f {:assign {:valid? true,
+                         :count 10,
+                         :ok-count 10,
+                         :fail-count 0,
+                         :info-count 0},
+                :crash {:valid? false,
+                        :count 94,
+                        :ok-count 0,
+                        :fail-count 0,
+                        :info-count 94},
+                :debug-topic-partitions {:valid? true,
+                                         :count 10,
+                                         :ok-count 10,
+                                         :fail-count 0,
+                                         :info-count 0},
+                :poll {:valid? true,
+                       :count 19356,
+                       :ok-count 15510,
+                       :fail-count 3846,
+                       :info-count 0},
+                :send {:valid? true,
+                       :count 18413,
+                       :ok-count 18344,
+                       :fail-count 0,
+                       :info-count 69},
+                :subscribe {:valid? true,
+                            :count 616,
+                            :ok-count 616,
+                            :fail-count 0,
+                            :info-count 0}}}}

@@ -50,12 +50,12 @@ A million messages a second is worth nothing if one of them can go missing. We c
 Jepsen: five nodes, clients driving the native API as hard as they can, a nemesis that kills,
 pauses, partitions, skews clocks and cuts power, and checkers that read the whole history
 afterwards looking for a message lost, delivered twice, acked twice or seen out of order. The
-latest campaign, on 2026-11-07, tested the tenant feed of 2.8.0: its workload found two bugs in the
-feed's resolvedTs, and on the fixed code all 21 of its tests came back valid. The one before ran 226
-tests on the code of 2.7.0, on 2026-10-30 and 31, stream claims and pushes
-of several messages at once among them: all 226 came back valid at their first run. The latest full
-one, with a standby cluster's failover, ran 257 tests on the code of 2.6.0, all valid. That is
-evidence, not proof. Jepsen finds bugs and cannot show there are
+latest campaign, on 2026-11-16 and 17, ran the whole suite on the code of 2.9.0: 568 tests, the
+standby failovers, the Kafka facade and the routing of 2.9 among them, and all 568 came back valid.
+561 were valid at their first run. Four ephemeral tests found the bug at the end of the list below
+and were valid on its fix, and so was a seek test once its own mistake was fixed. The last two are
+valid with three wrong answers counted, not judged, that only clocks minutes apart produce
+([Limits](#limits)). That is evidence, not proof. Jepsen finds bugs and cannot show there are
 none, and further down is every bug it found in QueenMQ 2.
 
 ## How a test runs
@@ -107,6 +107,16 @@ lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
 | W12 `failover` | two clusters of three nodes, one [following the other](/manage/standby/): push to the source, one record or a transaction over several partitions, and keep sending writes to the standby, which must refuse them; then the source stops (a crash, a crash while the standby is 10 s behind, or a planned switch that waits for the standby), the standby is promoted, and the clients write to it | a write a standby took before its promotion; a promoted log that is not the source's, record for record, up to where it ends; a transaction there in part; a planned switch that lost a write; after a crash, an acknowledged write missing while a later one is there; a write of the promoted cluster lost; a write refused as a standby's and found in the log |
 | W13 `feed` | push to 48 partitions: one message, several of one partition, or a transaction over several partitions. Ten readers read the [tenant feed](/reference/http/#post-apiv1feed) from the start on every node, five whole and five one shard each, with small pages and short long polls, and move to the next node when a read fails. At the end one transaction covers every shard, and each reader reads until it has it. With `--feed-relay`, every read asks to be relayed, as the proxy's reads do, so a leader passes it to a follower | an acknowledged message that a reader selecting it did not read exactly once, a failed push that was read, two orders, a hole, part of a transaction or of a position in one answer, a message at or after an answer's `next` stamped at or before its resolvedTs, a resolvedTs that goes back between two answers of one node with no restart in between, stamps that do not rise with position, a shard reader that reads another shard |
 
+Since 2.8 the harness has nineteen more, each with its own checker in
+`test/jepsen/src/jepsen/queen/workload/`: W14 the Kafka facade, W15 filtered consumer groups, W16
+reading queues, W17 a link in a transaction, W18 transactions that roll back on purpose, W19 the
+SDKs' feed streams as processes under test, W20 ephemeral queues, W21 tenants and raft groups side
+by side, W22 scoped keys and client tokens, W23 ack retries, dead-letter replays and message
+deletes, W24 delayed processing, window buffers and long-poll waits, W25 KV keys and claims with a
+ttl, W26 a group sought to the end and back in time, W27 a queue deleted and made again under load,
+W28 and W29 the PostgreSQL source and sink, W30 the S3 sink, W31 copies of one push sent together,
+and W32 Elle over `/api/v1/transaction`.
+
 ## The faults
 
 - kill -9 of nodes, restarted after a while; with `lazyfs`, a kill also loses every write the node
@@ -121,6 +131,12 @@ lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
   also while snapshots are being installed
 - a file bit-flipped or truncated on one node, which must refuse or repair the damage and never
   serve it
+- packets between nodes delayed, lost, duplicated, reordered or corrupted (`tc netem`), alone and
+  together, or squeezed to 1 Mbit/s
+- a full disk on one node, which must stop without harm and come back once there is room
+- a rolling upgrade under load: the nodes restarted one at a time from the previous release onto
+  the new one
+- kills of the SDKs' stream runners, which W19 runs as processes under test
 
 ## The campaigns
 
@@ -144,6 +160,7 @@ lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
 | 2.7.0 | 2026-10-30 and 31 | `f9c9a37f2`, the server code of 2.7.0 without its version lines, the disk fields of `107aaaf9b`, a lint fix in the Kafka facade and the streams list of `97b0f2f8e`; the first 19 tests ran `19f3d492c` | 226: the tests of the 2.6.0 campaign without its 31 standby failovers, the stream tests closing quiet partitions under a claim | 226 valid, all at their first run |
 | Feed | 2026-11-07 | the tenant feed's code before its commit, with the fix for the first resolvedTs bug below | 43: W13 (19: one without faults; kills, power loss, partitions, pauses, clock faults, a deaf leader, restarts, membership changes, partitions with kills, pauses with kills and bridges; kills, power loss and partitions on 256 KiB log files sealed after 10 s; kills and partitions on shared logs; partitions and a deaf leader with the leader serving feed reads), then the log, the queue, the pipeline and streams (24) under kills, partitions, pauses, clock faults, a deaf leader and restarts | 40 valid; the other 3 were the second resolvedTs bug below |
 | Feed, on the fix | 2026-11-07 | the broker code of `a6e85381d`, the tenant feed's commit, with an older copy of three files of the embedded proxy, which no test runs | 21: the 18 W13 tests with faults, and 3 whose every read asks to be relayed, under kills, partitions and a deaf leader | 21 valid, all at their first run |
+| 2.9.0 | 2026-11-16 and 17 | `4b641a866`, the server code of 2.9.0-beta.3; its five reruns ran `72d5e6360`, the code of 2.9.0, which adds the ephemeral fix below | 568: every workload of the harness, 36 of them, the standby failovers (58), power loss (60), rolling upgrades (9), several raft groups (16), several tenants (18), the Kafka facade (30), the embedded proxy (10) and the binary wire forms (18) among them | 568 valid: 561 at their first run; four ephemeral tests on the fix below and a seek test on a fixed test; two with three wrong answers under clock jumps counted, not judged |
 
 The unknown of 2026-10-02 is W9 under bridge partitions. After the last heal, a follower's pops
 kept timing out for about 90 seconds although it had caught up, so the final reads did not finish
@@ -297,6 +314,19 @@ test the way `run-campaign.sh` does. Each test's panic checker read them, and it
 found all five nodes answering as voters at the end. The verdicts are in
 `benchmark-queen/2026-11-07-jepsen-feed/`.
 
+The 2.9.0 campaign ran every test the harness has, on four rigs of a control and six nodes each,
+from 2026-11-16 11:17 to 2026-11-17 01:57 UTC. Each rig began with what changed most since 2.8:
+reading queues, Elle over `/api/v1/transaction`, the PostgreSQL source and sink, KV ttl, queue
+options and scoped keys, 59 tests, all valid. 561 of the 568 were valid at their first run. Four
+of the other seven were the ephemeral tests under restarts, kills, partitions and pauses, which
+found the last bug below; on its fix, the code of 2.9.0, all four ran again valid, and so did the
+seek test whose own mistake is told further down. The last two, the pipeline over 30 minutes and
+the locks under every fault at once, each had a step answered rolled back that had committed,
+after a node took over as leader with its clock 202 s and 155 s ahead ([Limits](#limits)). Their
+checkers now count that answer under clock faults instead of failing the run, and the two stored
+histories, checked again, are valid. Every verdict, the reruns and the second checks are in
+`benchmark-queen/2026-11-16-jepsen-29/`.
+
 ## What the tests found
 
 Every row is a bug in QueenMQ that a campaign caught, and the commit that fixed it names the test
@@ -319,6 +349,10 @@ that found it.
 | Rows window and 2.2.0 | W8 and W2, kills, on log files sealed after 10 s | a follower's log was cut back and its next entry went into an empty file created for a later seq, one the cut had emptied or one sealed right after it; a search by seq skipped that file, and the node refused to start | `6f18bd40f`, `3b1a6d9bb` |
 | Feed | W13, no faults | a caught-up answer could claim a resolvedTs at or past the stamp of the entry at its `next`: the node read its applied index before its clock, and an entry that applied in between gave it the clock of the next one | `a6e85381d` |
 | Feed | W13, kills and partitions | resolvedTs went back by 1 µs on one node: an answer cut short claimed the stamp of its newest entry, and a new leader's empty entry moves the applied index but not the clock, so the next caught-up answer claimed 1 µs less | `a6e85381d` |
+| 2.9.0 | W20, restarts, kills, partitions and pauses | an ephemeral partition that moved to another node lost messages: the new owner's ring knew only the groups that had popped there, and freed what the first of them took before the other groups' places arrived with the old ring. And a ring that landed in a busy one dropped every group's place, so a group was handed again what it had taken | `5543add64` |
+
+The campaigns on the way to 2.9.0, from 2026-11-13 to 15, found more bugs, all fixed in 2.9.0: the
+[2.9.0 release notes](/reference/changelog/) say of each one that the Jepsen tests found it.
 
 Two of P8's failures were our own. The claim workload lost ids when a call timed out, and Elle
 reported version cycles that did not exist, because a set union in its `bifurcan` dependency
@@ -345,13 +379,20 @@ log workload's checker ran out of memory on three histories, which were checked 
 control had 16 GB. And its sixth node met the lazyfs build of the 2.2.0 campaign again, since the
 harness still builds lazyfs during a test's setup the first time a node needs it.
 
+The 2.9.0 campaign had one of our own. The seek test sent each of its two seeks once; under kills
+both met a node that was down and failed, so the run checked nothing about seek. It now sends a
+seek again until one is answered (`fc0b6f978`), and it ran again valid.
+
 ## Limits
 
 This is testing. A valid run shows that these histories, under these faults, broke no rule a
-checker knows, and every campaign ran one raft group with one tenant over the native HTTP API:
-several raft groups, several tenants, the Kafka facade, the embedded proxy and the binary wire
-forms of 2.3.0 (binary push, compressed groups, framed pops, the binary transaction body) were not
-part of any.
+checker knows. The clients speak the native HTTP API, the Kafka facade and, in 18 tests of the
+2.9.0 campaign, the binary wire forms of 2.3.0 (binary push, compressed groups, framed pops, the
+binary transaction body); 16 of its tests run several raft groups, 18 several tenants, and 10 go
+through the embedded proxy. Some paths no test drives: a pop over several partitions at once
+(`autopilot`, which the JavaScript client turns on by default), a consumer group that starts at
+`new` or at a time (every group in the tests starts at `all`), KV `delete` and `getPrefix`, and
+the MySQL source.
 Lease exclusivity across a leader change needs the nodes' clocks within
 `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other. Further apart, the pipeline and lock
 checkers count one wrong answer and do not judge it (the [guarantees](/introduction/guarantees/)
@@ -359,22 +400,14 @@ list it under clocks): a leader that takes over with its clock minutes ahead for
 kept for retries, so a transaction a node relayed during the change runs again and is refused (its
 ack was made already, or its push is already there), and the client is told it rolled back
 although its first run committed. Nothing is lost or committed twice. Losing a majority of the
-disks for good can
-lose acknowledged writes, since raft survives the loss of a minority. The full campaign, standby
-failovers included, last ran on the binary of `229a4c3ea`, 2.6.0-beta.6 (its first 91 tests on
-2.6.0-beta.1); the server code of 2.6.0 adds its version line and nothing else. The 2.7.0 campaign
-ran the rest of it on `f9c9a37f2` (its first 19 tests on `19f3d492c`); the server code of 2.7.0 adds
-its version lines, disk fields in the metrics, a lint fix in the Kafka facade and a read-only list of
-streams, none of them on a path the tests drive. The feed campaign ran W13 and 24 tests of the log,
-the queue, the pipeline and streams on the code of 2.8.0; the other workloads last ran on 2.7.0's.
-It read the feed over HTTP: the SDKs' stream runners on the feed (`Stream.fromFeed` and its ports)
-were not part of it, and its relayed reads sent the proxy's header to the nodes themselves.
-No test sets a completed retention above its queue's dedup window, so
-none of them checks the rule of 2.2.0 by which a queue's completed retention no longer extends how
-long a push keeps its row. A standby's failover
-has its own workload since 2026-10-08, on a standby that starts empty beside its source: a seeded
-standby, one that follows across a version upgrade, and two clusters in different places were not
-part of it.
+disks for good can lose acknowledged writes, since raft survives the loss of a minority. The full
+campaign, standby failovers included, last ran on the code of 2.9.0-beta.3 (`4b641a866`), and its
+five tests that needed a second run on the code of 2.9.0 (`72d5e6360`), which adds the ephemeral
+fix and its version lines and nothing else. No test sets a completed retention above its queue's
+dedup window, so none of them checks the rule of 2.2.0 by which a queue's completed retention no
+longer extends how long a push keeps its row. A standby's failover has its own workload since
+2026-10-08; since the 2.9.0 campaign it also runs on a seeded standby and across a rolling
+upgrade, but two clusters in different places were not part of it.
 
 What each API guarantees, written for the developer using it, is on
 [guarantees](/introduction/guarantees/).

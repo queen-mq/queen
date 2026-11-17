@@ -1,0 +1,162 @@
+{:faults {:corrupt-outcomes {},
+          :upgrades {},
+          :corrupt-not-back [],
+          :valid? true,
+          :disk-fills 0,
+          :member-final nil,
+          :member-removals {},
+          :disk-full-restarts {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {},
+          :upgrade-final nil},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches [], :excused []},
+ :lazyfs {:valid? true},
+ :encryption {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:total-queue {:ok-count 20351,
+                          :duplicated-count 1,
+                          :valid? true,
+                          :lost-count 0,
+                          :lost #{},
+                          :acknowledged-count 20291,
+                          :recovered #{5413
+                                       188
+                                       3767
+                                       4103
+                                       5187
+                                       20157
+                                       4742
+                                       4741
+                                       18240
+                                       6269
+                                       4988
+                                       3726
+                                       5570
+                                       18767
+                                       18490
+                                       18246
+                                       5490
+                                       4463
+                                       4404
+                                       7143
+                                       19501
+                                       5725
+                                       4863
+                                       3770
+                                       4789
+                                       4391
+                                       5848
+                                       19886
+                                       18936
+                                       19729
+                                       5621
+                                       5386
+                                       19396
+                                       4743
+                                       19030
+                                       18778
+                                       4102
+                                       5269
+                                       6192
+                                       18230
+                                       4679
+                                       11
+                                       18270
+                                       18784
+                                       19768
+                                       3743
+                                       18476
+                                       18488
+                                       19918
+                                       19149
+                                       4938
+                                       5092
+                                       18577
+                                       4736
+                                       5825
+                                       4018
+                                       6536
+                                       5023
+                                       19606
+                                       20314},
+                          :attempt-count 20356,
+                          :unexpected #{},
+                          :unexpected-count 0,
+                          :recovered-count 60,
+                          :duplicated #{6461}},
+            :queue {:lease-overlaps (),
+                    :ack-refused-under-renewal (),
+                    :payload-mismatch (),
+                    :valid? true,
+                    :noop-ack-examples (),
+                    :acked-twice (),
+                    :acked-twice-count 0,
+                    :lease-overlap-count 0,
+                    :partial-acks 0,
+                    :acked 20351,
+                    :ack-refused-after-renewal 0,
+                    :redeliveries 96,
+                    :pop-skips (),
+                    :offset-value-mismatch (),
+                    :ack-unknown 1,
+                    :pop-skip-count 0,
+                    :noop-acks 0,
+                    :deliveries 20353,
+                    :pop-internal-gaps (),
+                    :pop-skips-excused 0,
+                    :redelivered-after-ack-count 0,
+                    :ack-rejected 1,
+                    :redelivered-after-ack (),
+                    :renewals {}},
+            :valid? true},
+ :planner {:valid? true,
+           :total {:parallel 1045,
+                   :serial 53652,
+                   :fallback 0,
+                   :late 0,
+                   :spread 0,
+                   :taken_back 0},
+           :per-node {"n1" {},
+                      "n2" {},
+                      "n3" {},
+                      "n4" {:parallel 1045,
+                            :serial 53652,
+                            :fallback 0,
+                            :late 0,
+                            :spread 0,
+                            :taken_back 0},
+                      "n5" {}}},
+ :stats {:valid? true,
+         :count 41047,
+         :ok-count 40866,
+         :fail-count 115,
+         :info-count 66,
+         :by-f {:dequeue {:valid? true,
+                          :count 20691,
+                          :ok-count 20575,
+                          :fail-count 115,
+                          :info-count 1},
+                :enqueue {:valid? true,
+                          :count 20356,
+                          :ok-count 20291,
+                          :fail-count 0,
+                          :info-count 65}}}}

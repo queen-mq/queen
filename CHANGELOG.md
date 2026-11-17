@@ -11,7 +11,10 @@ refused with `cluster_version`, and nothing a node writes changes form. Once the
 2.8.1 node no longer starts on the data: to keep the way back open while 2.9.0 proves itself, set
 `QUEEN_RAFT_CLUSTER_VERSION_MS=0` on every node, and remove it when you stay. The JavaScript,
 Python, Go, Rust, PHP and C++ clients move to 2.9.0 and `queen-protocol` to 1.7.0; queenctl stays
-at 2.7.1 and the supervisor at 0.9.0, unchanged.
+at 2.7.1 and the supervisor at 0.9.0, unchanged. The Jepsen campaign ran on the code of 2.9.0: 568
+tests, every one the harness has, the standby failovers among them, all valid: 561 at their first
+run, 5 after the fixes below, and 2 with wrong answers under clock jumps of minutes counted, not
+judged (`benchmark-queen/2026-11-16-jepsen-29`).
 
 **Rust: request types gained fields (breaking for struct literals).** `queen-protocol` 1.7.0, which
 the Rust client takes and re-exports, adds `headers` to `PushItem`, `TxnPushItem`, `TimerOperation`

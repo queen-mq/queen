@@ -10,7 +10,7 @@
 Imagine a Kafka with millions of named partitions, created on the fly, where you ack or nack each message, where one transaction covers the ack, the next messages and your state, with its own KV store and stream processing.<br>
 **That is QueenMQ.**
 
-**Proof:** [226 Jepsen tests passed](https://queenmq.com/benchmarks/jepsen/) · [3M msg/s](https://queenmq.com/benchmarks/queen-vs-kafka/#3000000-msgs-of-256-byte-messages) on three nodes and ten million queues, with every write synced to disk on two.
+**Proof:** [568 Jepsen tests passed](https://queenmq.com/benchmarks/jepsen/) · [3M msg/s](https://queenmq.com/benchmarks/queen-vs-kafka/#3000000-msgs-of-256-byte-messages) on three nodes and ten million queues, with every write synced to disk on two.
 
 Open source (Apache-2.0), Rust, one binary. In production at [Smartness](https://www.smartness.com/en).
 
@@ -189,7 +189,7 @@ Full details: [queenmq.com/benchmarks](https://queenmq.com/benchmarks/)
 ## Proven
 
 - In production at [Smartness](https://www.smartness.com/en).
-- [226 Jepsen tests](https://queenmq.com/benchmarks/jepsen/) on 2.7, all passed. No acknowledged message lost, no lease held twice.
+- [568 Jepsen tests](https://queenmq.com/benchmarks/jepsen/) on 2.9, all passed. No acknowledged message lost, no lease held twice.
 - Written in Rust. Apache-2.0.
 
 ## Documentation

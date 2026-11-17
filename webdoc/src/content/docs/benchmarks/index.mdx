@@ -21,7 +21,7 @@ digest: >-
   782 ms at 10,000, and did not carry 50,000. Exactly-once
   consume-transform-produce transactions of 10 messages commit in 3 to 4 ms at the median and peak near 12,900 a second (16-vCPU nodes, 2026-10-12). A soak at
   500,000 msg/s on 2.0.0-beta.1 held e2e p99 near 86 ms for 3 h 23 min through kill -9 and
-  graceful restarts of the leader. Jepsen: 226 tests on the code of 2.7.0, all valid.
+  graceful restarts of the leader. Jepsen: 568 tests on the code of 2.9.0, all valid.
 ---
 
 QueenMQ replicates every write through raft, so we measure it as a cluster: three nodes, every
@@ -53,7 +53,7 @@ kinds of machines.
 | Kafka clients at 1,000,000 msg/s through the facade inside the broker, e2e p99 48 ms; at 2,000,000 the consumers keep the rate | the 16-vCPU nodes; franz-go, `acks=all`, idempotent; 2.3.0-beta.1, 2026-10-13 | [Kafka clients](/benchmarks/kafka-clients/) |
 | 2,753 Laravel jobs/s with 32 workers on QueenMQ's driver and supervisor, against 1,124 for Horizon on Redis | one raft node, 2.0.0-beta.2, 2026-10-01; 10 ms jobs, Redis fsyncing every write; medians of 3 runs | [Laravel workers](/benchmarks/laravel/) |
 | 500,000 msg/s for 3 h 23 min over 1,000,000 partitions, e2e p50 20 ms and p99 86 ms in the median window, through a kill -9 of the leader, a graceful leader restart and a kill -9 of a follower | deduplication and retention on; the builds that became 2.0.0-beta.1, 2026-10-01 | [Soak and failover](/benchmarks/soak/) |
-| 226 Jepsen tests, all valid at their first run: no acknowledged message lost, no lease held twice, KV linearizable, transactions atomic | the code of 2.7.0, 2026-10-30 and 31; five nodes; kill -9, pauses, partitions, clock jumps, power loss; 13 tests push several messages of a partition at once, and the stream tests close quiet partitions under a claim. The 31 standby failovers last ran on 2.6.0, all valid | [Jepsen](/benchmarks/jepsen/) |
+| 568 Jepsen tests, all valid: no acknowledged message lost, no lease held twice, KV linearizable, transactions atomic | the code of 2.9.0, 2026-11-16 and 17; five nodes, six for the 58 standby failovers; kill -9, pauses, partitions, clock jumps, power loss, packet faults, a full disk and rolling upgrades. 561 were valid at their first run, 5 after the fixes they led to, and 2 with wrong answers under clock jumps of minutes counted, not judged | [Jepsen](/benchmarks/jepsen/) |
 
 ## Where QueenMQ leads, and where it does not
 

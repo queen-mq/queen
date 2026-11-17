@@ -1,0 +1,15 @@
+# campaign 3, rig 1, gate: 14 tests
+rt-reading-clock                  --workload reading --nemesis clock --time-limit 300 --rate 200 --final-time-limit 300
+rt-reading-deaf                   --workload reading --nemesis leader-deaf --time-limit 300 --rate 200 --final-time-limit 300
+rt-reading-packet                 --workload reading --nemesis packet --time-limit 300 --rate 200 --final-time-limit 300
+te8-kill                          --workload txnelle --nemesis kill --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-deaf                          --workload txnelle --nemesis leader-deaf --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+te8-packet                        --workload txnelle --nemesis packet --time-limit 300 --rate 200 --env QUEEN_PLANNER_THREADS=8 --require-planner-spread
+scoped-kill                       --workload scoped --via-proxy --nemesis kill --time-limit 300 --rate 200
+scoped-restart                    --workload scoped --via-proxy --nemesis restart --time-limit 300 --rate 200
+qo-window-part                    --workload queueopts --queue-opt window --nemesis partition --time-limit 300 --rate 200
+qo-maxwait-none                   --workload queueopts --queue-opt maxwait --nemesis none --time-limit 300 --rate 200
+qo-maxwait-kill                   --workload queueopts --queue-opt maxwait --nemesis kill --time-limit 300 --rate 200
+qo-maxwait-part                   --workload queueopts --queue-opt maxwait --nemesis partition --time-limit 300 --rate 200
+pgsink-kill                       --workload pgsink --nemesis kill --time-limit 300 --rate 200 --rate 50 --final-time-limit 400
+packet-elle                       --workload elle --nemesis packet --time-limit 300 --rate 200
