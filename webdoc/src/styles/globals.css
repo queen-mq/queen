@@ -89,6 +89,8 @@
 
 	/* Layout */
 	--nb-sidebar-width: 18.75rem;
+	/* The map's sidebar on the right (/map/): its descriptions, top to bottom. */
+	--nb-panel-width: 22rem;
 	--nb-toc-width: 18rem;
 	--nb-content-max: 43.5rem;
 

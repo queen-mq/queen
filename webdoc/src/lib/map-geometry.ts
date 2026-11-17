@@ -148,6 +148,30 @@ export const boxes: Box[] = cores.map((core) => {
   return { core, cx, cy, dots, fanHead, hit };
 });
 
+/**
+ * The part of the grid the drawing uses, edge to edge: the page fits this, not
+ * the whole grid, so the map draws as large as the window allows. A word's
+ * width is estimated on the wide side (WORD per character), so none is cut.
+ */
+const WORD = 8.6;
+export const FRAME = (() => {
+  let l = Infinity;
+  let r = -Infinity;
+  for (const bx of boxes) {
+    const ring = ICON / 2 + 13;
+    const name = (bx.core.label.length * NAME_CHAR) / 2;
+    l = Math.min(l, bx.cx - Math.max(ring, name));
+    r = Math.max(r, bx.cx + Math.max(ring, name));
+    for (const d of bx.dots) {
+      const words = (d.entry.label.length + (d.entry.since ? 4 : 0)) * WORD;
+      l = Math.min(l, d.anchor === "end" ? d.lx - words : d.x - R - 5);
+      r = Math.max(r, d.anchor === "end" ? d.x + R + 5 : d.lx + words);
+    }
+  }
+  const x = Math.floor(l - 8);
+  return { x, y: VIEW.y, w: Math.ceil(r + 8) - x, h: VIEW.h };
+})();
+
 export const center = (id: CoreId) => PLACE[id].cx;
 export const mid = (id: CoreId) => PLACE[id].cy;
 export const left = (id: CoreId) => PLACE[id].cx - HALF;

@@ -25,7 +25,7 @@
  */
 import { Code } from "./ui/code";
 import { MAP_TITLE, cores, goals, intro, entryById, type CoreId, type MapEntry } from "@/lib/map";
-import { W, VIEW, ICON, NAME_Y, R, boxes, flows, txFlows, NOTE, iconSvg, stepMark } from "@/lib/map-geometry";
+import { FRAME, ICON, NAME_Y, R, boxes, flows, txFlows, NOTE, iconSvg, stepMark } from "@/lib/map-geometry";
 import { sdkCode } from "@/lib/book-code";
 
 const byId = entryById();
@@ -108,7 +108,7 @@ const data = {
       <svg
         class="qm-svg"
         data-qm-svg
-        viewBox={`0 ${VIEW.y} ${W} ${VIEW.h}`}
+        viewBox={`${FRAME.x} ${FRAME.y} ${FRAME.w} ${FRAME.h}`}
         role="group"
         aria-label="The map of QueenMQ: its parts as boxes, their options as dots"
         xmlns="http://www.w3.org/2000/svg"
@@ -210,11 +210,44 @@ const data = {
     </div>
   </div>
 
-  <div class="qm-overlay" data-qm-overlay role="dialog" aria-labelledby="qm-overlay-title" hidden>
+  {/* The sidebar's edge: drag it, or ← → when it has the focus, to give the map
+      or the sidebar more room; a double-click puts it back. */}
+  <div
+    class="qm-resize"
+    data-qm-resize
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Sidebar width"
+    tabindex="0"
+  ></div>
+
+  {/* What a click opens: the sidebar from 64rem, there from the first paint with
+      its rest view (how to read the map, then the goals); below, a card, or a
+      sheet on a phone. */}
+  <div class="qm-overlay" data-qm-overlay role="dialog" aria-labelledby="qm-overlay-title" tabindex="-1" data-rest hidden>
     <button type="button" class="qm-close" data-qm-close aria-label="Close">
       <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"></path></svg>
     </button>
-    <div data-qm-overlay-body></div>
+    <div data-qm-overlay-body>
+      <p class="qm-eyebrow" id="qm-overlay-title">How to read it</p>
+      <p class="qm-text qm-rest-text">
+        Point at a part or a dot: what it does, its settings and defaults, when to use it, other brokers' names for it and its code show
+        here. Click it to keep it here while you look around.
+      </p>
+      <p class="qm-k">{intro.goalsLabel}</p>
+      <ul class="qm-rest-goals">
+        {
+          goals.map((g) => (
+            <li>
+              <button type="button" class="qm-rest-goal" data-pick-goal={g.id}>
+                {g.label}
+                <span aria-hidden="true">→</span>
+              </button>
+            </li>
+          ))
+        }
+      </ul>
+    </div>
   </div>
 
   {
@@ -281,6 +314,7 @@ const data = {
       }),
     )
   }
+
 
   {
     goals.map((g) => (
@@ -807,6 +841,120 @@ const data = {
   .qm-overlay[hidden] {
     display: none;
   }
+  .qm-overlay:focus {
+    outline: none;
+  }
+  /* The sidebar's edge exists only with the sidebar. */
+  .qm-resize {
+    display: none;
+  }
+  /* From 64rem the overlay is a sidebar on the right, always there, from the
+     top bar down (the bar's part above it takes its colour: Header.astro). The
+     map takes the rest of the width, the goals move into the sidebar, and the
+     sidebar says what a tooltip said, so there are none. */
+  @media (min-width: 64rem) {
+    .qm {
+      --qm-w: calc(100vw - var(--nb-panel-width) - 3rem);
+      margin-left: calc((100% - 100vw) / 2 + 1.5rem);
+    }
+    .qm-goals,
+    .qm-tip {
+      display: none;
+    }
+    .qm-overlay,
+    .qm-overlay[data-side="left"],
+    .qm-overlay[data-kind="goal"] {
+      top: 3.5rem;
+      right: 0;
+      bottom: 0;
+      left: auto;
+      z-index: 20;
+      width: var(--nb-panel-width);
+      max-height: none;
+      border: 0;
+      border-left: 1px solid var(--nb-line);
+      border-radius: 0;
+      background: var(--nb-zone);
+      padding: 1.25rem 1.5rem 2rem;
+    }
+    .qm-overlay[data-rest] .qm-close {
+      display: none;
+    }
+    .qm-overlay[hidden] {
+      display: block;
+    }
+    .qm-resize {
+      display: block;
+      position: fixed;
+      z-index: 31;
+      top: 0;
+      bottom: 0;
+      right: calc(var(--nb-panel-width) - 4px);
+      width: 8px;
+      cursor: col-resize;
+      touch-action: none;
+    }
+    .qm-resize::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 3px;
+      width: 2px;
+    }
+    .qm-resize:hover::after,
+    .qm-resize.qm-resizing::after {
+      background: var(--qm-muted);
+    }
+    .qm-resize:focus-visible {
+      outline: none;
+    }
+    .qm-resize:focus-visible::after {
+      background: var(--nb-ring);
+    }
+    .qm-resizing-page,
+    .qm-resizing-page * {
+      cursor: col-resize !important;
+      user-select: none !important;
+    }
+  }
+  .qm-rest-text {
+    margin-top: 0.375rem;
+  }
+  .qm-rest-goals {
+    margin: 0.5rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .qm-rest-goals li + li {
+    border-top: 1px solid var(--nb-line);
+  }
+  .qm-rest-goal {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    width: 100%;
+    padding: 0.5rem 0;
+    border: 0;
+    border-radius: 4px;
+    background: none;
+    color: var(--qm-fg);
+    font: inherit;
+    font-size: 0.875rem;
+    text-align: left;
+    cursor: pointer;
+  }
+  .qm-rest-goal span {
+    color: var(--qm-muted);
+  }
+  .qm-rest-goal:hover span {
+    color: var(--qm-fg);
+  }
+  .qm-rest-goal:focus-visible {
+    outline: 2px solid var(--nb-ring);
+    outline-offset: 1px;
+  }
   @media (max-width: 47.99rem) {
     .qm-overlay,
     .qm-overlay[data-side="left"] {
@@ -1139,8 +1287,9 @@ const data = {
    * page's markdown twin says everything.
    *
    * Three states. `hovered`: the dot or box under the pointer (or the keyboard
-   * focus); it is highlighted where it stands and its line shows in a tooltip,
-   * and nothing else changes: leave it and the map is as before. `pinned`: what a
+   * focus); it is highlighted where it stands, and its line shows in a tooltip
+   * (with the sidebar, in the sidebar while nothing is clicked); leave it and
+   * the map is as before. `pinned`: what a
    * click, a goal or the URL's #fragment chose; the overlay shows it, on the side
    * of the screen away from it (a goal: the side that hides fewest of its
    * numbers), and ← → walk a part's dots. `found`: what the find field matches;
@@ -1347,7 +1496,11 @@ const data = {
           out.push(chips);
         }
       }
+      // A click inside it (a step, a chip) replaces what had the focus: the
+      // overlay keeps it, so ← → and Escape still reach the map.
+      const hadFocus = overlayBody!.contains(document.activeElement);
       overlayBody!.replaceChildren(...out);
+      if (hadFocus) overlay!.focus({ preventScroll: true });
       for (const b of overlayBody!.querySelectorAll<HTMLButtonElement>("[data-jump]")) b.addEventListener("click", () => pin(b.dataset.jump!));
       overlayBody!.querySelector(".qm-more")?.append(copyLink(key));
       overlay!.scrollTop = 0;
@@ -1376,13 +1529,59 @@ const data = {
       return r.left + r.width / 2 > window.innerWidth / 2 ? "left" : "right";
     }
 
+    // From 64rem the overlay is a sidebar, always there: it shows what was
+    // clicked, which stays while the pointer looks around; with nothing clicked,
+    // what the pointer is on; else the rest view (how to read the map, and the
+    // goals). Below, it is the card (on a phone, the sheet) that a click opens,
+    // and the pointer gets a tooltip.
+    const wide = window.matchMedia("(min-width: 64rem)");
+    // The rest view, as the page drew it, to put back.
+    const restView = document.createDocumentFragment();
+    for (const n of overlayBody.childNodes) restView.append(n.cloneNode(true));
+    /** What the sidebar shows now; undefined until it first shows anything. */
+    let shown: string | null | undefined;
+    function syncSidebar(): void {
+      if (!wide.matches) return;
+      overlay!.hidden = false;
+      overlay!.setAttribute("role", "region");
+      const key = pinned ?? hovered;
+      if (key === shown) return;
+      shown = key;
+      if (key) {
+        show(key);
+        overlay!.dataset.kind = key in data.goals ? "goal" : "entry";
+        delete overlay!.dataset.rest;
+      } else {
+        overlayBody!.replaceChildren(restView.cloneNode(true));
+        overlay!.dataset.kind = "rest";
+        overlay!.dataset.rest = "";
+        overlay!.scrollTop = 0;
+      }
+    }
+    // Across 64rem (a window made narrower or wider), the other way of showing.
+    wide.addEventListener("change", () => {
+      shown = undefined;
+      tip!.classList.remove("qm-tip-on");
+      if (wide.matches) syncSidebar();
+      else {
+        overlay!.setAttribute("role", "dialog");
+        delete overlay!.dataset.rest;
+        pin(pinned);
+      }
+    });
+
     function pin(key: string | null, opts: { focus?: boolean } = {}): void {
       pinned = known(key) ? key : null;
+      // A click is a choice: what the pointer was on gives way to it.
+      hovered = null;
       tip!.classList.remove("qm-tip-on");
       // A goal and the find field both light pieces: the last one asked wins.
       if (pinned && pinned in data.goals) clearFind();
       paint();
-      if (pinned) {
+      if (wide.matches) {
+        syncSidebar();
+        if (opts.focus && pinned) close!.focus();
+      } else if (pinned) {
         show(pinned);
         overlay!.dataset.kind = pinned in data.goals ? "goal" : "entry";
         overlay!.hidden = false;
@@ -1709,18 +1908,104 @@ const data = {
     function hover(node: SVGGElement | null): void {
       window.clearTimeout(leaving);
       hovered = node ? node.dataset.id! : null;
+      if (wide.matches) syncSidebar();
       // The open item needs no tooltip: the overlay already says it.
-      if (node && hovered !== pinned) placeTip(node);
+      else if (node && hovered !== pinned) placeTip(node);
       else tip!.classList.remove("qm-tip-on");
       paint();
     }
 
     // Leaving a dot for the empty map waits a moment: a pointer on its way to
-    // the next dot does not switch everything off and on again.
+    // the next dot does not switch everything off and on again. With the
+    // sidebar a little longer, and a pointer that reaches the sidebar keeps
+    // what it shows, to read it or follow its links.
     function leave(): void {
       window.clearTimeout(leaving);
-      leaving = window.setTimeout(() => hover(null), 110);
+      leaving = window.setTimeout(() => hover(null), wide.matches ? 180 : 110);
     }
+    overlay.addEventListener("pointerenter", () => {
+      if (wide.matches) window.clearTimeout(leaving);
+    });
+    overlay.addEventListener("pointerleave", () => {
+      if (wide.matches && hovered) leave();
+    });
+    // The sidebar's width: drag its edge, or ← → on the edge; a double-click
+    // puts it back. Between 18rem and 40rem, and never over the find field; this
+    // browser remembers it (a convenience: nothing else depends on it).
+    const handle = root.querySelector<HTMLElement>("[data-qm-resize]");
+    const WIDTH_KEY = "qm-panel-width";
+    const page = document.documentElement;
+    const limits = () => {
+      const rem = parseFloat(getComputedStyle(page).fontSize) || 16;
+      const max = Math.min(40 * rem, window.innerWidth / 2 - 10.5 * rem);
+      return { min: 18 * rem, max: Math.max(18 * rem, max) };
+    };
+    function setWidth(px: number | null, save = false): void {
+      if (px === null) page.style.removeProperty("--nb-panel-width");
+      else {
+        const { min, max } = limits();
+        page.style.setProperty("--nb-panel-width", `${Math.round(Math.min(Math.max(px, min), max))}px`);
+      }
+      const now = Math.round(overlay!.getBoundingClientRect().width);
+      const { min, max } = limits();
+      handle?.setAttribute("aria-valuenow", String(now));
+      handle?.setAttribute("aria-valuemin", String(Math.round(min)));
+      handle?.setAttribute("aria-valuemax", String(Math.round(max)));
+      if (!save) return;
+      try {
+        if (px === null) localStorage.removeItem(WIDTH_KEY);
+        else localStorage.setItem(WIDTH_KEY, String(now));
+      } catch {}
+    }
+    // The width this browser kept, once the sidebar is on screen.
+    function applySaved(): void {
+      if (!wide.matches) return;
+      try {
+        const saved = Number(localStorage.getItem(WIDTH_KEY));
+        if (saved > 0) setWidth(saved);
+      } catch {}
+    }
+    applySaved();
+    wide.addEventListener("change", applySaved);
+    if (handle) {
+      handle.addEventListener("pointerdown", (ev) => {
+        if (ev.button !== 0) return;
+        ev.preventDefault();
+        handle.setPointerCapture(ev.pointerId);
+        handle.classList.add("qm-resizing");
+        page.classList.add("qm-resizing-page");
+      });
+      handle.addEventListener("pointermove", (ev) => {
+        if (handle.hasPointerCapture(ev.pointerId)) setWidth(window.innerWidth - ev.clientX);
+      });
+      const done = (ev: PointerEvent) => {
+        if (!handle.hasPointerCapture(ev.pointerId)) return;
+        handle.releasePointerCapture(ev.pointerId);
+        handle.classList.remove("qm-resizing");
+        page.classList.remove("qm-resizing-page");
+        setWidth(overlay!.getBoundingClientRect().width, true);
+      };
+      handle.addEventListener("pointerup", done);
+      handle.addEventListener("pointercancel", done);
+      handle.addEventListener("dblclick", () => setWidth(null, true));
+      handle.addEventListener("keydown", (ev) => {
+        if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+        // The edge's own keys: the arrows that walk a part's dots stay out of it.
+        ev.preventDefault();
+        ev.stopPropagation();
+        setWidth(overlay!.getBoundingClientRect().width + (ev.key === "ArrowLeft" ? 16 : -16), true);
+      });
+      // A window made narrower keeps the field clear.
+      window.addEventListener("resize", () => {
+        if (wide.matches && page.style.getPropertyValue("--nb-panel-width")) setWidth(overlay!.getBoundingClientRect().width);
+      });
+    }
+
+    // The rest view's goals.
+    overlayBody.addEventListener("click", (ev) => {
+      const b = ev.target instanceof Element ? ev.target.closest<HTMLElement>("[data-pick-goal]") : null;
+      if (b) pin(b.dataset.pickGoal!);
+    });
 
     const nodeOf = (t: EventTarget | null) => (t instanceof Element ? t.closest<SVGGElement>("[data-id]") : null);
 
@@ -1778,6 +2063,7 @@ const data = {
       stage!.scrollIntoView({ block: "start" });
     }
     window.addEventListener("hashchange", fromHash);
+    syncSidebar();
     fromHash();
   }
 </script>

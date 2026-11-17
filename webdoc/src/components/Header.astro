@@ -38,12 +38,19 @@ interface Props {
    * page keeps its own h1 for screen readers, so this one is hidden from them.
    */
   title?: string;
+  /**
+   * The page has a sidebar on the right (the map's descriptions): from lg up
+   * the bar's part above it takes the sidebar's colour and its line, so the
+   * sidebar reads as one strip from the top of the window, as the docs'
+   * sidebar does on the left.
+   */
+  panelUnder?: boolean;
 }
 
 // `entryId` is part of Props as a forward-compat hook (the version-switcher
 // recipe reads it) but the base Header doesn't use it, so leave it off the
 // destructure to avoid an unused-var warning.
-const { collection, showSidebar = true, sidebarUnder = false, transparentTop = false, title } = Astro.props;
+const { collection, showSidebar = true, sidebarUnder = false, transparentTop = false, title, panelUnder = false } = Astro.props;
 
 // Normalize trailing slash so isActive matches sidebar hrefs.
 const currentSlug = Astro.url.pathname.replace(/\/$/, "") || "/";
@@ -74,6 +81,9 @@ const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent";
   )}
   {sidebarUnder && (
     <div aria-hidden="true" class="pointer-events-none hidden lg:block absolute inset-y-0 left-0 w-(--nb-sidebar-width) bg-zone" />
+  )}
+  {panelUnder && (
+    <div aria-hidden="true" class="pointer-events-none hidden lg:block absolute inset-y-0 right-0 w-(--nb-panel-width) bg-zone border-l border-line" />
   )}
   <div class="relative mx-auto flex items-center justify-between h-14 px-4 lg:px-6">
     <div class="flex items-center gap-3 min-w-0">
