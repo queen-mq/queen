@@ -517,12 +517,12 @@ await queen.flushAllBuffers()
 The buffer is **bounded and lossless**, and both properties are why `push()` must
 be awaited:
 
-| Option             | Default            | Meaning                                                                                                                                         |
-| ------------------ | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `messageCount`     | `100`              | Flush once this many messages are waiting                                                                                                       |
-| `timeMillis`       | `1000`             | Or this long after the first message arrives                                                                                                    |
-| `maxSize`          | `4 x messageCount` | Backpressure bound: past this many buffered messages, `push()` WAITS for the flusher instead of growing the heap. There is no unbounded setting |
-| `retryDelayMillis` | `250`              | Delay before retrying a batch whose POST failed. Failed batches go back to the front of the buffer, in order, and are retried — never dropped   |
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `messageCount` | `100` | Flush once this many messages are waiting |
+| `timeMillis` | `1000` | Or this long after the first message arrives |
+| `maxSize` | `4 x messageCount` | Backpressure bound: past this many buffered messages, `push()` WAITS for the flusher instead of growing the heap. There is no unbounded setting |
+| `retryDelayMillis` | `250` | Delay before retrying a batch whose POST failed. Failed batches go back to the front of the buffer, in order, and are retried — never dropped |
 
 A producer that outruns the flush pipeline is therefore paced down to the drain
 rate, and a broker outage shows up as slow pushes with bounded memory rather
@@ -533,10 +533,10 @@ A buffer holds a whole queue: each message keeps its partition, and one batch
 carries every partition, each in its own order. Two client options bound the
 rest:
 
-| Client option       | Default  | Meaning                                                                                                                           |
-| ------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `bufferMaxMessages` | `100000` | Messages the whole client may hold buffered, every queue and batches in flight included, before a buffered `push()` waits         |
-| `onBufferError`     | console  | `(items, error)` for messages the broker refused inside a batch five times: they are dropped, and this is where you hear about it |
+| Client option | Default | Meaning |
+| --- | --- | --- |
+| `bufferMaxMessages` | `100000` | Messages the whole client may hold buffered, every queue and batches in flight included, before a buffered `push()` waits |
+| `onBufferError` | console | `(items, error)` for messages the broker refused inside a batch five times: they are dropped, and this is where you hear about it |
 
 A buffered `push()` also gives the event loop a turn every 256 messages, so a
 `while (true)` producer cannot starve the timers and sockets that send the batches.
@@ -558,11 +558,11 @@ const queen = new Queen({
 })
 ```
 
-| Option            | What it does                                                                                                                                                                                                                                                                                                                                                                                                |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `binaryPush`      | A push, direct or buffered, sends its items as one length-prefixed binary body instead of a JSON document. The answer is the same list, one entry per item.                                                                                                                                                                                                                                                 |
+| Option | What it does |
+| --- | --- |
+| `binaryPush` | A push, direct or buffered, sends its items as one length-prefixed binary body instead of a JSON document. The answer is the same list, one entry per item. |
 | `pushCompression` | Needs `binaryPush`. The client frames each partition's batch the way the broker stores it, mints the message ids (UUIDv7) and compresses the batch with zstd, once. The broker checks the frames and, when it has nothing to add to them, stores those bytes without compressing them again. A transaction that pushes sends its pushes the same way, with the rest of the bundle as JSON in front of them. |
-| `framedPop`       | `pop()` and `consume()` ask for the stored records (`frames=true`) and unpack them here into the same message objects, instead of a JSON answer that the broker renders message by message.                                                                                                                                                                                                                 |
+| `framedPop` | `pop()` and `consume()` ask for the stored records (`frames=true`) and unpack them here into the same message objects, instead of a JSON answer that the broker renders message by message. |
 
 Turn them on when the broker's CPU or the network limits a high message rate:
 the framing, the compression and the unpacking then run in the clients, and the
@@ -987,15 +987,15 @@ for await (const e of queen.feed({ queues: ['orders'], where: [['data.country', 
 }
 ```
 
-| Option         | Meaning                                                                                                                                                                                                |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `queues`       | Names or patterns (`orders*`); every queue when absent                                                                                                                                                 |
-| `partitions`   | Partition names                                                                                                                                                                                        |
-| `where`        | Conditions the broker checks, `[field, op, value]`: fields `queue`, `partition`, `transactionId`, `offset`, `position`, `data.<path>`, `headers.<name>`; ops `= != < <= > >= in exists prefix !prefix` |
-| `from`         | A position, `'now'` (default) or `'earliest'` (default with `since`)                                                                                                                                   |
-| `since`        | `'15m'`, `'1d'`, a `Date` or an ISO time: only messages created since then                                                                                                                             |
-| `follow`       | `true` (default) keeps waiting for new entries; `false` stops once caught up                                                                                                                           |
-| `followerUrls` | Nodes to read from first                                                                                                                                                                               |
+| Option | Meaning |
+|---|---|
+| `queues` | Names or patterns (`orders*`); every queue when absent |
+| `partitions` | Partition names |
+| `where` | Conditions the broker checks, `[field, op, value]`: fields `queue`, `partition`, `transactionId`, `offset`, `position`, `data.<path>`, `headers.<name>`; ops `= != < <= > >= in exists prefix !prefix` |
+| `from` | A position, `'now'` (default) or `'earliest'` (default with `since`) |
+| `since` | `'15m'`, `'1d'`, a `Date` or an ISO time: only messages created since then |
+| `follow` | `true` (default) keeps waiting for new entries; `false` stops once caught up |
+| `followerUrls` | Nodes to read from first |
 
 `reader.read()` answers one page (`entries`, `next`, `caughtUp`, `resolvedTs`, `applied`) and moves
 the reader to `next`.
@@ -1544,10 +1544,10 @@ counters, publishes its initial state, then reports `stopped` when all its
 workers exit, including a normal exit caused by `.limit(...)`, `.idleMillis(...)`
 or cancellation.
 
-| Application pattern                                                               | Supervision setup                                                                                                                           |
-| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| One persistent `consume()` with several concurrent workers                        | Enable `.supervision({ group })` on that invocation.                                                                                        |
-| Several persistent `consume()` calls in one process                               | Enable reporting on each; expect several instances with the same hostname. Budget their combined concurrency.                               |
+| Application pattern | Supervision setup |
+| --- | --- |
+| One persistent `consume()` with several concurrent workers | Enable `.supervision({ group })` on that invocation. |
+| Several persistent `consume()` calls in one process | Enable reporting on each; expect several instances with the same hostname. Budget their combined concurrency. |
 | An outer scheduler repeatedly calling `.limit(1).consume(...)` or rotating queues | Leave per-call supervision off when you need the scheduler's lifetime status; publish one observation for the persistent scheduler instead. |
 
 For a persistent consumer, omit limits that deliberately end the invocation.

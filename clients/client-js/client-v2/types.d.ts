@@ -196,8 +196,12 @@ export interface QueueDeleteResult {
   [key: string]: unknown
 }
 
-/** A filtered group or `subscriptionMode`: `'new'` skips what is already there, `'all'` takes the backlog. */
-export type SubscriptionMode = 'new' | 'all'
+/**
+ * Where a consumer group starts: `'new'` skips what is already there (the
+ * broker's default), `'new-only'` is the same mode under its other name, and
+ * `'all'` takes the backlog.
+ */
+export type SubscriptionMode = 'new' | 'new-only' | 'all'
 
 // ---------------------------------------------------------------------------
 // Push
