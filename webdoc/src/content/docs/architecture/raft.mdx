@@ -47,6 +47,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-18 (planner store hand-back, e96d73319): batcher_scheduler.rs: a
 # planning thread drops its clones of the store and of the dedup front before it answers, not
 # after. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (raft stale replication session, f14c3dca9): network.rs ends a
+# replication session at a request that needs an entry the log purged, mod.rs hands it the log,
+# log_store.rs changes a comment. Nothing this page states changes.
 ---
 
 The nodes agree on the log with Raft, through the openraft library. Raft decides who leads and when an entry is committed. An entry is committed when a majority of the nodes has written it and synced it to disk (fsync).

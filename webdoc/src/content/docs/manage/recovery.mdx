@@ -77,6 +77,9 @@ digest: >-
 # sourceOfTruth re-read 2026-11-16 (a snapshot received while a node starts): raft/mod.rs takes the exit 75 a running node takes for it (stopped_at_open), where the start failed with `FATAL: raft storage failed to open` and exit 1. The row "A node exited once with code 75: it loaded a snapshot" now holds for that case too.
 # sourceOfTruth re-read 2026-11-16 (log_store.rs, a test only): no_commit_point_is_saved_once_the_log_writer_failed retries a run in which the failed writer took the group before it down too; the code does not change. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (ephemeral hand-over fix, Jepsen W20): ephemeral.rs keeps what the groups of a ring created while partitions may still be moving take until the old owner's ring lands (HANDOVER_HOLD_MS), and a moving ring carries what each group already took (GroupExport.skip); handlers/ephemeral.rs opens that window on a leaving notice, a placement change and at start, and sends `skip` between brokers. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (raft stale replication session, f14c3dca9): network.rs ends a
+# replication session at a request that needs an entry the log purged, mod.rs hands it the log,
+# log_store.rs changes a comment. Nothing this page states changes.
 ---
 
 Most failures need nothing from you. A node that crashes catches up from the leader when it starts again. A leader that gets SIGTERM hands its job to a peer before it stops. A node that was away too long gets a snapshot from the leader, exits with code 75, and loads it when it starts again. This section is for the rest: a lost disk, a lost majority, a full disk, a bad day.

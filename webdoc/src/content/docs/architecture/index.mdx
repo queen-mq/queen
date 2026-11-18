@@ -60,6 +60,9 @@ digest: >-
 # sourceOfTruth re-read 2026-11-18 (planner store hand-back, e96d73319): batcher_scheduler.rs: a
 # planning thread drops its clones of the store and of the dedup front before it answers, not
 # after. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (raft stale replication session, f14c3dca9): network.rs ends a
+# replication session at a request that needs an entry the log purged, mod.rs hands it the log,
+# log_store.rs changes a comment. Nothing this page states changes.
 ---
 
 A QueenMQ node is one process. Every write is decided once, on the leader, and then applied on every node. These pages follow a write through the process, from the request to the disk.
