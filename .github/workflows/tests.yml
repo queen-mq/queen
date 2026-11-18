@@ -88,6 +88,33 @@ jobs:
       - name: Check the type declarations
         run: npm run check:types
 
+  # The JS client's whole unit suite (`npm run test:unit`; the js suite cell
+  # runs only a part of it), on each Node the client supports. Node's global
+  # fetch is the undici that Node bundles, 7 in Node 24 and 8 in Node 26, and
+  # undici changed between them: 2.9.1 sent no request at all on Node 26 while
+  # every test passed on Node 24. No broker: the tests start their own servers.
+  js-client-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24, 26]
+    defaults:
+      run:
+        working-directory: clients/client-js
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: clients/client-js/package-lock.json
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Unit tests
+        run: npm run test:unit
+
   # Pure PHP/Laravel client contract tests. Keep this independent from the
   # broker image so syntax, dependency and fake-handler regressions fail fast
   # even when Docker or the live Laravel matrix is unavailable.

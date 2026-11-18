@@ -21,7 +21,7 @@
   ],
   "dependencies": {
     "axios": "^1.12.2",
-    "undici": "^6.21.0",
+    "undici": "^8.12.4",
     "uuid": "^13.0.0"
   },
   "engines": {

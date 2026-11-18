@@ -48,6 +48,25 @@ function isPop(method, url) {
   }
 }
 
+/**
+ * The undici this client sends with, imported once; null where it cannot be
+ * imported (a browser bundle), and there the global fetch is used as before.
+ *
+ * The Agent of a request checks the handler that its fetch builds, and undici
+ * changed that handler between majors: an undici 6 Agent takes only the old
+ * one, an undici 8 Agent only the new one. Node's global fetch is the undici
+ * Node bundles (7 in Node 24, 8 in Node 26), not this one, so an Agent from
+ * here handed to the global fetch failed every request with
+ * `UND_ERR_INVALID_ARG` on some pairs of Node and undici (an undici 6 Agent on
+ * Node 26). fetch, Agent and Response all come from this one import, so both
+ * sides of a request are always the same undici, whatever Node bundles.
+ */
+let undiciModule
+function loadUndici() {
+  if (undiciModule === undefined) undiciModule = import('undici').catch(() => null)
+  return undiciModule
+}
+
 // --------------------------------------------------------------------------
 // Host-routed proxy support (queen_proxy selects the tenant cluster from the
 // first DNS label of the Host header -- proxy/src/cache.rs
@@ -321,12 +340,12 @@ export class HttpClient {
 
   // Resolve the per-client dispatcher once: undici Agent on Node, null in
   // browsers (global fetch used as before). undici is a regular dependency,
-  // but the guarded dynamic import keeps browser bundles working.
+  // but the guarded dynamic import (loadUndici) keeps browser bundles working.
   async #getDispatcher() {
     if (this.#dispatcher !== undefined) return this.#dispatcher
     try {
-      const { Agent } = await import('undici')
-      this.#dispatcher = new Agent({ keepAliveTimeout: 4000, keepAliveMaxTimeout: 30000 })
+      const undici = await loadUndici()
+      this.#dispatcher = undici ? new undici.Agent({ keepAliveTimeout: 4000, keepAliveMaxTimeout: 30000 }) : null
     } catch {
       this.#dispatcher = null
     }
@@ -356,12 +375,8 @@ export class HttpClient {
   }
 
   async #createPinnedDispatcher(realHostname, realPort) {
-    let undici
-    try {
-      undici = await import('undici')
-    } catch {
-      return null
-    }
+    const undici = await loadUndici()
+    if (!undici) return null
 
     const { Agent, buildConnector } = undici
     if (typeof buildConnector !== 'function' || typeof Agent !== 'function') return null
@@ -459,7 +474,10 @@ export class HttpClient {
         options.body = JSON.stringify(body)
       }
 
-      let response = await fetch(requestUrl, options)
+      // A request with an undici Agent goes through the fetch of that same
+      // undici (see loadUndici); without one (a browser), the global fetch.
+      const undici = options.dispatcher ? await loadUndici() : null
+      let response = await (undici ? undici.fetch : fetch)(requestUrl, options)
 
       // The broker granted the leases of a pop when it sent these headers. From
       // here the caller's abort no longer cuts the read: the body says which
@@ -523,7 +541,7 @@ export class HttpClient {
         if (isPopFrames(bytes)) {
           return await decodePopFrames(bytes)
         }
-        response = new Response(bytes, { status: response.status, headers: response.headers })
+        response = new (undici ? undici.Response : Response)(bytes, { status: response.status, headers: response.headers })
       }
 
       // Parse successful response

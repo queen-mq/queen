@@ -48,7 +48,9 @@ const TRANSIENT_CAP_MILLIS = 30000
  * `raft_phase1_unsupported` (the broker cannot serve the route at all), every
  * other 4xx (a request or a credential refused the same way next time), a stop
  * by the caller, and an error without an HTTP status that is not a transport
- * fault (a bug, a `hostHeader` this runtime cannot send).
+ * fault (a bug, a `hostHeader` this runtime cannot send, a request undici
+ * refuses before sending it: `fetch failed` with `UND_ERR_INVALID_ARG`, as an
+ * Agent from one undici handed to the fetch of another gave on every request).
  */
 export function isTransientPopError(error) {
   if (!error || error.aborted) return false
@@ -57,6 +59,7 @@ export function isTransientPopError(error) {
     return error.status === 408 || error.status === 429 || error.status >= 500
   }
   const message = typeof error.message === 'string' ? error.message : ''
+  if (error.cause?.code === 'UND_ERR_INVALID_ARG' || message.includes('UND_ERR_INVALID_ARG')) return false
   return error.name === 'AbortError' ||   // this client's request timeout
     message.includes('fetch failed') ||   // no connection, or it dropped before the answer
     message === 'terminated' ||           // it dropped while the answer was read

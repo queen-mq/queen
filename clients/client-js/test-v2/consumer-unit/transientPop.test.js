@@ -330,6 +330,12 @@ describe('isTransientPopError', () => {
       '503 raft_phase1_unsupported': http(503, 'raft_phase1_unsupported'),
       'a stop by the caller': named('AbortError', 'GET /api/v1/pop/queue/orders aborted by the caller', { aborted: true }),
       'a hostHeader this runtime cannot send': new Error("hostHeader 'acme:6711' cannot be honored here: no undici dispatcher available"),
+      // What the HttpClient throws for a request undici refuses before sending
+      // it (an Agent from one undici with the fetch of another): every pop
+      // after it fails the same way, so waiting would only hide it.
+      'a request undici refuses to send': Object.assign(new TypeError('fetch failed (UND_ERR_INVALID_ARG)'), {
+        cause: Object.assign(new Error('invalid onError method'), { code: 'UND_ERR_INVALID_ARG' })
+      }),
       'a bug': new TypeError("Cannot read properties of undefined (reading 'messages')"),
       'nothing': null
     }

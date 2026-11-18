@@ -19,6 +19,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
+import { subscribe, unsubscribe } from 'node:diagnostics_channel'
 import vm from 'node:vm'
 
 import { Queen } from '../../client-v2/index.js'
@@ -275,17 +276,21 @@ async function startStallingServer() {
   }
 }
 
-/** Resolves once fetch has handed back the response headers for a URL with `prefix`. */
+/**
+ * Resolves once the response headers of a request to an origin starting with
+ * `prefix` have arrived, one turn later, when the client is reading the body.
+ * undici publishes the headers on `undici:request:headers` whichever undici
+ * sends the request: the client's fetch is the undici it depends on, not the
+ * global fetch, so wrapping `globalThis.fetch` would never see the request.
+ */
 function onResponseHeaders(prefix) {
-  const original = globalThis.fetch
   let ready
   const promise = new Promise(resolve => { ready = resolve })
-  globalThis.fetch = async (...args) => {
-    const response = await original(...args)
-    if (String(args[0]).startsWith(prefix)) setImmediate(ready)
-    return response
+  const listener = ({ request }) => {
+    if (String(request.origin).startsWith(prefix)) setImmediate(ready)
   }
-  return { ready: promise, restore() { globalThis.fetch = original } }
+  subscribe('undici:request:headers', listener)
+  return { ready: promise, restore() { unsubscribe('undici:request:headers', listener) } }
 }
 
 describe('HttpClient — a response whose body is still being read', () => {
