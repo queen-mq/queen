@@ -175,8 +175,13 @@ class QueenServiceProvider extends ServiceProvider
             'framedPop' => $config['framed_pop'] ?? false,
         ];
 
-        if (!empty($config['urls'])) {
-            $queenConfig['urls'] = $config['urls'];
+        $urls = $config['urls'] ?? null;
+        if (is_string($urls)) {
+            // As the connector reads it: 'urls' => env('QUEEN_URLS') is a comma-separated string.
+            $urls = array_values(array_filter(array_map('trim', explode(',', $urls))));
+        }
+        if (!empty($urls)) {
+            $queenConfig['urls'] = $urls;
         } else {
             $queenConfig['url'] = $config['url'];
         }
