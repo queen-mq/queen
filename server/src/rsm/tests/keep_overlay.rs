@@ -1081,6 +1081,17 @@ impl Rig {
             None,
         )
         .expect("plan cycle");
+        // A planning thread lets go of the store before it answers: once the
+        // cycle is back, the store is its caller's alone, and a caller that
+        // closes it (this rig at its end) finds it whole. A clone dropped after
+        // the answer made the close race the threads ("the store is still
+        // shared at close", CI 2026-11-18).
+        assert_eq!(
+            Arc::strong_count(self.node.store_arc()),
+            1,
+            "cycle {}: a planning thread still holds the store after the cycle answered",
+            self.cycles
+        );
         assert!(
             self.state.stats.mismatches.is_empty(),
             "cycle {}: the kept state differs from a rebuild:\n{:#?}",

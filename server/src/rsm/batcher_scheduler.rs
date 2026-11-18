@@ -1967,9 +1967,13 @@ fn plan_parallel<S: Store + 'static, R: Reads + ?Sized>(
                 Ok(plan_group(&p, &base, home as u32, &sh))
             });
             // Before answering: the cycle takes the overlay and the commands
-            // back as soon as every answer is in.
+            // back as soon as every answer is in, and once it returns, its
+            // caller holds the store alone (a caller may close it: a test rig,
+            // a reopen). Nothing the job took may outlive its answer.
             drop(base);
             drop(sh);
+            drop(front);
+            drop(store);
             let _ = tx.send(out);
         });
         if w.send(job).is_ok() {
