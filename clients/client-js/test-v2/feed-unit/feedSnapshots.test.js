@@ -11,7 +11,7 @@ import { POSITION_NAMESPACE as NS } from '../../client-v2/streams/runtime/FeedRu
 import { FeedState } from '../../client-v2/streams/runtime/feed/state.js'
 import { Pipeline } from '../../client-v2/streams/runtime/feed/pipeline.js'
 import {
-  writeLayer, readLayer, encodeSnapshot, layersOf, chunkKey, newSnapshotId
+  writeLayer, readLayer, encodeSnapshot, layersOf, chunkKey, newSnapshotId, DEFAULT_PIECE_BYTES
 } from '../../client-v2/streams/runtime/feed/snapshot.js'
 import { fakeBroker, fakeQueen, until } from './fakeBroker.js'
 
@@ -97,14 +97,39 @@ describe('feed state: counts kept as it changes', () => {
 })
 
 describe('feed state: millions due at once', () => {
-  const loaded = async (n, due) => {
+  // n windows as a snapshot holds them: in pieces of at most
+  // DEFAULT_PIECE_BYTES of `[key, value]` JSON, as writeLayer cuts them.
+  const pieces = (n, due) => {
+    const out = []
+    let set = []
+    let used = 0
+    for (let i = 0; i < n; i++) {
+      const kv = [`w\u001f0\u001fk${String(i).padStart(7, '0')}`, { key: `k${i}`, start: 0, end: due, due, acc: { count: 1 } }]
+      set.push(kv)
+      used += Buffer.byteLength(JSON.stringify(kv))
+      if (used >= DEFAULT_PIECE_BYTES) {
+        out.push(set)
+        set = []
+        used = 0
+      }
+    }
+    if (set.length) out.push(set)
+    return out
+  }
+  // Load them as FeedRunner reads a snapshot back (readLayer): a piece, then a
+  // turn of the event loop, and the re-index at the end. `ready` runs once the
+  // pieces are built, before the load: what follows is the client's own work.
+  const loaded = async (n, due, ready = () => {}) => {
     const q = fakeQueen(fakeBroker())
     const { steps } = perMinute(q)._compileFeed()
     const p = new Pipeline(steps)
+    const parts = pieces(n, due)
+    ready()
     p.loadBegin()
-    const set = []
-    for (let i = 0; i < n; i++) set.push([`w\u001f0\u001fk${String(i).padStart(7, '0')}`, { key: `k${i}`, start: 0, end: due, due, acc: { count: 1 } }])
-    p.loadPiece(0, 'window', set, [])
+    for (const set of parts) {
+      p.loadPiece(0, 'window', set, [])
+      await new Promise((resolve) => setImmediate(resolve))
+    }
     await p.loadEnd(null)
     return p
   }
@@ -129,8 +154,8 @@ describe('feed state: millions due at once', () => {
   })
 
   it('a loaded state of 500,000 entries is indexed again in batches', async () => {
-    const g = gaps()
-    const p = await loaded(500000, 60000)
+    let g
+    const p = await loaded(500000, 60000, () => { g = gaps() })
     clearInterval(g.timer)
     assert.equal(p.open, 500000)
     assert.ok(g.max < 400, `the event loop stood still for ${g.max.toFixed(0)} ms`)
