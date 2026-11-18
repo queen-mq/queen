@@ -369,8 +369,14 @@ describe('feed streams: windows on the feed clock', () => {
       .windowTumbling({ seconds: 60 })
       .aggregate({ count: () => 1 })
       .to(queen.queue('counts'))
-      .run({ queryId: 'quiet', ...fast({ now: () => b.nowMs }) })
-    await until(() => runner.metrics().entriesRead >= 2)
+      // Every write moves the broker's clock, so the tick must be the only one
+      // left once the messages are committed: no position commit (it falls due
+      // when the clock jumps) and no lock renewal while the test runs. A slow
+      // runner otherwise wrote one of those after the clock passed 60,000, and
+      // the window closed with no tick.
+      .run({ queryId: 'quiet', ...fast({ now: () => b.nowMs, positionCommitMillis: 3600000, lockTtl: '1h' }) })
+    // Read and committed: the commit of the two messages is a write too.
+    await until(() => (b.kvGet(POSITION_NAMESPACE, 'quiet')?.value?.position ?? 0) >= 2)
     // Nothing more is written: only time passes.
     at(b, 59500)
     await new Promise((r) => setTimeout(r, 100))
