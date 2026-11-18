@@ -3,6 +3,20 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## JS client 2.9.1 - 2026-11-18
+
+**JS client: TypeScript declarations (#158).** `queen-mq` now ships `.d.ts` files next to its
+modules, so TypeScript code gets typed APIs with nothing else to install: `import { Queen } from
+'queen-mq'`, and `import type { Message, QueueConfig } from 'queen-mq'` for the shapes.
+`queen.queue<T>()` types the payload of pushes, pops, consumers and reads; without a type argument
+the payload is `any`, as in JavaScript. A consume handler gets one message with `.each()` and the
+popped array without it, and the types follow that. Broker answers without a documented shape, most
+`queen.admin` calls among them, are `unknown`. The README said the package had TypeScript
+definitions; until this release it shipped none. No file of the client's JavaScript changed: the
+runtime is the same as 2.9.0. `npm run check:types` checks the declarations against a strict and a
+loose TypeScript consumer and against the modules they describe, and CI runs it in the
+`js-client-types` job. The broker and the other clients stay at 2.9.0.
+
 ## 2.9.0 - 2026-11-17
 
 **Upgrading from 2.8.1: a rolling restart; the new features turn on by themselves once every node
