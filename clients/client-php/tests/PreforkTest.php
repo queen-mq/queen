@@ -4,6 +4,7 @@ namespace Queen\Tests;
 
 use PHPUnit\Framework\TestCase;
 use Queen\Laravel\Supervisor\Prefork\ForkedProcess;
+use Queen\Laravel\Supervisor\Prefork\ForkServer;
 use Queen\Laravel\Supervisor\Prefork\ForkServerClient;
 
 /**
@@ -37,6 +38,43 @@ final class PreforkTest extends TestCase
         foreach ($this->reports as $report) {
             @unlink($report);
         }
+    }
+
+    /** A pool of handlers forks queen:consume; a plain request still forks queue:work. */
+    public function testAWorkerRunsTheCommandTheMasterNames(): void
+    {
+        $consume = $this->report();
+        $work = $this->report();
+
+        $consumer = new ForkedProcess($this->server, $this->server->fork(['exit', $consume, '0'], [], 5, 'queen:consume'));
+        $worker = new ForkedProcess($this->server, $this->server->fork(['exit', $work, '0'], [], 5));
+
+        $this->waitUntil(fn (): bool => !$consumer->isRunning() && !$worker->isRunning());
+        $this->assertSame('queen:consume', json_decode((string) file_get_contents($consume), true)['command']);
+        $this->assertSame('queue:work', json_decode((string) file_get_contents($work), true)['command']);
+    }
+
+    /** The server forks only the commands it knows. */
+    public function testAnUnknownCommandIsRefused(): void
+    {
+        $this->expectExceptionMessage('unsupported fork command');
+
+        $this->server->fork(['exit', $this->report(), '0'], [], 5, 'queue:listen');
+    }
+
+    /** A v1 master never names a command: a v1 request that does is refused, without a fork. */
+    public function testAServerAskedForV1RefusesARequestThatNamesACommand(): void
+    {
+        $events = fopen('php://memory', 'w+');
+        $server = new ForkServer(fopen('php://memory', 'r'), $events, static fn (): int => 0, null, ForkServer::PROTOCOLS[0]);
+
+        (new \ReflectionMethod($server, 'handle'))->invoke($server, '{"fork":{"id":1,"command":"queen:consume","argv":[],"env":{}}}');
+
+        rewind($events);
+        $this->assertSame(
+            ['failed' => 1, 'error' => 'unsupported fork command'],
+            json_decode(trim((string) stream_get_contents($events)), true, 512, JSON_THROW_ON_ERROR),
+        );
     }
 
     public function testAWorkerGetsItsArgumentsAndEnvironmentAndLeadsItsOwnSession(): void

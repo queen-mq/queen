@@ -7,11 +7,14 @@
 //! object per line:
 //!
 //! ```text
-//! master -> server (stdin)  {"fork": {"id": 7, "argv": ["queen", "--queue=high", ...], "env": {"NAME": "value" | null}}}
-//! server -> master (fd 3)   {"ready": "queen.fork-server/v1", "pid": 42}
+//! master -> server (stdin)  {"fork": {"id": 7, "command": "queue:work", "argv": ["queen", "--queue=high", ...], "env": {"NAME": "value" | null}}}
+//! server -> master (fd 3)   {"ready": "queen.fork-server/v2", "pid": 42}
 //!                           {"forked": 7, "pid": 43} | {"failed": 7, "error": "..."}
 //!                           {"exited": 43, "status": <raw waitpid status>}
 //! ```
+//!
+//! `command` (v2) is `queue:work` or `queen:consume`. A PHP package that
+//! speaks only v1 refuses to boot for this master, which then spawns.
 //!
 //! Every forked worker leads its own session, so it is signalled and drained
 //! exactly like a spawned one. The server is started with SIGTERM as its
@@ -34,7 +37,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-pub(crate) const PROTOCOL: &str = "queen.fork-server/v1";
+pub(crate) const PROTOCOL: &str = "queen.fork-server/v2";
 pub(crate) const BOOT_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const FORK_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
@@ -162,19 +165,21 @@ impl ForkServer {
         Err("prefork needs a Unix host".into())
     }
 
-    /// Ask for one worker; returns its pid.
+    /// Ask for one worker running `command`; returns its pid.
     pub(crate) fn fork(
         &mut self,
+        command: &str,
         argv: &[String],
         environment: &[(String, Option<String>)],
     ) -> Result<u32, Box<dyn std::error::Error>> {
-        let forked = self.request_fork(argv, environment);
+        let forked = self.request_fork(command, argv, environment);
         self.disabled |= forked.is_err();
         forked
     }
 
     fn request_fork(
         &mut self,
+        command: &str,
         argv: &[String],
         environment: &[(String, Option<String>)],
     ) -> Result<u32, Box<dyn std::error::Error>> {
@@ -184,8 +189,9 @@ impl ForkServer {
             .iter()
             .map(|(name, value)| (name.clone(), serde_json::json!(value)))
             .collect();
-        let mut line =
-            serde_json::to_vec(&serde_json::json!({"fork": {"id": id, "argv": argv, "env": env}}))?;
+        let mut line = serde_json::to_vec(
+            &serde_json::json!({"fork": {"id": id, "command": command, "argv": argv, "env": env}}),
+        )?;
         line.push(b'\n');
         self.commands
             .as_mut()
@@ -532,7 +538,7 @@ mod tests {
             .iter()
             .map(|(name, value)| ((*name).to_owned(), value.map(str::to_owned)))
             .collect();
-        let pid = server.borrow_mut().fork(&argv, &env).unwrap();
+        let pid = server.borrow_mut().fork("queue:work", &argv, &env).unwrap();
         WorkerProcess::Forked {
             pid,
             server: Rc::clone(server),
@@ -551,6 +557,46 @@ mod tests {
             assert!(Instant::now() < deadline, "the worker never reported");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The fork request names the command the child becomes: queue:work
+    /// for a pool of jobs, queen:consume for a pool of handlers. The server
+    /// refuses any other.
+    #[test]
+    fn a_forked_worker_runs_the_command_the_master_names() {
+        let Some(config) = fixture_config() else {
+            return;
+        };
+        let server = Rc::new(RefCell::new(
+            ForkServer::start(&config, &AtomicBool::new(true)).unwrap(),
+        ));
+        let report = report();
+        let argv = vec![
+            "exit".to_owned(),
+            report.to_str().unwrap().to_owned(),
+            "0".to_owned(),
+        ];
+
+        let pid = server
+            .borrow_mut()
+            .fork("queen:consume", &argv, &[])
+            .unwrap();
+        let mut worker = WorkerProcess::Forked {
+            pid,
+            server: Rc::clone(&server),
+            status: None,
+        };
+        let seen = wait_for_report(&report);
+        let refused = server.borrow_mut().request_fork("queue:listen", &argv, &[]);
+
+        assert_eq!(seen["command"], "queen:consume");
+        assert!(
+            refused.is_err(),
+            "the server forked a command it does not know"
+        );
+        let _ = worker.wait();
+        let _ = std::fs::remove_file(&report);
+        server.borrow_mut().close(Duration::from_secs(5));
     }
 
     #[test]
@@ -633,7 +679,7 @@ mod tests {
             .find_map(|_| {
                 let late = report();
                 let argv = ["sleep".to_owned(), late.to_str().unwrap().to_owned()];
-                let early = server.borrow_mut().request_fork(&argv, &[]);
+                let early = server.borrow_mut().request_fork("queue:work", &argv, &[]);
                 match early {
                     Err(_) => Some(late),
                     Ok(pid) => {
@@ -685,7 +731,7 @@ mod tests {
             .find_map(|_| {
                 let late = report();
                 let argv = ["sleep".to_owned(), late.to_str().unwrap().to_owned()];
-                match server.borrow_mut().request_fork(&argv, &[]) {
+                match server.borrow_mut().request_fork("queue:work", &argv, &[]) {
                     Err(_) => Some(late),
                     Ok(pid) => {
                         // SAFETY: plain signal delivery to the worker just forked.
@@ -768,7 +814,9 @@ mod tests {
         let mut server = ForkServer::start(&config, &AtomicBool::new(true)).unwrap();
         server.commands = None;
 
-        assert!(server.fork(&["exit".to_owned()], &[]).is_err());
+        assert!(server
+            .fork("queue:work", &["exit".to_owned()], &[])
+            .is_err());
         assert!(server.disabled);
         server.close(Duration::from_secs(5));
     }

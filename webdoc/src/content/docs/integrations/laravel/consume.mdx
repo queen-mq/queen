@@ -8,6 +8,7 @@ sidebar:
   order: 10
 sourceOfTruth:
   - clients/client-php/src/Laravel/Commands/ConsumeCommand.php
+  - clients/client-php/src/Laravel/Supervisor/RestartSignal.php
   - clients/client-php/src/Laravel/QueenServiceProvider.php
   - clients/client-php/src/Laravel/Queue/LeaseRenewerFactory.php
   - clients/client-php/src/Laravel/Queue/RenewsOneLease.php
@@ -77,6 +78,12 @@ sourceOfTruth:
 # may be a token callable, read per attempt, and Queen gains tokens()->mint() (Queen.php,
 # HttpClient.php) (8c3fcd498). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (routing, e0654033f): QueueBuilder and HighLevelConsumer take a `where` (filtered groups) and headers, and check that a broker applied the filter. The consume options and behavior this page states do not change.
+# sourceOfTruth re-read 2026-11-18 (pools of handlers): SupervisorConfiguration takes a pool's
+# `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
+# server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
+# queen:consume stops for queue:restart under a supervisor (RestartSignal). Before production and the exit codes say so.
+# sourceOfTruth re-read 2026-11-18 (urls string): QueenServiceProvider::clientConfig splits a comma-separated
+# `urls`, as QueenConnector does, so queen:consume and the Queen facade accept 'urls' => env('QUEEN_URLS'). Nothing this page states changes.
 ---
 
 `php artisan queen:consume` reads a QueenMQ queue and passes each message to a class of yours. Use it
@@ -248,8 +255,13 @@ Every pop asks for a lease of `--lease` seconds, by default `retry_after` of `co
 
 - **`--group` has no default.** The command does not read `QUEEN_CONSUMER_GROUP`, which is the
   group of the queue connection.
-- **No restart on deploy.** The command does not watch `queue:restart`. Restart it with your
-  process manager.
+- **A process per handler, or a supervisor.** Each run reads one queue with one handler. To run
+  every handler of the application under one master, with scaling, prefork and restarts, declare
+  them as a [pool of handlers](/integrations/laravel/supervisors/#pools-of-queenconsume-handlers).
+- **Restart on deploy.** Run by hand or by your process manager, the command does not watch
+  `queue:restart`: restart it with the process manager. Started by a supervisor, it stops for
+  `queue:restart` after the message in hand, exits with 0, and the supervisor replaces it. With `'quiet' => false`
+  it prints `queue:restart signalled: stopping.`
 
 ## Stop and exit codes
 
@@ -264,7 +276,7 @@ a pop gets an answer.
 
 | Exit code | When |
 | --- | --- |
-| `0` | stopped by a signal, `--limit` or `--idle-timeout` |
+| `0` | stopped by a signal, `--limit` or `--idle-timeout`, or by `queue:restart` under a supervisor |
 | `1` | the handler class does not exist or has no `handle()` |
 | `1` | an invalid lease, or a renewal timing that does not fit it |
 | `1` | an error left the loop; Laravel reports it |

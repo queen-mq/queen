@@ -9,13 +9,13 @@ namespace Queen\Laravel\Supervisor\Prefork;
  * opens no queue, database or cache connection, and then forks one child per
  * worker the master asks for. Every child shares the opcache's compiled code
  * outright and the booted heap copy-on-write, sets up its own worker
- * environment and becomes `queue:work` with the same arguments a spawned
- * worker gets.
+ * environment and becomes `queue:work` (or, for a pool of handlers,
+ * `queen:consume`) with the same arguments a spawned worker gets.
  *
  * Protocol (JSON, one object per line):
  *
- *   master -> server (stdin)  {"fork": {"id": 7, "argv": ["queen", "--queue=high", ...], "env": {"NAME": "value" | null}}}
- *   server -> master (fd 3)   {"ready": "queen.fork-server/v1", "pid": 42}
+ *   master -> server (stdin)  {"fork": {"id": 7, "command": "queue:work", "argv": ["queen", "--queue=high", ...], "env": {"NAME": "value" | null}}}
+ *   server -> master (fd 3)   {"ready": "queen.fork-server/v2", "pid": 42}
  *                             {"forked": 7, "pid": 43} | {"failed": 7, "error": "..."}
  *                             {"exited": 43, "status": <raw waitpid status>}
  *
@@ -29,11 +29,22 @@ namespace Queen\Laravel\Supervisor\Prefork;
  * terminal are not a crash: the master drains the workers itself and then
  * closes stdin.
  *
+ * `command` is one of COMMANDS, and `queue:work` when absent. It is new in v2:
+ * the server also speaks v1, for an older master, and refuses a v1 request
+ * that names a command. The master names the version in QUEEN_FORK_SERVER;
+ * `ready` answers with it.
+ *
  * The Rust engine speaks the same protocol (supervisor/src/prefork.rs).
  */
 final class ForkServer
 {
-    public const PROTOCOL = 'queen.fork-server/v1';
+    public const PROTOCOL = 'queen.fork-server/v2';
+
+    /** The versions a master may ask for, oldest first. */
+    public const PROTOCOLS = ['queen.fork-server/v1', self::PROTOCOL];
+
+    /** What a forked child may become. */
+    public const COMMANDS = ['queue:work', 'queen:consume'];
 
     private const MAX_LINE_BYTES = 1048576;
 
@@ -47,15 +58,20 @@ final class ForkServer
     /**
      * @param resource $commands the master's requests (stdin)
      * @param resource $events the replies to the master (fd 3)
-     * @param \Closure(list<string>): int $runWorker runs queue:work in a forked child
+     * @param \Closure(list<string>, string): int $runWorker runs the command (one of COMMANDS) with these arguments in a forked child
      * @param (\Closure(): void)|null $afterFork resets state a child must not share
+     * @param string $protocol the version the master asked for, one of PROTOCOLS
      */
     public function __construct(
         private mixed $commands,
         private mixed $events,
         private \Closure $runWorker,
         private ?\Closure $afterFork = null,
+        private string $protocol = self::PROTOCOL,
     ) {
+        if (!in_array($protocol, self::PROTOCOLS, true)) {
+            throw new \InvalidArgumentException("unknown fork server protocol [{$protocol}]");
+        }
     }
 
     public function serve(): int
@@ -72,7 +88,7 @@ final class ForkServer
             }
         });
         stream_set_blocking($this->commands, false);
-        $this->send(['ready' => self::PROTOCOL, 'pid' => getmypid()]);
+        $this->send(['ready' => $this->protocol, 'pid' => getmypid()]);
 
         // The fence holds whatever ends the loop. A forked child never runs
         // this: it leaves through exit(), which runs no finally block.
@@ -127,6 +143,8 @@ final class ForkServer
         $id = is_array($fork) ? ($fork['id'] ?? null) : null;
         $argv = is_array($fork) ? ($fork['argv'] ?? null) : null;
         $environment = is_array($fork) ? ($fork['env'] ?? []) : null;
+        // Absent in v1, and from a v2 master that forks queue:work.
+        $command = is_array($fork) ? ($fork['command'] ?? null) : null;
         if (!is_int($id)
             || !is_array($argv) || !array_is_list($argv)
             || array_filter($argv, fn ($argument) => !is_string($argument)) !== []
@@ -136,6 +154,12 @@ final class ForkServer
 
             return;
         }
+        if ($command !== null && ($this->protocol === self::PROTOCOLS[0] || !in_array($command, self::COMMANDS, true))) {
+            $this->send(['failed' => $id, 'error' => 'unsupported fork command']);
+
+            return;
+        }
+        $command ??= self::COMMANDS[0];
 
         // Blocked across the fork: a SIGTERM for the new worker must not reach
         // the server's handler, which the child inherits until it resets it.
@@ -145,7 +169,7 @@ final class ForkServer
         // below, never the end of the server.
         $pid = @pcntl_fork();
         if ($pid === 0) {
-            $this->becomeWorker($argv, $environment, $mask);
+            $this->becomeWorker($command, $argv, $environment, $mask);
         }
         pcntl_sigprocmask(SIG_SETMASK, $mask);
         if ($pid === -1) {
@@ -158,11 +182,12 @@ final class ForkServer
     }
 
     /**
+     * @param string $command one of COMMANDS
      * @param list<string> $argv
      * @param array<string, ?string> $environment
      * @param list<int> $mask the signal mask before the fork
      */
-    private function becomeWorker(array $argv, array $environment, array $mask): never
+    private function becomeWorker(string $command, array $argv, array $environment, array $mask): never
     {
         $code = 1;
         try {
@@ -174,9 +199,9 @@ final class ForkServer
                 throw new \RuntimeException('the worker could not lead its own session');
             }
             // Show the command line a spawned worker has, so ps, top and
-            // process monitors see a queue:work worker, not the fork server.
+            // process monitors see a worker, not the fork server.
             if (function_exists('cli_set_process_title')) {
-                @cli_set_process_title(implode(' ', [PHP_BINARY, $_SERVER['argv'][0] ?? 'artisan', 'queue:work', ...$argv]));
+                @cli_set_process_title(implode(' ', [PHP_BINARY, $_SERVER['argv'][0] ?? 'artisan', $command, ...$argv]));
             }
             // The events pipe does not belong to the worker. STDIN stays
             // open because console code probes it (stream_isatty); the
@@ -190,7 +215,7 @@ final class ForkServer
             if ($this->afterFork !== null) {
                 ($this->afterFork)();
             }
-            $code = ($this->runWorker)($argv);
+            $code = ($this->runWorker)($argv, $command);
         } catch (\Throwable $error) {
             fwrite(STDERR, "Queen preforked worker failed: {$error->getMessage()}\n");
         }

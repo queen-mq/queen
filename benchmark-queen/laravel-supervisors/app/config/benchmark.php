@@ -189,6 +189,9 @@ return [
     'queue' => $queue,
     'queues' => $queues,
     'consumer_group' => $identifier('BENCH_GROUP', 'benchmark'),
+    // A queue read by a pool of queen:consume handlers beside the job pool;
+    // empty for none. Queen lanes only.
+    'consumers' => (string) env('BENCH_CONSUMERS', ''),
     'workers' => $workers,
     'min_workers' => $minWorkers,
     'max_workers' => $maxWorkers,

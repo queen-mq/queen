@@ -45,6 +45,10 @@ verifiedBy:
 # config's bearer_token stays a string (QueenConnector.php, QueenServiceProvider.php) (8c3fcd498).
 # Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (routing, e0654033f): QueenJob and QueenQueue carry a message's headers through release and retry. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (pools of handlers): SupervisorConfiguration takes a pool's
+# `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
+# server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
+# queen:consume stops for queue:restart under a supervisor (RestartSignal). Nothing this page states changes.
 ---
 
 Without lease renewal, a job that runs longer than `retry_after` goes to a second worker while the

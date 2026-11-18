@@ -298,4 +298,22 @@ class LaravelServiceProviderTest extends TestCase
 
         $this->assertSame([120], $factory->leases);
     }
+
+    public function testTheContainersClientReadsACommaSeparatedUrls(): void
+    {
+        $config = [
+            'url' => 'http://ignored.test:6632',
+            'urls' => ' http://a.test:6632, http://b.test:6632 ,',
+            'bearer_token' => null,
+            'timeout' => 30000,
+            'retry_attempts' => 3,
+            'load_balancing_strategy' => 'affinity',
+        ];
+
+        $client = QueenServiceProvider::clientConfig($config);
+
+        $this->assertSame(['http://a.test:6632', 'http://b.test:6632'], $client['urls']);
+        $this->assertArrayNotHasKey('url', $client);
+        $this->assertSame('http://ignored.test:6632', QueenServiceProvider::clientConfig(['urls' => ''] + $config)['url']);
+    }
 }

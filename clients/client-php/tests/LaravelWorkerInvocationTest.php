@@ -47,8 +47,45 @@ final class LaravelWorkerInvocationTest extends TestCase
     public static function pools(): iterable
     {
         foreach (WorkerInvocationFixture::cases() as $case) {
-            yield $case['name'] => [$case];
+            if ($case['command'] === 'queue:work') {
+                yield $case['name'] => [$case];
+            }
         }
+    }
+
+    /** @return iterable<string, array{0: array<string, mixed>}> */
+    public static function handlerPools(): iterable
+    {
+        foreach (WorkerInvocationFixture::cases() as $case) {
+            if ($case['command'] === 'queen:consume') {
+                yield $case['name'] => [$case];
+            }
+        }
+    }
+
+    /**
+     * A worker of a pool of handlers reads the queue with the pool's handler,
+     * group and lease: the arguments bind to queen:consume's own definition,
+     * which is what a spawned worker and a forked one both run.
+     */
+    #[DataProvider('handlerPools')]
+    public function testAHandlerPoolsWorkerBindsToQueenConsume(array $case): void
+    {
+        $command = $this->app->make(Kernel::class)->all()['queen:consume'];
+        // As Command::run() binds it: the application's definition, whose
+        // first argument is the command name, then the command's own.
+        $command->mergeApplicationDefinition();
+        $input = new ArgvInput(['artisan', 'queen:consume', ...$case['arguments']], $command->getDefinition());
+        $input->validate();
+
+        $pool = $case['pool'];
+        $this->assertSame($case['queue'], $input->getArgument('queue'));
+        $this->assertSame($pool['handlers'][$case['queue']], $input->getArgument('handler'));
+        $this->assertSame($pool['consumer_group'], $input->getOption('group'));
+        $this->assertTrue($input->getOption('auto-ack'));
+        $this->assertSame('all', $input->getOption('subscription-mode'));
+        $this->assertSame((string) $pool['retry_after'], $input->getOption('lease'));
+        $this->assertSame('10000', $input->getOption('timeout'));
     }
 
     #[DataProvider('pools')]

@@ -23,6 +23,7 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/ReplicaCoordinator.php
   - clients/client-php/src/Laravel/Supervisor/QueueWatcher.php
   - clients/client-php/src/Laravel/Supervisor/WorkerExitMarker.php
+  - clients/client-php/src/Laravel/Commands/ConsumeCommand.php
   - clients/client-php/src/Laravel/Supervisor/Prefork/ForkServer.php
   - clients/client-php/src/Laravel/Supervisor/Prefork/ForkServerClient.php
   - clients/client-php/src/Laravel/Supervisor/Prefork/ForkedProcess.php
@@ -142,6 +143,10 @@ sourceOfTruth:
 # states changes.
 # sourceOfTruth re-read 2026-11-16 (62e59d3aa, f9d08835e): the depth read behind effectivePending folds filtered groups (a Laravel queue has none) and adds `unread`; planner/kv.rs answers a ttl put that landed after its lifetime as not applied. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (filtered-group delete): phase2.rs and phase2/admin.rs send each hidden queue's delete as a command of its own (next_command); until now only the first delete of a queue with filtered groups ran. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (pools of handlers): SupervisorConfiguration takes a pool's
+# `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
+# server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
+# queen:consume stops for queue:restart under a supervisor (RestartSignal). The new section Pools of queen:consume handlers says so.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number
@@ -291,6 +296,52 @@ slot is reserved for fallback; it does not mean four PHP processes normally run.
 keep the worker timeout and every job's timeout below `retry_after`. Turning on renewal keeps
 leases safe during a long wait; the [prefetch tradeoff](/integrations/laravel/concepts/#worker-count-and-prefetch)
 still applies.
+
+### Pools of queen:consume handlers
+
+Messages that other services push carry no Laravel job. A pool with `handlers` runs
+[`php artisan queen:consume`](/integrations/laravel/consume/) workers for them, under the same
+master as your `queue:work` pools:
+
+```php
+'supervisors' => [
+    'jobs' => [ /* queue:work, as above */ ],
+    'consumers' => [
+        'consumer_group' => 'ledger',
+        'handlers' => [
+            'payments' => App\Queen\RecordPayment::class,
+            'refunds' => App\Queen\RecordRefund::class,
+        ],
+        'balance' => 'auto',
+        'max_processes' => 6,
+        'timeout' => 60,
+        'retry_after' => 90,
+    ],
+],
+```
+
+- **One queue per worker.** The keys of `handlers` are the pool's queues. A worker of queue `q`
+  runs `queen:consume q <handler> --group=<consumer_group> --auto-ack --subscription-mode=all
+  --lease=<retry_after> --timeout=10000 --quiet` (`--timeout` is the 10 s long poll; `--quiet`
+  follows the pool's `quiet`). A group that the pool opens reads the messages already in the
+  queue, as a `queue:work` pool does: the master scales on them. It acks a message when `handle()` returns and nacks it when `handle()` throws
+  ([the handler](/integrations/laravel/consume/#the-handler)).
+- **Scaling and drain.** Scaling on the group's backlog, the process bounds, the restart backoff,
+  prefork, the drain, the status and the dashboard work as for a pool of `queue:work` workers.
+- **Deploys.** `php artisan queue:restart` replaces the pool's workers, as it replaces
+  `queue:work` workers. A `queen:consume` that you start by hand does not watch it.
+- **`timeout` is not enforced.** It is the time a handler may take, but nothing stops a slower one:
+  `queen:consume` has no job timeout and no memory limit. The pool uses it for
+  `retry_after > timeout` and for the drain: `shutdown_grace` must exceed `timeout` plus 10 s, the
+  long poll that a stopping worker finishes.
+- **Refused at start:** `queues` beside `handlers`, a connection other than `queen` (the command
+  uses the client of `config/queen.php`), a class without `handle()`, `balance` `off`, `strategy`
+  `time` (`queen:consume` records no job runtimes), and a `lease_renewal` on the `queen` connection
+  that differs from the one in `config/queen.php`.
+- **Wake-ups.** [Event-driven scaling](#event-driven-scaling) watches the partitions of Laravel
+  jobs only. A pool of handlers grows on the depth poll, every `poll_interval`.
+- **Prefork.** The fork server forks `queen:consume` too (fork-server protocol v2). A master
+  newer than the PHP package cannot boot the old fork server, and spawns its workers instead.
 
 ### Master settings and startup checks
 

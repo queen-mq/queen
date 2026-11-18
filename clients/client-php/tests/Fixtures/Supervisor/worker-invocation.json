@@ -5,7 +5,7 @@
         "and the fork server (ForkServerCommand::runWorker), which must agree on it.",
         "`config` is config/queen.php, `queue_connections` is config('queue.connections'),",
         "and each case's `pool` is what SupervisorConfiguration::resolve() exports for it.",
-        "`arguments` follow `queue:work`, the connection first. In `environment`, a string",
+        "`arguments` follow `command`, `queue:work` when absent (its connection first). In `environment`, a string",
         "is the value, `true` a path the master decides, and an absent variable is not set."
     ],
     "config": {
@@ -53,6 +53,17 @@
                     "connection": "queen-orders",
                     "balance": "simple",
                     "processes": 1
+                },
+                "consumers": {
+                    "consumer_group": "ledger",
+                    "handlers": {
+                        "payments": "Queen\\Tests\\Support\\ConsumeHandler",
+                        "refunds": "\\Queen\\Tests\\Support\\ConsumeHandler"
+                    },
+                    "max_processes": 4,
+                    "timeout": 30,
+                    "retry_after": 45,
+                    "quiet": false
                 }
             }
         }
@@ -285,6 +296,62 @@
                 "QUEEN_LARAVEL_CONNECTION": "queen-orders",
                 "QUEEN_LARAVEL_SUPERVISOR": "orders",
                 "QUEEN_LARAVEL_RETRY_AFTER": "90"
+            }
+        },
+        {
+            "name": "a pool of handlers: queen:consume for one queue, with the pool's group and lease",
+            "supervisor": "consumers",
+            "queue": "refunds",
+            "command": "queen:consume",
+            "pool": {
+                "connection": "queen",
+                "consumer_group": "ledger",
+                "queues": ["payments", "refunds"],
+                "balance": "auto",
+                "strategy": "size",
+                "processes": 4,
+                "min_processes": 1,
+                "max_processes": 4,
+                "target_jobs_per_process": 10,
+                "target_clear_seconds": 60.0,
+                "default_runtime_seconds": 1.0,
+                "balance_cooldown": 3,
+                "balance_max_shift": 1,
+                "scale_down_delay": 10,
+                "restart_backoff": 1,
+                "restart_backoff_max": 30,
+                "stable_after": 60,
+                "sleep": 1,
+                "timeout": 30,
+                "retry_after": 45,
+                "lease_renewal": false,
+                "tries": 3,
+                "memory": 128,
+                "backoff": 0,
+                "max_jobs": 0,
+                "max_time": 0,
+                "rest": 0,
+                "force": false,
+                "quiet": false,
+                "handlers": {
+                    "payments": "Queen\\Tests\\Support\\ConsumeHandler",
+                    "refunds": "Queen\\Tests\\Support\\ConsumeHandler"
+                }
+            },
+            "arguments": [
+                "refunds",
+                "Queen\\Tests\\Support\\ConsumeHandler",
+                "--group=ledger",
+                "--auto-ack",
+                "--subscription-mode=all",
+                "--lease=45",
+                "--timeout=10000"
+            ],
+            "environment": {
+                "QUEEN_LARAVEL_CONSUMER_GROUP": "ledger",
+                "QUEEN_LARAVEL_CONNECTION": "queen",
+                "QUEEN_LARAVEL_SUPERVISOR": "consumers",
+                "QUEEN_LARAVEL_RETRY_AFTER": "45"
             }
         }
     ]

@@ -79,7 +79,7 @@ final class LaravelWorkerContractTest extends TestCase
         $this->assertSame(0, $process->wait(), $process->getErrorOutput());
         $seen = json_decode(trim($process->getOutput()), true, 512, JSON_THROW_ON_ERROR);
 
-        $this->assertSame(['queue:work', ...$case['arguments']], $seen['arguments']);
+        $this->assertSame([$case['command'], ...$case['arguments']], $seen['arguments']);
         $environment = $case['environment'];
         $this->assertSame($environment['QUEEN_LARAVEL_CONSUMER_GROUP'], $seen['consumer_group']);
         $this->assertSame($environment['QUEEN_LARAVEL_CONNECTION'], $seen['connection']);

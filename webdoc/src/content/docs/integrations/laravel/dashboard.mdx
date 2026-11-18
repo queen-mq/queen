@@ -168,6 +168,12 @@ sourceOfTruth:
 # states changes.
 # sourceOfTruth re-read 2026-11-16 (36bfde0ea, 62e59d3aa, f9d08835e): node_views.rs adds connections, commits and transactions a second; phase2.rs and phase2/reads.rs fold filtered groups into a queue's figures and add `unread`; planner/kv.rs answers a ttl put that landed after its lifetime as not applied. A Laravel queue has no filtered group, so its pending figures count as before. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (filtered-group delete): phase2.rs and phase2/admin.rs send each hidden queue's delete as a command of its own (next_command); until now only the first delete of a queue with filtered groups ran. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (pools of handlers): SupervisorConfiguration takes a pool's
+# `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
+# server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
+# queen:consume stops for queue:restart under a supervisor (RestartSignal). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (urls string): QueenServiceProvider::clientConfig splits a comma-separated
+# `urls`, as QueenConnector does, so queen:consume and the Queen facade accept 'urls' => env('QUEEN_URLS'). Nothing this page states changes.
 ---
 
 The Laravel panel shows what this application's QueenMQ supervisors are doing. It reads the state the

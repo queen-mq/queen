@@ -20,7 +20,7 @@ use prefork::{ForkServer, WorkerProcess};
 use remote_status::{RemoteStatusConfig, RemoteStatusPublisher};
 use serde::Deserialize;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -54,6 +54,13 @@ const MAX_QUEUES_PER_SUPERVISOR: usize = 1_024;
 const MAX_STATUS_POOLS: usize = 256;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_QUEUE_BYTES: usize = 256;
+const MAX_HANDLER_BYTES: usize = 1_024;
+/// The long poll of a `queen:consume` worker, as Laravel's
+/// SupervisorConfiguration::CONSUME_POLL_SECONDS: its SIGTERM waits for the
+/// poll in flight, so the drain counts it beside the handler's timeout.
+const CONSUME_POLL_SECONDS: u64 = 10;
+const WORK_COMMAND: &str = "queue:work";
+const CONSUME_COMMAND: &str = "queen:consume";
 const MAX_DURATION_SECONDS: u64 = 31_536_000;
 const MIN_SCALING_SECONDS: f64 = 0.000_001;
 const MIN_CONTROL_TTL_SECONDS: u64 = 30;
@@ -217,6 +224,21 @@ struct SupervisorConfig {
     // workers are spawned while the server forks the other pools' workers.
     #[serde(default = "default_prefork")]
     prefork: bool,
+    // Emitted by Laravel only for a pool of handlers: queue => the class
+    // `queen:consume` hands its messages to. Empty: `queue:work` workers.
+    #[serde(default)]
+    handlers: BTreeMap<String, String>,
+}
+
+impl SupervisorConfig {
+    /// The Artisan command this pool's workers run.
+    fn worker_command(&self) -> &'static str {
+        if self.handlers.is_empty() {
+            WORK_COMMAND
+        } else {
+            CONSUME_COMMAND
+        }
+    }
 }
 
 fn default_retry_after() -> u64 {
@@ -1459,8 +1481,17 @@ fn validate_config(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         {
             return Err(format!("supervisor [{name}] has invalid runtime policy").into());
         }
-        if config.shutdown_grace <= options.timeout {
-            return Err(format!("shutdown_grace must exceed timeout for [{name}]").into());
+        validate_handlers(name, options)?;
+        let drain_seconds = if options.handlers.is_empty() {
+            options.timeout
+        } else {
+            options.timeout + CONSUME_POLL_SECONDS
+        };
+        if config.shutdown_grace <= drain_seconds {
+            return Err(format!(
+                "shutdown_grace must exceed timeout (plus {CONSUME_POLL_SECONDS} s of long poll for handlers) for [{name}]"
+            )
+            .into());
         }
         total_max = total_max
             .checked_add(options.max_processes)
@@ -1515,6 +1546,40 @@ fn validate_config(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     if config.heartbeat_timeout <= loop_budget {
         return Err(format!(
             "heartbeat_timeout must exceed the conservative control-loop budget of {loop_budget} seconds"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// A pool of handlers runs one `queen:consume` per queue, through the client
+/// config/queen.php builds; Laravel checks the classes themselves.
+fn validate_handlers(
+    name: &str,
+    options: &SupervisorConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if options.handlers.is_empty() {
+        return Ok(());
+    }
+    let queues: HashSet<&String> = options.queues.iter().collect();
+    if options.handlers.len() != queues.len()
+        || options.handlers.keys().any(|queue| !queues.contains(queue))
+    {
+        return Err(
+            format!("supervisor [{name}] handlers must name every queue, and only those").into(),
+        );
+    }
+    if options.handlers.values().any(|class| {
+        class.is_empty()
+            || class.len() > MAX_HANDLER_BYTES
+            || class.starts_with('-')
+            || class.chars().any(char::is_control)
+    }) {
+        return Err(format!("supervisor [{name}] has an invalid handler class").into());
+    }
+    if options.balance == "off" || options.strategy == "time" || options.connection != "queen" {
+        return Err(format!(
+            "supervisor [{name}] handlers need balance auto or simple, strategy size and the queen connection"
         )
         .into());
     }
@@ -3590,7 +3655,9 @@ fn spawn_worker(
 ) -> Result<Worker, std::io::Error> {
     if let Some(server) = forks.filter(|server| o.prefork && !server.borrow().disabled) {
         let (arguments, environment) = worker_invocation(config, name, queue, o);
-        let forked = server.borrow_mut().fork(&arguments, &environment);
+        let forked = server
+            .borrow_mut()
+            .fork(o.worker_command(), &arguments, &environment);
         match forked {
             Ok(pid) => {
                 eprintln!("started {name}:{queue} pid={pid} (forked)");
@@ -3642,38 +3709,19 @@ fn spawn_worker(
     Ok(Worker::new(child, restart_probe))
 }
 
-/// The `queue:work` arguments after the command name, and the environment a
-/// worker gets on top of the master's (None removes a variable). A spawned
-/// and a forked worker receive exactly the same.
+/// The arguments after the command name (`o.worker_command()`), and the
+/// environment a worker gets on top of the master's (None removes a
+/// variable). A spawned and a forked worker receive exactly the same.
 fn worker_invocation(
     config: &Config,
     name: &str,
     queue: &str,
     o: &SupervisorConfig,
 ) -> (Vec<String>, Vec<(String, Option<String>)>) {
-    let worker_queues = if o.balance == "off" {
-        o.queues.join(",")
-    } else {
-        queue.to_owned()
+    let arguments = match o.handlers.get(queue) {
+        Some(handler) => consume_arguments(queue, handler, o),
+        None => work_arguments(queue, o),
     };
-    let mut arguments = vec![
-        o.connection.clone(),
-        format!("--queue={worker_queues}"),
-        format!("--sleep={}", o.sleep),
-        format!("--timeout={}", o.timeout),
-        format!("--tries={}", o.tries),
-        format!("--memory={}", o.memory),
-        format!("--backoff={}", o.backoff),
-        format!("--max-jobs={}", o.max_jobs),
-        format!("--max-time={}", o.max_time),
-        format!("--rest={}", o.rest),
-    ];
-    if o.force {
-        arguments.push("--force".to_owned());
-    }
-    if o.quiet {
-        arguments.push("--quiet".to_owned());
-    }
     let telemetry = (o.strategy == "time" && o.balance != "simple").then(|| {
         Path::new(&config.state_directory)
             .join("telemetry")
@@ -3716,13 +3764,61 @@ fn worker_invocation(
     (arguments, environment)
 }
 
+/// `queue:work`'s arguments, the connection first.
+fn work_arguments(queue: &str, o: &SupervisorConfig) -> Vec<String> {
+    let worker_queues = if o.balance == "off" {
+        o.queues.join(",")
+    } else {
+        queue.to_owned()
+    };
+    let mut arguments = vec![
+        o.connection.clone(),
+        format!("--queue={worker_queues}"),
+        format!("--sleep={}", o.sleep),
+        format!("--timeout={}", o.timeout),
+        format!("--tries={}", o.tries),
+        format!("--memory={}", o.memory),
+        format!("--backoff={}", o.backoff),
+        format!("--max-jobs={}", o.max_jobs),
+        format!("--max-time={}", o.max_time),
+        format!("--rest={}", o.rest),
+    ];
+    if o.force {
+        arguments.push("--force".to_owned());
+    }
+    if o.quiet {
+        arguments.push("--quiet".to_owned());
+    }
+    arguments
+}
+
+/// `queen:consume`'s arguments for one queue of a pool of handlers: the
+/// pool's group and lease, an ack after handle(), and a long poll short
+/// enough for the drain.
+fn consume_arguments(queue: &str, handler: &str, o: &SupervisorConfig) -> Vec<String> {
+    let mut arguments = vec![
+        queue.to_owned(),
+        handler.to_owned(),
+        format!("--group={}", o.consumer_group),
+        "--auto-ack".to_owned(),
+        // As queue:work's pops: a group the pool opens reads the backlog the master scales on.
+        "--subscription-mode=all".to_owned(),
+        format!("--lease={}", o.retry_after),
+        format!("--timeout={}", CONSUME_POLL_SECONDS * 1000),
+    ];
+    if o.quiet {
+        arguments.push("--quiet".to_owned());
+    }
+    arguments
+}
+
 fn worker_command(config: &Config, name: &str, queue: &str, o: &SupervisorConfig) -> Command {
     let (arguments, environment) = worker_invocation(config, name, queue, o);
     let mut command = Command::new(&config.php_binary);
     command
         .current_dir(&config.cwd)
         .arg(&config.artisan)
-        .arg("queue:work")
+        .arg(o.worker_command())
         .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
@@ -4480,6 +4576,7 @@ mod tests {
             min_processes_per_queue: 0,
             fast_scale_up: false,
             prefork: true,
+            handlers: BTreeMap::new(),
         }
     }
 
@@ -5777,7 +5874,7 @@ mod tests {
         ));
         let fork = |server: &Rc<RefCell<ForkServer>>, mode: &str| {
             let argv = vec![mode.to_owned(), report.clone(), "0".to_owned()];
-            let pid = server.borrow_mut().fork(&argv, &[]).unwrap();
+            let pid = server.borrow_mut().fork("queue:work", &argv, &[]).unwrap();
             Worker::from_process(
                 WorkerProcess::Forked {
                     pid,
@@ -6363,6 +6460,72 @@ mod tests {
             "headers": ["not-a-map"]
         }));
         assert!(invalid.is_err());
+    }
+
+    fn handler_options() -> SupervisorConfig {
+        SupervisorConfig {
+            handlers: BTreeMap::from([
+                ("high".into(), "App\\Queen\\High".into()),
+                ("default".into(), "App\\Queen\\Default".into()),
+            ]),
+            ..options("auto")
+        }
+    }
+
+    /// A pool of handlers runs `queen:consume <queue> <handler>` with the
+    /// pool's group and lease, and a long poll the drain can wait for.
+    #[test]
+    fn a_pool_of_handlers_runs_queen_consume_for_each_queue() {
+        let config = config(handler_options());
+        validate_config(&config).unwrap();
+        let pool = &config.supervisors["default"];
+
+        let command = worker_command(&config, "default", "high", pool);
+
+        let arguments: Vec<&std::ffi::OsStr> = command.get_args().collect();
+        assert_eq!(
+            arguments,
+            [
+                "/app/artisan",
+                "queen:consume",
+                "high",
+                "App\\Queen\\High",
+                "--group=workers",
+                "--auto-ack",
+                "--subscription-mode=all",
+                "--lease=90",
+                "--timeout=10000",
+                "--quiet",
+            ]
+        );
+    }
+
+    #[test]
+    fn validation_refuses_handlers_that_do_not_fit_their_pool() {
+        let refused = |change: fn(&mut Config)| {
+            let mut config = config(handler_options());
+            change(&mut config);
+            validate_config(&config).is_err()
+        };
+        fn pool(config: &mut Config) -> &mut SupervisorConfig {
+            config.supervisors.get_mut("default").unwrap()
+        }
+
+        assert!(refused(|c| {
+            pool(c).handlers.remove("high");
+        }));
+        assert!(refused(|c| {
+            pool(c).handlers.insert("other".into(), "App\\Other".into());
+        }));
+        assert!(refused(|c| {
+            pool(c).handlers.insert("high".into(), "--force".into());
+        }));
+        assert!(refused(|c| pool(c).balance = "off".into()));
+        assert!(refused(|c| pool(c).strategy = "time".into()));
+        assert!(refused(|c| pool(c).connection = "queen-batch".into()));
+        // The default timeout of 60 s and its 10 s long poll leave no drain.
+        assert!(refused(|c| c.shutdown_grace = 70));
+        assert!(!refused(|c| c.shutdown_grace = 71));
     }
 
     #[test]
@@ -9056,6 +9219,8 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
 
             let (arguments, environment) = worker_invocation(&config, supervisor, queue, &pool);
 
+            let command = case["command"].as_str().unwrap_or(WORK_COMMAND);
+            assert_eq!(pool.worker_command(), command, "{name}: command");
             let expected: Vec<String> = serde_json::from_value(case["arguments"].clone()).unwrap();
             assert_eq!(arguments, expected, "{name}: arguments");
             let expected = case["environment"].as_object().unwrap();

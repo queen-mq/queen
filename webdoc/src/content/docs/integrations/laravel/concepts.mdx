@@ -157,6 +157,10 @@ sourceOfTruth:
 # rewords the 504 a membership change answers. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): facade/real.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (a dead letter always carries its message): consume/ack.rs and txn.rs refuse, retryably (503 `retry`, nothing moved), an ack or a transaction that would file a dead letter whose message the node that took it has not read yet. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (pools of handlers): SupervisorConfiguration takes a pool's
+# `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
+# server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
+# queen:consume stops for queue:restart under a supervisor (RestartSignal). Nothing this page states changes.
 ---
 
 Your job classes do not change: they implement `ShouldQueue`, keep their middleware, `tries`, `backoff` and failure events, and `queue:work` still runs them. What changes is where a job waits and what holds it while it runs. This page follows one job through QueenMQ, one idea at a time, with what Horizon does at the same point. The settings of each idea close its section ([configuration reference](/integrations/laravel/configuration/)).

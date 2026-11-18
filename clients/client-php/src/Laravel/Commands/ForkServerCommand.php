@@ -10,11 +10,14 @@ use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Log\LogManager;
 use Illuminate\Queue\Console\WorkCommand;
 use Illuminate\Queue\QueueManager;
+use Queen\Laravel\QueenFacade;
 use Queen\Laravel\Supervisor\Prefork\ForkSafety;
 use Queen\Laravel\Supervisor\Prefork\ForkServer;
+use Queen\Laravel\Supervisor\RestartSignal;
 use Queen\Laravel\Supervisor\WorkerExitMarker;
 use Queen\Laravel\Supervisor\WorkerPopGuard;
 use Queen\Laravel\Supervisor\WorkerTelemetry;
+use Queen\Queen;
 use Symfony\Component\Console\Command\Command as SymfonyCommand;
 use Symfony\Component\Console\Input\ArgvInput;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -33,13 +36,8 @@ class ForkServerCommand extends Command
     /** How long a thread left by the boot gets to end, see ForkSafety. */
     private const THREAD_GRACE_SECONDS = 5.0;
 
-    /** Where `php artisan queue:restart` leaves its signal: Laravel's Worker reads the same key. */
-    private const RESTART_SIGNAL_KEY = 'illuminate:queue:restart';
-
-    /** The restart signal when this server booted, if the cache answered. */
-    private mixed $restartSignalAtBoot = null;
-
-    private bool $restartSignalKnown = false;
+    /** The restart signal when this server booted. */
+    private ?RestartSignal $restartSignal = null;
 
     public function handle(?ForkSafety $safety = null): int
     {
@@ -49,7 +47,8 @@ class ForkServerCommand extends Command
             return self::FAILURE;
         }
         // fd 3 alone proves nothing: a shell may have it open.
-        if (getenv('QUEEN_FORK_SERVER') !== ForkServer::PROTOCOL) {
+        $protocol = getenv('QUEEN_FORK_SERVER');
+        if (!in_array($protocol, ForkServer::PROTOCOLS, true)) {
             $this->error('queen:fork-server is started by a Queen supervisor with prefork enabled; it is not run by hand.');
 
             return self::FAILURE;
@@ -65,7 +64,10 @@ class ForkServerCommand extends Command
         // share it; resolving the worker opens no connection.
         class_exists(WorkCommand::class);
         $this->laravel->make('queue.worker');
-        $work = $this->getApplication()->find('queue:work');
+        $workers = [];
+        foreach (ForkServer::COMMANDS as $command) {
+            $workers[$command] = $this->getApplication()->find($command);
+        }
         $this->rememberRestartSignal();
 
         // Nothing the boot opened may reach the children, and a server with
@@ -103,22 +105,23 @@ class ForkServerCommand extends Command
         return (new ForkServer(
             STDIN,
             $events,
-            fn (array $argv): int => $this->runWorker($work, $argv),
+            fn (array $argv, string $command): int => $this->runWorker($workers[$command], $argv, $command),
             fn () => $this->prepareChild(),
+            $protocol,
         ))->serve();
     }
 
     /**
-     * Run queue:work in a forked child, with the verbosity its arguments ask
-     * for. Symfony applies --quiet and -v in Application::run(), which a
-     * forked worker never goes through: without this, a pool configured
-     * quiet printed two lines for every job.
+     * Run queue:work (or queen:consume) in a forked child, with the verbosity
+     * its arguments ask for. Symfony applies --quiet and -v in
+     * Application::run(), which a forked worker never goes through: without
+     * this, a pool configured quiet printed two lines for every job.
      *
-     * @param list<string> $argv queue:work's arguments, the connection first
+     * @param list<string> $argv the command's arguments
      */
-    private function runWorker(SymfonyCommand $work, array $argv): int
+    private function runWorker(SymfonyCommand $work, array $argv, string $command = 'queue:work'): int
     {
-        if ($this->restartedSinceBoot()) {
+        if ($this->restartSignal?->restarted() === true) {
             // `php artisan queue:restart` ran after this server booted: the
             // code on disk is newer than the code this child carries, and
             // Laravel's worker would read the signal only now, as its
@@ -132,7 +135,7 @@ class ForkServerCommand extends Command
         // merged with the application's, whose first argument is the command
         // name: bound without it, the connection was taken for that name and
         // the worker fell back to queue.default.
-        $input = new ArgvInput(['artisan', 'queue:work', ...$argv]);
+        $input = new ArgvInput(['artisan', $command, ...$argv]);
         $verbosity = match (true) {
             $input->hasParameterOption(['--quiet', '-q'], true) => OutputInterface::VERBOSITY_QUIET,
             $input->hasParameterOption('-vvv', true) => OutputInterface::VERBOSITY_DEBUG,
@@ -161,29 +164,7 @@ class ForkServerCommand extends Command
 
     private function rememberRestartSignal(): void
     {
-        try {
-            $this->restartSignalAtBoot = $this->laravel->make('cache.store')->get(self::RESTART_SIGNAL_KEY);
-            $this->restartSignalKnown = true;
-        } catch (\Throwable) {
-            // Without a baseline nothing can be called newer.
-            $this->restartSignalKnown = false;
-        }
-    }
-
-    /** Whether `queue:restart` ran after this server booted. */
-    private function restartedSinceBoot(): bool
-    {
-        if (!$this->restartSignalKnown) {
-            return false;
-        }
-        try {
-            $signal = $this->laravel->make('cache.store')->get(self::RESTART_SIGNAL_KEY);
-        } catch (\Throwable) {
-            return false;
-        }
-
-        // Laravel's Worker compares the timestamps loosely too.
-        return $signal !== null && $signal != $this->restartSignalAtBoot;
+        $this->restartSignal = RestartSignal::remember($this->laravel);
     }
 
     /** Runs in each forked child, before queue:work. */
@@ -234,6 +215,12 @@ class ForkServerCommand extends Command
         if ($this->laravel->resolved('cache') && ($cache = $this->laravel['cache']) instanceof CacheManager) {
             self::forgetCacheStores($cache);
             $this->laravel->forgetInstance('cache.store');
+        }
+        // A queen:consume child pops through the Queen client: one the boot
+        // built would share its HTTP connections with every sibling.
+        if ($this->laravel->resolved(Queen::class)) {
+            $this->laravel->forgetInstance(Queen::class);
+            QueenFacade::clearResolvedInstance('queen');
         }
         if ($this->laravel->resolved('queue') && ($queue = $this->laravel['queue']) instanceof QueueManager) {
             return self::forgetQueueConnections($queue);

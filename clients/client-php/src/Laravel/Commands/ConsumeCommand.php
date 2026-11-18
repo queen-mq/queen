@@ -8,6 +8,8 @@ use Illuminate\Support\Sleep;
 use InvalidArgumentException;
 use Queen\Consumer\HighLevelConsumer;
 use Queen\Laravel\QueenServiceProvider;
+use Queen\Laravel\Supervisor\RestartSignal;
+use Queen\Laravel\Supervisor\WorkerExitMarker;
 use Queen\Laravel\Queue\LeaseRenewer;
 use Queen\Laravel\Queue\LeaseRenewerFactory;
 use Queen\Laravel\Queue\QueenConnector;
@@ -57,6 +59,9 @@ class ConsumeCommand extends Command
 
     /** Renews the lease of the messages in hand; null unless lease_renewal and --auto-ack. */
     private ?LeaseRenewer $renewer = null;
+
+    /** `queue:restart`'s signal at start; null unless a supervisor started this worker. */
+    private ?RestartSignal $restartSignal = null;
 
     public function handle(Queen $queen): int
     {
@@ -127,6 +132,12 @@ class ConsumeCommand extends Command
 
         $this->info('Consumer subscribed. Waiting for messages... (Ctrl+C to stop)');
 
+        // A supervisor replaces its workers on `queue:restart`, as it does
+        // queue:work ones; run by hand, the command keeps running.
+        if (getenv('QUEEN_LARAVEL_SUPERVISOR') !== false && getenv('QUEEN_LARAVEL_SUPERVISOR') !== '') {
+            $this->restartSignal = RestartSignal::remember($this->laravel);
+        }
+
         try {
             $processed = $this->consume($consumer, $handler, $lease, $autoAck);
         } finally {
@@ -159,6 +170,11 @@ class ConsumeCommand extends Command
         $lastMessageAt = hrtime(true);
 
         while (!$consumer->isClosed()) {
+            if ($this->restartSignal?->restarted() === true) {
+                $this->info('queue:restart signalled: stopping.');
+                WorkerExitMarker::fromEnvironment()?->write(WorkerExitMarker::RESTART);
+                break;
+            }
             $popTimeout = $timeout;
             if ($idleMillis !== null) {
                 $idleLeftNanos = $idleMillis * 1_000_000 - (hrtime(true) - $lastMessageAt);
