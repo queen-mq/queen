@@ -66,6 +66,28 @@ jobs:
       - name: ${{ matrix.suite }}
         run: test/run.sh --suite ${{ matrix.suite }} --no-build-broker -j 1
 
+  # The JS client's TypeScript declarations (client-v2/*.d.ts), checked against
+  # a strict and a loose consumer profile and against the JS modules they
+  # describe (types-test/exportsParity.js). No broker: the type tests compile
+  # and never run, so this fails fast without the broker image.
+  js-client-types:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: clients/client-js
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: clients/client-js/package-lock.json
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Check the type declarations
+        run: npm run check:types
+
   # Pure PHP/Laravel client contract tests. Keep this independent from the
   # broker image so syntax, dependency and fake-handler regressions fail fast
   # even when Docker or the live Laravel matrix is unavailable.

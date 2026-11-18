@@ -1455,20 +1455,46 @@ Example output:
 
 ## TypeScript Support
 
-Full TypeScript definitions included:
+The package ships TypeScript declarations together with Javascript code.
+They can be imported directly without any further installation:
 
 ```typescript
-import { Queen, Message, QueueConfig } from 'queen-mq'
+import { Queen, Stream } from 'queen-mq'
+import type { Message, QueueConfig } from 'queen-mq'
 
-const queen: Queen = new Queen('http://localhost:6632')
+const queen = new Queen('http://localhost:6632')
 
 interface OrderData {
   orderId: number
   amount: number
 }
 
-const messages: Message<OrderData>[] = await queen.queue('orders').pop()
+const config: QueueConfig = { leaseTime: 30, retryLimit: 5 }
+await queen.queue('orders').config(config).create()
+
+// queue<T>() types the payload of pushes, pops, consumers and reads. Without
+// a type argument the payload is `any`, as in JavaScript
+const orders = queen.queue<OrderData>('orders')
+await orders.push([{ data: { orderId: 9137, amount: 99.5 } }])
+
+const messages: Message<OrderData>[] = await orders.pop()
+
+// .each() changes what the handler gets: one message instead of the popped array
+await orders.group('billing').each().consume(async (message) => {
+  console.log(message.data.amount)
+})
+
+// Streams track the source message and the value that flows to the sink
+await Stream.from(orders)
+  .map((m) => m.data.amount)
+  .windowTumbling({ seconds: 60 })
+  .reduce((total, amount) => total + amount, 0)
+  .foreach((total, ctx) => console.log(ctx.windowStart, total))
+  .run({ queryId: 'order-totals', url: 'http://localhost:6632' })
 ```
+
+Broker answers whose shape is not documented (most `queen.admin` calls) are typed `unknown`:
+narrow them where you read them. KV values and message payloads default to `any`.
 
 ---
 
