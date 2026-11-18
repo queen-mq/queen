@@ -22,6 +22,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-12 (the footprint scheduler, PLAN_SCHEDULER.md): batcher_scheduler.rs
 # replaces batcher_lanes.rs; the lanes and the control step are gone. "The ceiling" gains the A/B
 # against 2.8.1 of 2026-11-12.
+# sourceOfTruth re-read 2026-11-18 (planner store hand-back, e96d73319): batcher_scheduler.rs: a
+# planning thread drops its clones of the store and of the dedup front before it answers, not
+# after. Nothing this page states changes.
 ---
 
 A [transaction](/writing-applications/transactions/) is the step QueenMQ is built around: take a message, do the work, then ack it and

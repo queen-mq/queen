@@ -57,6 +57,9 @@ digest: >-
 # states changes.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): apply.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (a snapshot received while a node starts): raft/mod.rs takes the exit 75 a running node takes for it (stopped_at_open), where the start failed with `FATAL: raft storage failed to open` and exit 1. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (planner store hand-back, e96d73319): batcher_scheduler.rs: a
+# planning thread drops its clones of the store and of the dedup front before it answers, not
+# after. Nothing this page states changes.
 ---
 
 A QueenMQ node is one process. Every write is decided once, on the leader, and then applied on every node. These pages follow a write through the process, from the request to the disk.
