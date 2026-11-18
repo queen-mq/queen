@@ -1,0 +1,26 @@
+{
+  // a lax consumer profile (strict off, bundler resolution): the declarations
+  // must not need a strict consumer
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "esnext",
+    "lib": [
+      "ESNext"
+    ],
+    "types": [
+      "node"
+    ],
+    "strict": false,
+    "skipLibCheck": false,
+    "noEmit": true
+  },
+  "include": [
+    "../client-v2/**/*.d.ts",
+    "./*.ts"
+  ],
+  // checks that need strictNullChecks
+  "exclude": [
+    "./strictOnly.ts"
+  ]
+}

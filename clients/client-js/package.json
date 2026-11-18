@@ -4,13 +4,15 @@
   "type": "module",
   "description": "Partitioned message queue on a replicated broker log — broker client + fluent streaming SDK (windows, joins, gates) in one package",
   "main": "client-v2/index.js",
+  "types": "client-v2/index.d.ts",
   "scripts": {
     "test": "npm run test:unit && node test-v2/run.js human",
     "test:unit": "node --test test-v2/streams-unit/configHash.test.js test-v2/streams-unit/operators.test.js test-v2/streams-unit/cycle.test.js test-v2/streams-unit/eventTime.test.js test-v2/streams-unit/ack.test.js test-v2/streams-unit/gate.test.js test-v2/streams-unit/claims.test.js test-v2/http-unit/retry429.test.js test-v2/http-unit/hostHeader.test.js test-v2/http-unit/tokens.test.js test-v2/http-unit/pushStatus.test.js test-v2/http-unit/renew.test.js test-v2/consumer-unit/handlerError.test.js test-v2/consumer-unit/nackScope.test.js test-v2/consumer-unit/stopOnAbort.test.js test-v2/kv-unit/kvWire.test.js test-v2/kv-unit/timerWire.test.js test-v2/kv-unit/txnWire.test.js test-v2/kv-unit/locksWire.test.js test-v2/buffer-unit/buffer.test.js test-v2/buffer-unit/multiPartition.test.js test-v2/conflation-unit/conflationWire.test.js test-v2/autopilot-unit/autopilotWire.test.js test-v2/ephemeral-unit/ephemeralWire.test.js test-v2/ephemeral-unit/ephemeralBuffer.test.js test-v2/ephemeral-unit/durableSinkPin.test.js test-v2/runner-unit/fatalExit.test.js test-v2/pop-unit/popDefaults.test.js test-v2/admin-unit/removedRoutes.test.js test-v2/consumer-unit/supervision.test.js test-v2/wire-unit/pushBinary.test.js test-v2/wire-unit/popFrames.test.js test-v2/wire-unit/transactionFrames.test.js test-v2/reads-unit/offsetReads.test.js test-v2/feed-unit/feed.test.js test-v2/feed-unit/feedStreams.test.js test-v2/feed-unit/feedSteps.test.js test-v2/feed-unit/feedEventTime.test.js test-v2/feed-unit/feedSnapshots.test.js test-v2/feed-unit/feedRecords.test.js test-v2/feed-unit/feedBatch.test.js test-v2/consumer-unit/transientPop.test.js test-v2/routing-unit/headers.test.js test-v2/routing-unit/where.test.js test-v2/routing-unit/readingQueue.test.js test-v2/routing-unit/link.test.js test-v2/feed-unit/feedLinks.test.js test-v2/streams-unit/links.test.js",
     "test:unit:e2e": "node --test test-v2/streams-unit/e2e.test.js",
     "test:integration": "node test-v2/run.js human",
     "test:streams": "node test-v2/run.js stream",
-    "test:all": "npm run test:unit && npm run test:integration && npm run test:streams"
+    "test:all": "npm run test:unit && npm run test:integration && npm run test:streams",
+    "check:types": "tsc -p types-test/tsconfig.json && tsc -p types-test/tsconfig.loose.json && node types-test/exportsParity.js"
   },
   "files": [
     "client-v2/**/*",
@@ -48,5 +50,9 @@
     "rate-limiter",
     "exactly-once",
     "windowed-aggregation"
-  ]
+  ],
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  }
 }
