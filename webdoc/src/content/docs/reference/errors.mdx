@@ -124,6 +124,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-16 (a dead letter always carries its message): consume/ack.rs and txn.rs refuse, retryably (503 `retry`, nothing moved), an ack or a transaction that would file a dead letter whose message the node that took it has not read yet: one more case of the `retry` row, which now names it.
 # sourceOfTruth re-read 2026-11-16 (filtered-group delete): phase2.rs and phase2/admin.rs send each hidden queue's delete as a command of its own (next_command); until now only the first delete of a queue with filtered groups ran. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (ephemeral hand-over fix, Jepsen W20): ephemeral.rs keeps what the groups of a ring created while partitions may still be moving take until the old owner's ring lands (HANDOVER_HOLD_MS), and a moving ring carries what each group already took (GroupExport.skip); handlers/ephemeral.rs opens that window on a leaving notice, a placement change and at start, and sends `skip` between brokers. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (JS client 2.9.2, Node 26): HttpClient.js sends a request that
+# has an undici Agent through the fetch of that same undici instead of the global fetch (an undici 6
+# Agent with Node 26's fetch failed every request with UND_ERR_INVALID_ARG). This page: the JS
+# client list says that error stops consume().
 ---
 
 When QueenMQ refuses a call it answers a status code and a JSON body with a stable code, and the code
@@ -329,7 +333,9 @@ See [cluster](/manage/docker/).
 - `consume()` goes on when a pop still fails after those retries with a 408, a 429, any 5xx but a
   503 `raft_phase1_unsupported`, a timeout or a lost connection: it waits `Retry-After`, or 1 s
   doubling up to 30 s when there is none, and polls again, for as long as it takes. Any other error
-  stops it, and `consume()` rejects with that error.
+  stops it, and `consume()` rejects with that error. A request undici refuses before sending it
+  (`fetch failed` with `UND_ERR_INVALID_ARG`) is not a lost connection: it fails the same way every
+  time, so it stops `consume()` too.
 - A request its caller aborted (a `consume()` being stopped) is neither retried nor sent to another
   URL, and does not mark its node unhealthy: it rejects with `error.aborted` set, and a wait between
   attempts ends there.

@@ -60,6 +60,9 @@ verifiedBy:
 # Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): facade/real.rs, planner/txn.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (a dead letter always carries its message): consume/ack.rs and txn.rs refuse, retryably (503 `retry`, nothing moved), an ack or a transaction that would file a dead letter whose message the node that took it has not read yet. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (JS client 2.9.2): ConsumerManager.js no longer waits out a
+# request undici refuses before sending it (fetch failed with UND_ERR_INVALID_ARG): consume()
+# rejects with it. Nothing this page states changes.
 ---
 
 The ack, the order's new state, the next event and tomorrow's reminder commit as one log entry, or none of them does. That one call replaces the outbox table, the idempotency table and the cron job.

@@ -3,6 +3,26 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## JS client 2.9.2 - 2026-11-18
+
+**JS client: it works on Node 26.** On Node 26 the JS client up to 2.9.1 sent no request at all:
+every call failed with `fetch failed` (`UND_ERR_INVALID_ARG`, `invalid onError method`) before it
+reached the broker, and `consume()` took that for a lost connection and polled again without end, so
+a consumer looked like it had nothing to do. The client keeps an undici Agent of its own, so that
+`close()` can release its sockets, but it sent its requests through Node's global fetch, which is
+the undici Node bundles: 7 in Node 24, 8 in Node 26. undici changed, between those majors, the
+handler that fetch hands the Agent, and an undici 6 Agent, what the client's `^6.21.0` installed,
+takes only the old one. fetch, Agent and Response now all come from the client's own undici, so
+both sides of a request are always one undici, whatever Node bundles, and the dependency moves to
+`undici ^8.12.4`. A browser bundle, where undici cannot be imported, uses the global fetch as before.
+
+**JS client: `consume()` stops on a request undici refuses to send.** `fetch failed` with
+`UND_ERR_INVALID_ARG` fails the same way on every pop, so `consume()` now rejects with it instead of
+waiting it out in silence. CI runs the whole unit suite on Node 24 and Node 26 (`js-client-unit`);
+until now it ran part of it, on Node 24 only. An application that cannot upgrade yet makes 2.9.0
+and 2.9.1 work on both Nodes with `"overrides": { "undici": "^7.0.0" }` in its `package.json`:
+undici 7 takes both handlers. The broker and the other clients stay at 2.9.0.
+
 ## JS client 2.9.1 - 2026-11-18
 
 **JS client: TypeScript declarations (#158).** `queen-mq` now ships `.d.ts` files next to its

@@ -86,6 +86,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-11-16 (a dead letter always carries its message): consume/ack.rs and txn.rs refuse, retryably (503 `retry`, nothing moved), an ack or a transaction that would file a dead letter whose message the node that took it has not read yet. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (filtered-group delete): phase2.rs and phase2/admin.rs send each hidden queue's delete as a command of its own (next_command); until now only the first delete of a queue with filtered groups ran. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (clients 2.9.0): queen_client.hpp says QUEEN_CLIENT_VERSION 2.9.0; no API changes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (JS client 2.9.2): ConsumerManager.js no longer waits out a
+# request undici refuses before sending it (fetch failed with UND_ERR_INVALID_ARG): consume()
+# rejects with it. Nothing this page states changes.
 ---
 
 An ack tells the broker what happened to a message. A `completed` ack moves the consumer group's cursor past it, and that is all: the message stays in its partition until retention removes it.

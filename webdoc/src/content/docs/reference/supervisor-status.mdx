@@ -128,6 +128,9 @@ verifiedBy:
 # `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
 # server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
 # queen:consume stops for queue:restart under a supervisor (RestartSignal). The status document is unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (JS client 2.9.2): ConsumerManager.js no longer waits out a
+# request undici refuses before sending it (fetch failed with UND_ERR_INVALID_ARG): consume()
+# rejects with it. Nothing this page states changes.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.
