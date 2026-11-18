@@ -735,10 +735,14 @@ impl LogStore {
     /// member for good (test builds), and a member holding `prev_log_id` but
     /// not the purged entries would refuse the hole as a storage error and
     /// stop. Nothing comes back instead, and openraft sends a heartbeat at
-    /// `prev_log_id`: the empty member answers it with a conflict that ends
-    /// the stale stream, and openraft ignores that conflict (it counts
-    /// another request in flight for that member by then: the snapshot it
-    /// planned).
+    /// `prev_log_id`, which the transport does not send: it ends the stale
+    /// session there ([`super::network::HttpPeer`]'s `stream_append`), and
+    /// openraft starts the one it planned since. Answering that heartbeat
+    /// was not enough: an empty member ends the stream with a conflict, but a
+    /// member already back on the snapshot holds `prev_log_id` and answers it
+    /// with success, and the stale stream went on that way for good, its
+    /// member never sent another entry (2026-11-18, "nodes [(1, 385)] did not
+    /// apply 602").
     fn read_for_replication(&self, start: u64, end: u64) -> io::Result<Vec<REntry>> {
         let first = || self.inner.mem.lock().expect("log mem").first();
         let read = if start < first() {

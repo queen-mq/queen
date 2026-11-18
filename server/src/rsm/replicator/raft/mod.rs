@@ -1884,6 +1884,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
                 c.token.clone(),
                 snap.clone(),
                 shared.members.clone(),
+                log.clone(),
             )),
             _ => Net::None(NoNetwork),
         };

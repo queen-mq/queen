@@ -40,6 +40,7 @@ use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::http::{header, Method, Request, StatusCode};
+use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use openraft::base::{BoxFuture, BoxStream};
 use openraft::errors::{
@@ -55,9 +56,10 @@ use openraft::OptionalSend;
 use serde::de::DeserializeOwned;
 
 use super::cluster::TOKEN_HEADER;
+use super::log_store::LogStore;
 use super::state_machine::{Checkpoint, Snapshot};
 use super::stream::{Session, SessionCtx, StreamPeer};
-use super::types::{Node, NodeId, TypeConfig, Vote};
+use super::types::{LogId, Node, NodeId, TypeConfig, Vote};
 use super::wire;
 
 // ---------------------------------------------------------------------------
@@ -187,6 +189,8 @@ pub(crate) struct HttpNetwork {
     /// The leader's members view, carried on every append it sends
     /// ([`super::members`]).
     members: Arc<super::members::MembersState>,
+    /// This node's raft log: where it is purged ([`HttpPeer`]'s `stream_append`).
+    log: LogStore,
 }
 
 impl HttpNetwork {
@@ -194,12 +198,14 @@ impl HttpNetwork {
         token: Option<String>,
         snap: Arc<super::snapshot::SendCtx>,
         members: Arc<super::members::MembersState>,
+        log: LogStore,
     ) -> HttpNetwork {
         HttpNetwork {
             client: http_client(),
             token: token.map(Arc::from),
             snap,
             members,
+            log,
         }
     }
 }
@@ -218,6 +224,7 @@ impl RaftNetworkFactory<TypeConfig> for HttpNetwork {
             members: self.members.clone(),
             reads_zstd: false,
             stream: StreamPeer::default(),
+            log: self.log.clone(),
         }
     }
 }
@@ -236,6 +243,20 @@ pub(crate) struct HttpPeer {
     reads_zstd: bool,
     /// The pipelined append stream to this peer ([`super::stream`]).
     stream: StreamPeer,
+    /// This node's raft log: where it is purged.
+    log: LogStore,
+}
+
+/// Whether `req` needs an entry the log has purged: the first entry after its
+/// `prev_log_id` is at or below `purged`. openraft never plans that (a member
+/// whose next entry is purged is sent a snapshot), so such a request comes
+/// from a stream session it has given up on ([`HttpPeer`]'s `stream_append`).
+fn needs_purged(req: &AppendEntriesRequest<TypeConfig>, purged: Option<LogId>) -> bool {
+    let Some(purged) = purged else {
+        return false;
+    };
+    let next = req.prev_log_id.as_ref().map_or(0, |p| p.index + 1);
+    next <= purged.index
 }
 
 /// POST `body` to `url` and return the answer's bytes; anything but a 2xx is a
@@ -490,6 +511,35 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
             + Unpin
             + 'static,
     {
+        // A session openraft has given up on can go on asking. A member whose
+        // log openraft found gone (back with an empty data directory) is
+        // planned a snapshot, then a stream after it, but the session already
+        // running to that member goes on until it ends, reading entries the
+        // purge has passed since. The log answers that read with nothing and
+        // openraft sends a heartbeat at the old `prev_log_id`: a member back on
+        // the snapshot already holds that entry and answers with success, so
+        // the session never ended and the member got no entry again
+        // (2026-11-18, "nodes [(1, 385)] did not apply 602"). The first
+        // request that needs a purged entry ends the session here: what was
+        // sent is answered, the stream ends, and openraft starts the session
+        // it planned since.
+        let log = self.log.clone();
+        let target = self.target;
+        let input = input.take_while(move |req| {
+            let purged = log.purged_log_id();
+            let stale = needs_purged(req, purged);
+            if stale {
+                tracing::warn!(
+                    target: "rsm",
+                    target_node = target,
+                    prev = ?req.prev_log_id,
+                    purged = ?purged,
+                    "raft: a replication session needs an entry the log purged: it ends, \
+                     and openraft starts the one it planned since",
+                );
+            }
+            std::future::ready(!stale)
+        });
         if self.stream.unary() {
             return stream_append_sequential(self, input, option);
         }
@@ -1339,6 +1389,31 @@ mod server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A request needs a purged entry when the first entry after its
+    /// `prev_log_id` is at or below the purge point; a session that starts
+    /// right after the purge point (a stream after a snapshot) does not.
+    #[test]
+    fn a_request_after_the_purge_point_is_sent_one_below_it_is_not() {
+        use super::super::types::log_id;
+        let req = |prev: Option<LogId>| AppendEntriesRequest::<TypeConfig> {
+            vote: Vote::new_committed(1, 1),
+            prev_log_id: prev,
+            entries: Vec::new(),
+            leader_commit: None,
+        };
+        let purged = Some(log_id(1, 384));
+        // The stale session of 2026-11-18: it streamed after 201.
+        assert!(needs_purged(&req(Some(log_id(1, 201))), purged));
+        assert!(needs_purged(&req(Some(log_id(1, 383))), purged));
+        assert!(needs_purged(&req(None), purged));
+        // The session openraft plans after the snapshot at 384, and later ones.
+        assert!(!needs_purged(&req(Some(log_id(1, 384))), purged));
+        assert!(!needs_purged(&req(Some(log_id(1, 601))), purged));
+        // Nothing purged: every request is sent.
+        assert!(!needs_purged(&req(Some(log_id(1, 0))), None));
+        assert!(!needs_purged(&req(None), None));
+    }
 
     #[test]
     fn an_append_without_entries_keeps_the_heartbeat_deadline() {
