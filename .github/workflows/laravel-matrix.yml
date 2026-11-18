@@ -168,7 +168,7 @@ jobs:
               scenarios=$scenarios,dispatch-backend-down,replicas-kill,replicas-rolling
               prefork=on ;;
             queen)
-              scenarios=probe-broker-hung,poison-messages,job-metrics,install-owner,broker-leader-kill,partition-order,orphan-reaping,broker-slow
+              scenarios=probe-broker-hung,poison-messages,job-metrics,install-owner,broker-leader-kill,partition-order,orphan-reaping,broker-slow,consume-pool
               profiles=queen-php,queen-rust ;;
             upgrade) scenarios=rolling-upgrade profiles=queen-php,queen-rust prefork=on ;;
             soak-*) scenarios=soak profiles=${GROUP#soak-} prefork=on ;;

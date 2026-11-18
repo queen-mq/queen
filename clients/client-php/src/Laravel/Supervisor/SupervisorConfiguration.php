@@ -38,6 +38,13 @@ final class SupervisorConfiguration
 
     private const CONTROL_LOOP_MARGIN_SECONDS = 5;
 
+    /**
+     * The long poll of a `queen:consume` worker in a pool of handlers. Its
+     * SIGTERM waits for the poll in flight, so the poll counts toward the
+     * drain like the handler's timeout. The Rust master passes the same.
+     */
+    public const CONSUME_POLL_SECONDS = 10;
+
     public static function resolve(
         array $queen,
         string $basePath,
@@ -89,7 +96,10 @@ final class SupervisorConfiguration
             $consumerGroup = (string) ($options['consumer_group'] ?? $connectionConfig['consumer_group'] ?? 'laravel');
             self::identifier($consumerGroup, "supervisor [{$name}] consumer_group");
 
-            $queues = $options['queues'] ?? $options['queue'] ?? [$connectionConfig['queue'] ?? 'default'];
+            $handlers = self::handlers($options, $name, $connection);
+            $queues = $handlers !== null
+                ? array_map('strval', array_keys($handlers))
+                : $options['queues'] ?? $options['queue'] ?? [$connectionConfig['queue'] ?? 'default'];
             $queues = is_string($queues) ? explode(',', $queues) : $queues;
             if (!is_array($queues)) {
                 throw new InvalidArgumentException("Queen supervisor [{$name}] queues must be an array or comma-separated string.");
@@ -128,6 +138,13 @@ final class SupervisorConfiguration
             $strategy = (string) ($options['strategy'] ?? 'size');
             if (!in_array($strategy, ['size', 'time'], true)) {
                 throw new InvalidArgumentException("Queen supervisor [{$name}] has an invalid auto-scaling strategy.");
+            }
+            // queen:consume reads one queue and records no job runtimes.
+            if ($handlers !== null && $balance === 'off') {
+                throw new InvalidArgumentException("Queen supervisor [{$name}] handlers need balance auto or simple: a queen:consume worker reads one queue.");
+            }
+            if ($handlers !== null && $strategy === 'time') {
+                throw new InvalidArgumentException("Queen supervisor [{$name}] handlers need strategy size: queen:consume records no job runtimes.");
             }
 
             $min = self::nonNegativeInteger($options['min_processes'] ?? 1, "supervisor [{$name}] min_processes");
@@ -242,6 +259,13 @@ final class SupervisorConfiguration
                     );
                 }
             }
+            // queen:consume renews when config/queen.php says so; the pool
+            // reserves the renewer's process from the connection's setting.
+            if ($handlers !== null && $leaseRenewal !== (($queen['lease_renewal'] ?? false) === true)) {
+                throw new InvalidArgumentException(
+                    "Queen supervisor [{$name}] handlers need the same lease_renewal on the queen connection as in config/queen.php.",
+                );
+            }
             $processCostPerWorker = $leaseRenewal ? 2 : 1;
             if ($max > intdiv($processLimit, $processCostPerWorker)) {
                 throw new InvalidArgumentException(
@@ -305,6 +329,9 @@ final class SupervisorConfiguration
             }
             if (self::boolean($options['fast_scale_up'] ?? false, "supervisor [{$name}] fast_scale_up")) {
                 $resolved[$name]['fast_scale_up'] = true;
+            }
+            if ($handlers !== null) {
+                $resolved[$name]['handlers'] = $handlers;
             }
             $preforkPools[$name] = ($options['prefork'] ?? null) === null
                 ? $preforkDefault
@@ -402,10 +429,16 @@ final class SupervisorConfiguration
                 . "the bounded depth/control loop budget [{$maximumControlLoopSeconds}] seconds.",
             );
         }
-        $maximumWorkerTimeout = max(array_column($resolved, 'timeout'));
+        $maximumWorkerTimeout = max(array_map(
+            static fn (array $options): int => $options['timeout'] + (isset($options['handlers']) ? self::CONSUME_POLL_SECONDS : 0),
+            $resolved,
+        ));
         $shutdownGrace = self::positiveDuration($raw['shutdown_grace'] ?? $maximumWorkerTimeout + 15, 'shutdown_grace');
         if ($shutdownGrace <= $maximumWorkerTimeout) {
-            throw new InvalidArgumentException('Queen supervisor shutdown_grace must be longer than every worker timeout.');
+            throw new InvalidArgumentException(
+                'Queen supervisor shutdown_grace must be longer than every worker timeout, plus '
+                . self::CONSUME_POLL_SECONDS . ' s of long poll for a pool of handlers.',
+            );
         }
 
         $defaultConnection = $connections['queen'] ?? reset($connections);
@@ -823,6 +856,43 @@ final class SupervisorConfiguration
         }
 
         return true;
+    }
+
+    /**
+     * A pool's `handlers`: queue => the class `queen:consume` hands its
+     * messages to. Null for a pool of `queue:work` workers.
+     *
+     * @return array<string, class-string>|null
+     */
+    private static function handlers(array $options, string $name, string $connection): ?array
+    {
+        $handlers = $options['handlers'] ?? null;
+        if ($handlers === null) {
+            return null;
+        }
+        if (!is_array($handlers) || $handlers === [] || array_is_list($handlers)) {
+            throw new InvalidArgumentException("Queen supervisor [{$name}] handlers must map each queue to a handler class.");
+        }
+        if (array_key_exists('queues', $options) || array_key_exists('queue', $options)) {
+            throw new InvalidArgumentException("Queen supervisor [{$name}] takes its queues from handlers: remove queues.");
+        }
+        // queen:consume pops through the client config/queen.php builds,
+        // which is what the queen connection works with.
+        if ($connection !== 'queen') {
+            throw new InvalidArgumentException("Queen supervisor [{$name}] handlers need the queen connection.");
+        }
+        $resolved = [];
+        foreach ($handlers as $queue => $class) {
+            $class = is_string($class) ? ltrim($class, '\\') : $class;
+            if (!is_string($class) || !class_exists($class) || !method_exists($class, 'handle')) {
+                throw new InvalidArgumentException(
+                    "Queen supervisor [{$name}] handler for queue [{$queue}] must be a class with a handle() method.",
+                );
+            }
+            $resolved[(string) $queue] = $class;
+        }
+
+        return $resolved;
     }
 
     private static function identifier(string $value, string $label): void

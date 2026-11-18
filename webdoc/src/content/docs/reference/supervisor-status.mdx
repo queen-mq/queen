@@ -124,6 +124,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-11-11 (clients 2.8.1): queen_client.hpp's version macro says 2.8.1. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (routing, e0654033f): client-js's QueueBuilder and ConsumerManager take a `where` and headers and check a filtered answer. The status fields this page lists do not change.
 # sourceOfTruth re-read 2026-11-16 (clients 2.9.0): queen_client.hpp says QUEEN_CLIENT_VERSION 2.9.0; no API changes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (pools of handlers): SupervisorConfiguration takes a pool's
+# `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
+# server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
+# queen:consume stops for queue:restart under a supervisor (RestartSignal). The status document is unchanged. Nothing this page states changes.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.

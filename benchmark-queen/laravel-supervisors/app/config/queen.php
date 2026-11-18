@@ -64,6 +64,21 @@ if ($benchmark['routed']) {
     $shutdownGrace = max(array_column($benchmark['routed_pools'], 'timeout')) + 30;
 }
 
+if ($benchmark['consumers'] !== '') {
+    // Two queen:consume workers for plain messages, beside the job pool.
+    $supervisors['consumers'] = [
+        'consumer_group' => 'matrix-consumers',
+        'handlers' => [$benchmark['consumers'] => \App\Queen\FailureMatrixHandler::class],
+        'balance' => 'simple',
+        'processes' => 2,
+        'min_processes' => 2,
+        'max_processes' => 2,
+        'timeout' => $benchmark['timeout'],
+        'retry_after' => $benchmark['retry_after'],
+    ];
+    $workers += 2;
+}
+
 return [
     'url' => env('QUEEN_URL', 'http://queen:6632'),
     'urls' => env('QUEEN_URLS'),

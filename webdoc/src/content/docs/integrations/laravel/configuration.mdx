@@ -96,6 +96,12 @@ sourceOfTruth:
 # may be a token callable, read per attempt, and Queen gains tokens()->mint() (Queen.php,
 # HttpClient.php); Defaults.php gains a comment (8c3fcd498). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (routing, e0654033f): the PHP client sends and reads message headers (PushBinary, PopFrames, QueenQueue; a job that implements QueenHeaders) and leaves out the options a reading queue keeps from its sources (Defaults READING_QUEUE_KEEPS); HttpClient changed comments only. The options and defaults this page lists do not change.
+# sourceOfTruth re-read 2026-11-18 (pools of handlers): SupervisorConfiguration takes a pool's
+# `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
+# server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
+# queen:consume stops for queue:restart under a supervisor (RestartSignal). The pools table, its notes and Refused at start say so.
+# sourceOfTruth re-read 2026-11-18 (urls string): QueenServiceProvider::clientConfig splits a comma-separated
+# `urls`, as QueenConnector does, so queen:consume and the Queen facade accept 'urls' => env('QUEEN_URLS'). Nothing this page states changes.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. The file reads 20 environment variables, for what differs between environments (the broker, its credentials, the queue and group, paths, and the switches of optional features); every other setting is a plain value in the file. This page lists the 20, then every key area by area, with its default in PHP client 2.1.0 and later.
@@ -365,6 +371,7 @@ Each entry of `supervisor.supervisors` is a pool. The file ships one, `default`,
 | `connection` | `queen` | The Laravel queue connection the workers use; it must use the `queen` driver. |
 | `consumer_group` | the connection's `consumer_group`; for `queen`, the top-level one (`QUEEN_CONSUMER_GROUP`) | The consumer group of the pool's workers. |
 | `queues` | the connection's `queue`; for `queen`, the top-level one (`QUEEN_QUEUE`) | The queues the pool serves, as an array or a comma-separated string. |
+| `handlers` | unset | Queue => handler class: the pool runs `queen:consume` for plain messages instead of `queue:work`, and its queues are the keys ([pools of handlers](/integrations/laravel/supervisors/#pools-of-queenconsume-handlers)). |
 | `balance` | `auto` | `auto` follows the backlog, `simple` runs a fixed count, `off` gives every worker the whole queue list. |
 | `strategy` | `size` | How `auto` sizes the pool: `size` from the backlog, `time` from the backlog times the job runtime. |
 | `min_processes` | `1` | Fewest workers of the pool. |
@@ -394,9 +401,11 @@ Each entry of `supervisor.supervisors` is a pool. The file ships one, `default`,
 | `quiet` | `true` | `--quiet`: no console output for each job. |
 
 A pool's `retry_after` must be longer than its `timeout`, and `shutdown_grace` longer than every
-pool's `timeout`. Without a `retry_after` key, a pool takes its connection's. The pool keys and the
-way they scale are explained in [how a pool scales](/integrations/laravel/supervisors/#how-a-pool-scales)
-and [run the PHP engine](/integrations/laravel/supervisors/#run-the-php-engine).
+pool's `timeout`, plus 10 s for a pool of handlers. In a pool of handlers, `timeout` is
+[not enforced](/integrations/laravel/supervisors/#pools-of-queenconsume-handlers), and `sleep`,
+`tries`, `memory`, `backoff`, `max_jobs`, `max_time`, `rest` and `force` do not apply. Without a
+`retry_after` key, a pool takes its connection's. The pool keys and the way they scale are
+explained in [how a pool scales](/integrations/laravel/supervisors/#how-a-pool-scales) and [run the PHP engine](/integrations/laravel/supervisors/#run-the-php-engine).
 
 ## Dashboard
 
@@ -481,7 +490,8 @@ checks when either engine starts, and `php artisan queen:supervisor-config` show
 | The renewal timing fits in `retry_after` | connector | `Queen Laravel lease_renewal timing is unsafe: interval + two request budgets + retry + kill grace + safety margin must be shorter than retry_after.` |
 | The same rule for a pool, where a renewal may try every broker URL | supervisor | `Queen supervisor [default] lease renewal timing budget [44 s] must be shorter than retry_after [30 s]. It is the renewal interval [10 s], twice a renewal that tries every broker URL [5 s x 3 URLs], the kill grace [2 s], the safety margin [1 s] and 1 s. Raise retry_after, or lower lease_renewal_timeout or lease_renewal_interval.` (three URLs; the budget and its parts since PHP client 2.4.4) |
 | A pool's `retry_after` exceeds its `timeout` | supervisor | `Queen supervisor [default] retry_after must be longer than timeout.` |
-| `shutdown_grace` exceeds every pool's `timeout` | supervisor | `Queen supervisor shutdown_grace must be longer than every worker timeout.` |
+| `shutdown_grace` exceeds every pool's `timeout`, plus 10 s of long poll for a pool of handlers | supervisor | `Queen supervisor shutdown_grace must be longer than every worker timeout, plus 10 s of long poll for a pool of handlers.` |
+| A pool of handlers maps queues to classes with a `handle()` method, on the `queen` connection, with `balance` `auto` or `simple`, `strategy` `size`, no `queues`, and the `lease_renewal` of `config/queen.php` | supervisor | One message for each condition, for example `Queen supervisor [consumers] handlers need balance auto or simple: a queen:consume worker reads one queue.` |
 | The pools fit `process_limit`, two slots per worker with lease renewal | supervisor | `Queen supervisor [default] exceeds process_limit [256].` |
 | An `auto` pool's `max_processes` covers its queues | supervisor | `Queen supervisor [default] max_processes must cover every queue when balance is auto.` |
 | `remote_status.key` is a string when remote status is on, as the default is | supervisor | `Queen supervisor remote_status.key must be a string when remote status is enabled.` |

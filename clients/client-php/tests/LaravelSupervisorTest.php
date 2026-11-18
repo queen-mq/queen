@@ -44,6 +44,74 @@ class LaravelSupervisorTest extends TestCase
         $this->assertTrue($config['supervisors']['jobs']['quiet']);
     }
 
+    /** A pool of handlers takes its queues from the handlers' keys and exports the map. */
+    public function testAPoolOfHandlersExportsItsQueuesAndHandlers(): void
+    {
+        $pool = SupervisorConfiguration::resolve(self::handlerPool([]), '/app')['supervisors']['consumers'];
+
+        $this->assertSame(['payments', 'refunds'], $pool['queues']);
+        $this->assertSame(
+            ['payments' => Support\ConsumeHandler::class, 'refunds' => Support\ConsumeHandler::class],
+            $pool['handlers'],
+        );
+    }
+
+    /** @return iterable<string, array{0: array<string, mixed>, 1: string}> */
+    public static function refusedHandlerPools(): iterable
+    {
+        yield 'a list, not a map' => [['handlers' => [Support\ConsumeHandler::class]], 'must map each queue'];
+        yield 'queues beside handlers' => [['queues' => ['payments']], 'remove queues'];
+        yield 'another connection' => [['connection' => 'queen-eu'], 'need the queen connection'];
+        yield 'a class that does not exist' => [['handlers' => ['payments' => 'App\\Missing']], 'handle() method'];
+        yield 'a class without handle()' => [['handlers' => ['payments' => \stdClass::class]], 'handle() method'];
+        yield 'balance off' => [['balance' => 'off'], 'balance auto or simple'];
+        yield 'strategy time' => [['strategy' => 'time'], 'strategy size'];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('refusedHandlerPools')]
+    public function testAPoolOfHandlersIsRefusedWhenItCannotRunQueenConsume(array $change, string $message): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage($message);
+
+        SupervisorConfiguration::resolve(self::handlerPool($change), '/app', queueConnections: [
+            'queen-eu' => ['driver' => 'queen'],
+        ]);
+    }
+
+    /** queen:consume renews by config/queen.php, the pool reserves by its connection: they must agree. */
+    public function testAPoolOfHandlersIsRefusedWhenTheConnectionRenewsAndTheClientDoesNot(): void
+    {
+        $this->expectExceptionMessage('same lease_renewal');
+
+        SupervisorConfiguration::resolve(self::handlerPool([]), '/app', queueConnections: [
+            'queen' => ['driver' => 'queen', 'lease_renewal' => true],
+        ]);
+    }
+
+    /** A SIGTERM waits for the long poll in flight: the drain covers it. */
+    public function testTheDrainOfAPoolOfHandlersCoversItsLongPoll(): void
+    {
+        $config = self::handlerPool(['timeout' => 60]);
+        $this->assertSame(85, SupervisorConfiguration::resolve($config, '/app')['shutdown_grace']);
+
+        $config['supervisor']['shutdown_grace'] = 70;
+        $this->expectExceptionMessage('long poll');
+        SupervisorConfiguration::resolve($config, '/app');
+    }
+
+    /** @param array<string, mixed> $change */
+    private static function handlerPool(array $change): array
+    {
+        return ['supervisor' => ['supervisors' => ['consumers' => array_replace([
+            'consumer_group' => 'ledger',
+            'handlers' => [
+                'payments' => Support\ConsumeHandler::class,
+                'refunds' => '\\' . Support\ConsumeHandler::class,
+            ],
+        ], $change)]]];
+    }
+
     public function testConfigurationRejectsAnUnknownBalanceStrategy(): void
     {
         $this->expectException(InvalidArgumentException::class);

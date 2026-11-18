@@ -97,6 +97,12 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-12 (routing without copies, PLAN_ROUTING.md): the files this page
 # names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-18 (pools of handlers): SupervisorConfiguration takes a pool's
+# `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
+# server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
+# queen:consume stops for queue:restart under a supervisor (RestartSignal). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (urls string): QueenServiceProvider::clientConfig splits a comma-separated
+# `urls`, as QueenConnector does, so queen:consume and the Queen facade accept 'urls' => env('QUEEN_URLS'). Nothing this page states changes.
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the QueenMQ broker as the place

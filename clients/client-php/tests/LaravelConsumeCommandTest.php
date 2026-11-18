@@ -25,6 +25,22 @@ final class LaravelConsumeCommandTest extends TestCase
 
     private ConsumeHandler $handler;
 
+    private ?string $exitsDirectory = null;
+
+    protected function tearDown(): void
+    {
+        putenv('QUEEN_LARAVEL_SUPERVISOR');
+        putenv('QUEEN_SUPERVISOR_EXITS_DIR');
+        if ($this->exitsDirectory !== null) {
+            foreach (glob($this->exitsDirectory . '/*') ?: [] as $path) {
+                @unlink($path);
+            }
+            @rmdir($this->exitsDirectory);
+        }
+
+        parent::tearDown();
+    }
+
     protected function getPackageProviders($app): array
     {
         return [QueenServiceProvider::class];
@@ -44,6 +60,58 @@ final class LaravelConsumeCommandTest extends TestCase
 
         $this->assertSame(0, $exit);
         $this->assertSame('tx-1', $this->handler->received[0]['transactionId']);
+    }
+
+    // ===========================
+    // queue:restart
+    // ===========================
+
+    /**
+     * A worker a supervisor started stops for `php artisan queue:restart`,
+     * after the message in hand, and says why: the supervisor replaces it
+     * with one that runs the code on disk.
+     */
+    public function testUnderASupervisorTheCommandStopsForAQueueRestart(): void
+    {
+        $this->exitsDirectory = sys_get_temp_dir() . '/queen-exits-' . bin2hex(random_bytes(6));
+        mkdir($this->exitsDirectory, 0700);
+        putenv('QUEEN_LARAVEL_SUPERVISOR=consumers');
+        putenv("QUEEN_SUPERVISOR_EXITS_DIR={$this->exitsDirectory}");
+        $this->app['cache.store']->forever('illuminate:queue:restart', 1000);
+        $this->broker([
+            function (): array {
+                $this->app['cache.store']->forever('illuminate:queue:restart', 2000);
+
+                return [ConsumeBroker::message('tx-1')];
+            },
+            [ConsumeBroker::message('tx-2')],
+        ]);
+
+        [$exit, $output] = $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--limit' => 2]);
+
+        $this->assertSame(0, $exit);
+        $this->assertStringContainsString('queue:restart signalled: stopping.', $output);
+        $this->assertCount(1, $this->handler->received, 'the second message was popped after the restart');
+        $this->assertSame('restart', file_get_contents($this->exitsDirectory . '/' . getmypid()));
+    }
+
+    /** Run by hand, the command keeps running through a queue:restart, as before. */
+    public function testRunByHandTheCommandIgnoresAQueueRestart(): void
+    {
+        $this->app['cache.store']->forever('illuminate:queue:restart', 1000);
+        $this->broker([
+            function (): array {
+                $this->app['cache.store']->forever('illuminate:queue:restart', 2000);
+
+                return [ConsumeBroker::message('tx-1')];
+            },
+            [ConsumeBroker::message('tx-2')],
+        ]);
+
+        [$exit] = $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--limit' => 2]);
+
+        $this->assertSame(0, $exit);
+        $this->assertCount(2, $this->handler->received);
     }
 
     // ===========================

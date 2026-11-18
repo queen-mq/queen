@@ -117,6 +117,10 @@ sourceOfTruth:
 # names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
 # states changes.
 # sourceOfTruth re-read 2026-11-16 (62e59d3aa): consume/pop.rs no longer hands a filtered group's messages out twice to a pop by namespace or task; phase2/reads.rs adds `unread`. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (pools of handlers): SupervisorConfiguration takes a pool's
+# `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
+# server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
+# queen:consume stops for queue:restart under a supervisor (RestartSignal). Nothing this page states changes.
 ---
 
 QueenMQ is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both

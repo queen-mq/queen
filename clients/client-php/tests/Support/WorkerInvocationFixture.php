@@ -18,6 +18,7 @@ final class WorkerInvocationFixture
      *     name: string,
      *     supervisor: string,
      *     queue: string,
+     *     command: string,
      *     config: array<string, mixed>,
      *     queue_connections: array<string, array<string, mixed>>,
      *     pool: array<string, mixed>,
@@ -32,6 +33,7 @@ final class WorkerInvocationFixture
         // The application's configuration is one for every case.
         return array_map(
             static fn (array $case): array => $case + [
+                'command' => 'queue:work',
                 'config' => $document['config'],
                 'queue_connections' => $document['queue_connections'],
             ],

@@ -72,6 +72,12 @@ like a Horizon supervisor. This one serves the queue \texttt{default} with one t
 ],
 \end{code}
 
+Messages that other services push carry no Laravel job. A pool can run \texttt{queen:consume} for
+them instead of \texttt{queue:work}: give it \texttt{'handlers' => ['payments' =>
+RecordPayment::class]}, and each worker reads one queue and hands every message to the class's
+\texttt{handle()}. The pool scales, restarts and drains like the one above, under the same master.
+% Pools of handlers (handlers key) were added after the run above and were not run in it.
+
 Start it, with either engine, under the process manager you already use (systemd, Supervisor,
 Kubernetes), and ask it how it is:
 

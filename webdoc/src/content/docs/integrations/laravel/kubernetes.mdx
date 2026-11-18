@@ -114,6 +114,10 @@ sourceOfTruth:
 # states changes.
 # sourceOfTruth re-read 2026-11-16 (62e59d3aa): phase2.rs and phase2/reads.rs fold filtered groups into a queue's figures and add `unread`; a queue with no filtered group counts as before. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (filtered-group delete): phase2.rs and phase2/admin.rs send each hidden queue's delete as a command of its own (next_command); until now only the first delete of a queue with filtered groups ran. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-18 (pools of handlers): SupervisorConfiguration takes a pool's
+# `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
+# server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
+# queen:consume stops for queue:restart under a supervisor (RestartSignal). Nothing this page states changes.
 ---
 
 This page puts the supervisor features together for the setup most teams end up with: Laravel

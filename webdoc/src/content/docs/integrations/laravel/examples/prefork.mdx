@@ -31,6 +31,10 @@ verifiedBy:
 # start waits for the circuit; the PHP stop signal reaches the workers once; the Rust master handles
 # SIGTERM during its configuration export and drops a log line it cannot write. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-18 (pools of handlers): SupervisorConfiguration takes a pool's
+# `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
+# server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
+# queen:consume stops for queue:restart under a supervisor (RestartSignal). A queue:work pool forks as before. Nothing this page states changes.
 ---
 
 With prefork, the supervisor boots Laravel once in a fork server and forks the workers from it. A

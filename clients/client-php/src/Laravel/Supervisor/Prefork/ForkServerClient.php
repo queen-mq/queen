@@ -76,14 +76,18 @@ final class ForkServerClient
     }
 
     /**
-     * @param list<string> $argv queue:work arguments, the connection first
+     * @param list<string> $argv the command's arguments
      * @param array<string, ?string> $environment set, or with null removed, in the worker
+     * @param string $command one of ForkServer::COMMANDS
      * @return int the worker's pid
      */
-    public function fork(array $argv, array $environment, float $timeoutSeconds): int
+    public function fork(array $argv, array $environment, float $timeoutSeconds, string $command = 'queue:work'): int
     {
         $id = $this->nextId++;
-        $line = json_encode(['fork' => ['id' => $id, 'argv' => $argv, 'env' => (object) $environment]], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        $line = json_encode(
+            ['fork' => ['id' => $id, 'command' => $command, 'argv' => $argv, 'env' => (object) $environment]],
+            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
+        );
         if (@fwrite($this->commands, $line . "\n") !== strlen($line) + 1) {
             throw new \RuntimeException('the fork server is not accepting requests');
         }

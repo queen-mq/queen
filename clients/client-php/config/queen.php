@@ -232,6 +232,20 @@ return [
                 // Avoid per-job console I/O in daemon mode.
                 'quiet' => true,
             ],
+            // A pool of handlers: plain messages that other services push,
+            // read by `queen:consume <queue> <handler>` workers instead of
+            // queue:work. The queues are the keys; `timeout` is the time a
+            // handler may take (not enforced), and scaling, prefork and
+            // restarts work as for the pool above.
+            // 'consumers' => [
+            //     'consumer_group' => 'ledger',
+            //     'handlers' => [
+            //         'payments' => App\Queen\RecordPayment::class,
+            //     ],
+            //     'max_processes' => 4,
+            //     'timeout' => 60,
+            //     'retry_after' => 90,
+            // ],
         ],
     ],
 

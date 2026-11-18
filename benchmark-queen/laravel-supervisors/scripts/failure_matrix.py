@@ -1180,6 +1180,65 @@ def queue_restart(lane: Lane) -> list[Check]:
     return checks
 
 
+def consumers(lane: Lane) -> list[int]:
+    """The pids of the pool of handlers' workers: spawned (php artisan queen:consume) or forked
+    (the fork server titles its child the same)."""
+    return [pid for pid, _, args in lane.processes() if "artisan queen:consume" in args]
+
+
+def wait_consumers(lane: Lane, count: int, *, other_than: set[int] | frozenset[int] = frozenset(), timeout: float = 120) -> list[int]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pids = [pid for pid in consumers(lane) if pid not in other_than]
+        if len(pids) >= count:
+            return pids
+        time.sleep(1)
+    return [pid for pid in consumers(lane) if pid not in other_than]
+
+
+def consume_pool(lane: Lane) -> list[Check]:
+    """A pool of handlers beside the job pool: the supervisor runs `queen:consume` for plain
+    messages that no Laravel job carries, as other services push them. A handler killed with
+    SIGKILL is replaced and its message comes back; `queue:restart` replaces every handler
+    worker, and the messages after it run the deployed code, as for queue:work."""
+    first, later = ids(0, 6), ids(6, 2)
+    started = wait_consumers(lane, 2)
+    lane.note(f"handler workers {started}")
+    lane.artisan("bench:matrix-consume-push", f"--run-id={lane.run_id}", "--jobs=6", "--sleep-ms=4000")
+    jobs = lane.wait_until(lambda r: any(r.count(j, "started") for j in first), 60, "a message started")
+    victim = next(pid for job in first for pid in jobs.raw["jobs"].get(job, {}).get("pids", []))
+    lane.docker("exec", lane.container(lane.profile.engine), "kill", "-KILL", str(victim))
+    lane.note(f"SIGKILL handler worker {victim}")
+    replaced_after_kill = wait_consumers(lane, 2, other_than={victim}, timeout=60)
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in first), 240, "all completed")
+
+    deployed = f"deployed-{lane.run_id[-8:]}"
+    old = set(consumers(lane))
+    lane.docker("exec", lane.container(lane.profile.engine), "sed", "-i",
+                f"s/VERSION = 'build'/VERSION = '{deployed}'/", "app/Support/DeployedCode.php")
+    lane.artisan("queue:restart")
+    lane.note("queue:restart")
+    new = wait_consumers(lane, 2, other_than=old)
+    lane.note("handler workers replaced" if len(new) >= 2 else "handler workers NOT replaced")
+    lane.artisan("bench:matrix-consume-push", f"--run-id={lane.run_id}", "--jobs=2", "--first=6", "--sleep-ms=100")
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in later), 120, "the later messages completed")
+    jobs = lane.settle(5)
+    codes = {j: jobs.codes(j) for j in later}
+    lane.extra["consume_pool"] = {"started": started, "victim": victim, "after_kill": replaced_after_kill,
+                                  "before_restart": sorted(old), "after_restart": new, "codes": codes}
+    return [
+        Check("the pool started its handler workers", len(started) >= 2, f"{started}"),
+        Check("a killed handler worker was replaced", len(replaced_after_kill) >= 2, f"{replaced_after_kill}"),
+        Check("the killed message ran again", any(jobs.count(j, "started") >= 2 for j in first),
+              "; ".join(f"{j} {jobs.events(j)}" for j in first if jobs.count(j, "started") > 1)),
+        Check("queue:restart replaced every handler worker", len(new) >= 2 and not set(new) & old,
+              f"before {sorted(old)}, after {new}"),
+        Check("the messages after the restart ran the deployed code",
+              all(codes[j] and codes[j][-1] == deployed for j in later), f"{codes}"),
+        *completed_once(jobs, first + later),
+    ]
+
+
 def issue_codes(status: dict, key: str) -> list[str]:
     """The codes of a status's readiness_issues or processing_health_issues."""
     issues = status.get(key)
@@ -1731,6 +1790,9 @@ SCENARIOS = [
     Scenario("poison-messages", poison_messages, engines=QUEEN_ENGINES),
     Scenario("broker-slow", broker_slow, engines=QUEEN_ENGINES),
     Scenario("job-metrics", job_metrics, engines=QUEEN_ENGINES),
+    # A pool of queen:consume handlers beside the jobs; the restart signal lives in the shared cache.
+    Scenario("consume-pool", consume_pool, {**COMPAT_ENV, "BENCH_CONSUMERS": "matrix-consume"},
+             engines=QUEEN_ENGINES, prepare=compat_database),
     Scenario("install-owner", install_owner, engines=("queen-installed",)),
     # A renewal may try all three URLs: 60 s fits the renewal budget that 30 s does not.
     # No init: the supervisor is PID 1, as in a Kubernetes pod.

@@ -592,7 +592,12 @@ final class PhpSupervisor
         return $budget;
     }
 
-    private function startWorker(string $name, string $queue, array $options): Process
+    /**
+     * queue:work's arguments, the connection first.
+     *
+     * @return list<string>
+     */
+    private static function workArguments(string $queue, array $options): array
     {
         $arguments = [
             $options['connection'],
@@ -614,6 +619,41 @@ final class PhpSupervisor
             $arguments[] = '--quiet';
         }
 
+        return $arguments;
+    }
+
+    /**
+     * queen:consume's arguments for one queue of a pool of handlers: the
+     * pool's group and lease, an ack after handle(), and a long poll short
+     * enough for the drain (SupervisorConfiguration::CONSUME_POLL_SECONDS).
+     *
+     * @return list<string>
+     */
+    private static function consumeArguments(string $queue, array $options): array
+    {
+        $arguments = [
+            $queue,
+            $options['handlers'][$queue],
+            '--group=' . $options['consumer_group'],
+            '--auto-ack',
+            // As queue:work's pops: a group the pool opens reads the backlog the master scales on.
+            '--subscription-mode=all',
+            '--lease=' . $options['retry_after'],
+            '--timeout=' . SupervisorConfiguration::CONSUME_POLL_SECONDS * 1000,
+        ];
+        if ($options['quiet'] ?? true) {
+            $arguments[] = '--quiet';
+        }
+
+        return $arguments;
+    }
+
+    private function startWorker(string $name, string $queue, array $options): Process
+    {
+        [$command, $arguments] = isset($options['handlers'])
+            ? ['queen:consume', self::consumeArguments($queue, $options)]
+            : ['queue:work', self::workArguments($queue, $options)];
+
         $environment = [
             // `false` also removes a value inherited by the supervisor.
             'QUEEN_SUPERVISOR_TELEMETRY_DIR' => ($options['strategy'] ?? 'size') === 'time'
@@ -631,8 +671,8 @@ final class PhpSupervisor
             // Where the worker says why it exits; see WorkerExitMarker.
             WorkerExitMarker::ENVIRONMENT => $this->exitMarkers ?? false,
         ];
-        $process = $this->forkWorker($name, $queue, $arguments, $environment)
-            ?? $this->spawnWorker($name, $queue, $arguments, $environment);
+        $process = $this->forkWorker($name, $queue, $arguments, $environment, $command)
+            ?? $this->spawnWorker($name, $queue, $arguments, $environment, $command);
         $objectId = spl_object_id($process);
         $this->startedAt[$objectId] = microtime(true);
         $pid = $process->getPid();
@@ -649,17 +689,17 @@ final class PhpSupervisor
      * @param list<string> $arguments
      * @param array<string, string|false|null> $environment
      */
-    private function spawnWorker(string $name, string $queue, array $arguments, array $environment): Process
+    private function spawnWorker(string $name, string $queue, array $arguments, array $environment, string $command = 'queue:work'): Process
     {
-        $command = [
+        $commandLine = [
             $this->config['php_binary'],
             __DIR__ . DIRECTORY_SEPARATOR . 'worker_launcher.php',
             $this->config['php_binary'],
             $this->config['artisan'],
-            'queue:work',
+            $command,
             ...$arguments,
         ];
-        $process = new Process($command, $this->config['cwd'], $environment, timeout: null);
+        $process = new Process($commandLine, $this->config['cwd'], $environment, timeout: null);
         // `--quiet` suppresses per-job chatter while retaining startup/fatal
         // diagnostics. The loop drains Symfony's small pipe buffers every
         // 200ms so an unusually noisy failure cannot backpressure a worker.
@@ -679,7 +719,7 @@ final class PhpSupervisor
      * @param list<string> $arguments
      * @param array<string, string|false|null> $environment
      */
-    private function forkWorker(string $name, string $queue, array $arguments, array $environment): ?ForkedProcess
+    private function forkWorker(string $name, string $queue, array $arguments, array $environment, string $command = 'queue:work'): ?ForkedProcess
     {
         if (!$this->forkServer instanceof ForkServerClient
             || $this->preforkFailed
@@ -691,6 +731,7 @@ final class PhpSupervisor
                 $arguments,
                 array_map(fn (string|false|null $value): ?string => is_string($value) ? $value : null, $environment),
                 self::FORK_TIMEOUT_SECONDS,
+                $command,
             );
         } catch (\Throwable $error) {
             $this->emit("[{$name}:{$queue}] prefork failed, spawning workers from now on: {$error->getMessage()}\n", 'err');
