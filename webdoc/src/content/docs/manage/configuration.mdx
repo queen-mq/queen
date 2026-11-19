@@ -74,6 +74,11 @@ sourceOfTruth:
 # 400798d13): mod.rs reads the learners with non_write_voter_ids() (the same list under openraft
 # 0.10's name), hands the transport the log, and gains a test-only snapshot helper. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-11-19 (Kafka leader lease, 105f088a0): facade/real.rs: leads(), which
+# only the Kafka facade reads, also needs openraft's leader lease (replicator node.rs and
+# raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
+# quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
+# states changes.
 ---
 
 Every setting is an environment variable, and most installations need very few of them. When a node starts, it prints the settings it is really using, in lines that start with `config:`. Read them after every change. A yes/no setting accepts `true` or `false`, `1` or `0`, `yes` or `no`, `on` or `off`; any other value stops the node at boot, so a typo cannot pass unnoticed.

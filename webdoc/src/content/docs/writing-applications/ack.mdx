@@ -89,6 +89,11 @@ verifiedBy:
 # sourceOfTruth re-read 2026-11-18 (JS client 2.9.2): ConsumerManager.js no longer waits out a
 # request undici refuses before sending it (fetch failed with UND_ERR_INVALID_ARG): consume()
 # rejects with it. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-19 (Kafka leader lease, 105f088a0): facade/real.rs: leads(), which
+# only the Kafka facade reads, also needs openraft's leader lease (replicator node.rs and
+# raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
+# quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
+# states changes.
 ---
 
 An ack tells the broker what happened to a message. A `completed` ack moves the consumer group's cursor past it, and that is all: the message stays in its partition until retention removes it.

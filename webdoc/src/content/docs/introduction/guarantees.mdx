@@ -72,6 +72,11 @@ sourceOfTruth:
 # 400798d13): log_store.rs gains a test-only hold on replication streams, and read_for_replication's
 # comment says a member back on its snapshot answers the stale heartbeat with success. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-11-19 (Kafka leader lease, 105f088a0): facade/real.rs: leads(), which
+# only the Kafka facade reads, also needs openraft's leader lease (replicator node.rs and
+# raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
+# quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
+# states changes.
 ---
 
 A broker that promises "all or nothing" has to keep the promise exactly when something breaks. We test QueenMQ with Jepsen on five nodes, under kill -9, network partitions, paused processes, clock jumps, power loss and corrupted files. This page says what each API guarantees, what an answered write means, and where the guarantees stop.

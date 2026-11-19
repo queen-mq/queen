@@ -153,6 +153,11 @@ sourceOfTruth:
 # queen:consume stops for queue:restart under a supervisor (RestartSignal). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-18 (urls string): QueenServiceProvider::clientConfig splits a comma-separated
 # `urls`, as QueenConnector does, so queen:consume and the Queen facade accept 'urls' => env('QUEEN_URLS'). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-19 (Kafka leader lease, 105f088a0): facade/real.rs: leads(), which
+# only the Kafka facade reads, also needs openraft's leader lease (replicator node.rs and
+# raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
+# quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
+# states changes.
 ---
 
 QueenMQ can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and running the workers, which Horizon's master does. Your job classes stay ordinary Laravel jobs, and `queue:work` stays the worker.

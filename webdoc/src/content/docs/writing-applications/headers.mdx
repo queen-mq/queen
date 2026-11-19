@@ -13,6 +13,11 @@ sourceOfTruth:
   - server/src/rsm/planner/timers.rs
   - server/src/rsm/facade/remote.rs
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): facade/real.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-19 (Kafka leader lease, 105f088a0): facade/real.rs: leads(), which
+# only the Kafka facade reads, also needs openraft's leader lease (replicator node.rs and
+# raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
+# quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
+# states changes.
 ---
 
 A message can carry headers: a map of strings, stored beside its payload.

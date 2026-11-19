@@ -161,6 +161,11 @@ sourceOfTruth:
 # `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
 # server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
 # queen:consume stops for queue:restart under a supervisor (RestartSignal). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-19 (Kafka leader lease, 105f088a0): facade/real.rs: leads(), which
+# only the Kafka facade reads, also needs openraft's leader lease (replicator node.rs and
+# raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
+# quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
+# states changes.
 ---
 
 Your job classes do not change: they implement `ShouldQueue`, keep their middleware, `tries`, `backoff` and failure events, and `queue:work` still runs them. What changes is where a job waits and what holds it while it runs. This page follows one job through QueenMQ, one idea at a time, with what Horizon does at the same point. The settings of each idea close its section ([configuration reference](/integrations/laravel/configuration/)).

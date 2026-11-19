@@ -94,6 +94,11 @@ sourceOfTruth:
 # its last effect, and planner/txn.rs logs one no-op last for it. The page now says what a read
 # in `kv` sees.
 # sourceOfTruth re-read 2026-11-16 (a dead letter always carries its message): consume/ack.rs and txn.rs refuse, retryably (503 `retry`, nothing moved), an ack or a transaction that would file a dead letter whose message the node that took it has not read yet. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-19 (Kafka leader lease, 105f088a0): facade/real.rs: leads(), which
+# only the Kafka facade reads, also needs openraft's leader lease (replicator node.rs and
+# raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
+# quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
+# states changes.
 ---
 
 `POST /api/v1/transaction` is the call QueenMQ was built around. It writes a worker's whole step

@@ -65,6 +65,11 @@ digest: >-
 # 0.10's name), hands the transport the log, and gains a test-only snapshot helper; stream.rs turns
 # openraft 0.10's append results into the answer frames 2.9.0 sends, and back; the frames do not
 # change. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-19 (Kafka leader lease, 105f088a0): facade/real.rs: leads(), which
+# only the Kafka facade reads, also needs openraft's leader lease (replicator node.rs and
+# raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
+# quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
+# states changes.
 ---
 
 A QueenMQ node is one process. Every write is decided once, on the leader, and then applied on every node. These pages follow a write through the process, from the request to the disk.

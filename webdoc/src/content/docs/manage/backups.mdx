@@ -23,6 +23,11 @@ sourceOfTruth:
 # 400798d13): mod.rs reads the learners with non_write_voter_ids() (the same list under openraft
 # 0.10's name), hands the transport the log, and gains a test-only snapshot helper. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-11-19 (Kafka leader lease, 105f088a0): facade/real.rs: leads(), which
+# only the Kafka facade reads, also needs openraft's leader lease (replicator node.rs and
+# raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
+# quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
+# states changes.
 ---
 
 Three nodes protect you from losing a machine, not from a mistake: a deleted queue or a retention that was too short reaches every node as faithfully as a good write. A backup is the copy that lives outside the cluster. [Recovery](/manage/recovery/#backups) says it in short; this page has every command.

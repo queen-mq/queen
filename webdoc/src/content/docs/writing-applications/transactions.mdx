@@ -63,6 +63,11 @@ verifiedBy:
 # sourceOfTruth re-read 2026-11-18 (JS client 2.9.2): ConsumerManager.js no longer waits out a
 # request undici refuses before sending it (fetch failed with UND_ERR_INVALID_ARG): consume()
 # rejects with it. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-19 (Kafka leader lease, 105f088a0): facade/real.rs: leads(), which
+# only the Kafka facade reads, also needs openraft's leader lease (replicator node.rs and
+# raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
+# quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
+# states changes.
 ---
 
 The ack, the order's new state, the next event and tomorrow's reminder commit as one log entry, or none of them does. That one call replaces the outbox table, the idempotency table and the cron job.

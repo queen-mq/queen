@@ -128,6 +128,11 @@ sourceOfTruth:
 # has an undici Agent through the fetch of that same undici instead of the global fetch (an undici 6
 # Agent with Node 26's fetch failed every request with UND_ERR_INVALID_ARG). This page: the JS
 # client list says that error stops consume().
+# sourceOfTruth re-read 2026-11-19 (Kafka leader lease, 105f088a0): facade/real.rs: leads(), which
+# only the Kafka facade reads, also needs openraft's leader lease (replicator node.rs and
+# raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
+# quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
+# states changes.
 ---
 
 When QueenMQ refuses a call it answers a status code and a JSON body with a stable code, and the code
