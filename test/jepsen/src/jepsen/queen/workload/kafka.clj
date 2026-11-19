@@ -640,9 +640,11 @@
     (TrackCommitted. (gen/update gen test context event) offsets)))
 
 (defrecord FinalPolls [target-offsets gen]
-  ; kafka/FinalPolls, except that a key whose target is -1 (written only by
-  ; sends of unknown offset) is satisfied once a final poll reports its high
-  ; watermark: there may be nothing to read.
+  ; kafka/FinalPolls, except that a final poll reads each key to the high
+  ; watermark it reports as well as to its target (sends of unknown offset
+  ; leave the target short of the end), and that a key whose target is -1
+  ; (written only by such sends) is satisfied by its high watermark alone:
+  ; there may be nothing to read.
   gen/Generator
   (op [this test context]
     (when-not (empty? target-offsets)
@@ -653,14 +655,20 @@
     (if (and (= :ok type) (= :poll f))
       (let [read     (kafka/op->max-offsets event)
             hw       (:hwm event)
-            ; A key is done when this poll read up to its target, or (a
-            ; target of -1: offsets unknown) up to its high watermark.
+            ; A key is done when this poll read up to its target and, when the
+            ; poll reports the key's high watermark, up to that too (a target
+            ; of -1, offsets unknown, needs only the latter). A send inside a
+            ; transaction names no offset, so a target taken from polls can
+            ; sit below records that were acknowledged: a key read past its
+            ; target but short of its end stopped the final polls there, and
+            ; the checker called the rest unseen (campaign 6,
+            ; k-assign-txn-member: key 88 read to offset 83 of 96, the poll cut
+            ; at max.poll.records).
             done?    (fn [k target]
                        (let [r (get read k -1)]
-                         (or (<= 0 target r)
-                             (and (contains? hw k)
-                                  (<= target (get hw k))
-                                  (<= (get hw k) r)))))
+                         (if-let [h (get hw k)]
+                           (<= (max target h) r)
+                           (<= 0 target r))))
             offsets' (reduce-kv (fn [t k target]
                                   (if (done? k target) (dissoc t k) t))
                                 target-offsets

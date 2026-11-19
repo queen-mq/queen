@@ -207,7 +207,16 @@
              (:target-offsets (gen/update fp {} ctx (ev {1 [[0 5] [1 6]]} {1 1, 2 -1}))))))
     (testing "not done while the read stops below the high watermark"
       (is (= {0 3, 1 -1}
-             (:target-offsets (gen/update fp {} ctx (ev {1 [[0 5]]} {1 1, 2 -1}))))))))
+             (:target-offsets (gen/update fp {} ctx (ev {1 [[0 5]]} {1 1, 2 -1}))))))
+    (testing "a key read past its target is not done while the read stops below
+              the high watermark the same poll reports: a transactional send
+              names no offset, so the target can sit below the acknowledged
+              records (campaign 6, k-assign-txn-member: key 88, target 74, read
+              to 83 of 96 by a poll cut at max.poll.records, 13 records unseen)"
+      (is (= {0 3, 1 -1, 2 -1}
+             (:target-offsets (gen/update fp {} ctx (ev {0 [[3 8] [4 9]]} {0 6})))))
+      (is (= {1 -1, 2 -1}
+             (:target-offsets (gen/update fp {} ctx (ev {0 [[5 10] [6 11]]} {0 6}))))))))
 
 (deftest track-committed
   (let [ctx (gctx/context {:concurrency 1})
