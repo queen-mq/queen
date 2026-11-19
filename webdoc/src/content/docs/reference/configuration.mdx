@@ -119,6 +119,10 @@ sourceOfTruth:
 # entry on disk reads as unknown (the leader sends it again). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (a snapshot received while a node starts): raft/mod.rs takes the exit 75 a running node takes for it (stopped_at_open), where the start failed with `FATAL: raft storage failed to open` and exit 1. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (ephemeral hand-over fix, Jepsen W20): ephemeral.rs keeps what the groups of a ring created while partitions may still be moving take until the old owner's ring lands (HANDOVER_HOLD_MS), and a moving ring carries what each group already took (GroupExport.skip); handlers/ephemeral.rs opens that window on a leaving notice, a placement change and at start, and sends `skip` between brokers. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-19 (openraft 0.10.0, ade314497; stale replication session,
+# 400798d13): mod.rs reads the learners with non_write_voter_ids() (the same list under openraft
+# 0.10's name), hands the transport the log, and gains a test-only snapshot helper. Nothing this
+# page states changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

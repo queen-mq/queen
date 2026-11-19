@@ -47,6 +47,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-18 (planner store hand-back, e96d73319): batcher_scheduler.rs: a
 # planning thread drops its clones of the store and of the dedup front before it answers, not
 # after. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-19 (openraft 0.10.0, ade314497; stale replication session,
+# 400798d13): mod.rs reads the learners with non_write_voter_ids() (the same list under openraft
+# 0.10's name), hands the transport the log, and gains a test-only snapshot helper; stream.rs turns
+# openraft 0.10's append results into the answer frames 2.9.0 sends, and back; the frames do not
+# change. Nothing this page states changes.
 ---
 
 The nodes agree on the log with Raft, through the openraft library. Raft decides who leads and when an entry is committed. An entry is committed when a majority of the nodes has written it and synced it to disk (fsync).

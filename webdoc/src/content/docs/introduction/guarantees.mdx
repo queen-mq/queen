@@ -68,6 +68,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-16 (locks.clj): the rule that an `already` answer names a permit its owner was granted is reported but not judged under clock faults, like the lease rule; the failures this page lists do not change.
 # sourceOfTruth re-read 2026-11-16 (ephemeral hand-over fix, Jepsen W20): ephemeral.rs keeps what the groups of a ring created while partitions may still be moving take until the old owner's ring lands (HANDOVER_HOLD_MS), and a moving ring carries what each group already took (GroupExport.skip); handlers/ephemeral.rs opens that window on a leaving notice, a placement change and at start, and sends `skip` between brokers. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-17 (locks.clj): under clock faults, the record of a step answered rolled back with `duplicate` is counted, not judged; the Clocks item already names that answer (a transaction a node relayed while the leader changed, answered rolled back although it committed). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-19 (openraft 0.10.0, ade314497; stale replication session,
+# 400798d13): log_store.rs gains a test-only hold on replication streams, and read_for_replication's
+# comment says a member back on its snapshot answers the stale heartbeat with success. Nothing this
+# page states changes.
 ---
 
 A broker that promises "all or nothing" has to keep the promise exactly when something breaks. We test QueenMQ with Jepsen on five nodes, under kill -9, network partitions, paused processes, clock jumps, power loss and corrupted files. This page says what each API guarantees, what an answered write means, and where the guarantees stop.

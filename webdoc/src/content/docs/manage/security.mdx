@@ -51,6 +51,10 @@ sourceOfTruth:
 # names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
 # states changes.
 # sourceOfTruth re-read 2026-11-16 (36bfde0ea): proxy/src/harden.rs and server/src/main.rs count open, peak, accepted and refused connections for the metrics; the connection caps and refusals this page states do not change.
+# sourceOfTruth re-read 2026-11-19 (openraft 0.10.0, ade314497; stale replication session,
+# 400798d13): network.rs converts append answers to and from openraft 0.10's AppendResult in the
+# 2.9.0 wire form, and ends a replication session at its second request below the purge point; the
+# token check does not change. Nothing this page states changes.
 ---
 
 Out of the box a node authenticates nobody: its port is plain HTTP, and every route answers any caller that can reach it. That keeps the first run to one command, and it is the first thing to change. Put one of two front doors on it (the broker's own JWT for services, or the built-in proxy for API keys and people), keep the raft port private, and encrypt the queues whose payloads must not sit on disk in clear.

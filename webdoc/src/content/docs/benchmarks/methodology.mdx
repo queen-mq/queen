@@ -68,6 +68,10 @@ sourceOfTruth:
 # saves no commit point once a raft log write failed, and at open a commit point past the last
 # entry on disk reads as unknown (the leader sends it again). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (log_store.rs, a test only): no_commit_point_is_saved_once_the_log_writer_failed retries a run in which the failed writer took the group before it down too; the code does not change. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-19 (openraft 0.10.0, ade314497; stale replication session,
+# 400798d13): log_store.rs gains a test-only hold on replication streams, and read_for_replication's
+# comment says a member back on its snapshot answers the stale heartbeat with success. Nothing this
+# page states changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one

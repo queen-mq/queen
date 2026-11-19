@@ -47,6 +47,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-16 (server 2.9.0): server/Cargo.toml's version line says 2.9.0, and it asks
 # for queen-protocol 1.7.0. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (a669d4abc, the map): webdoc/package.json's verify also runs check:map, which the gate sentence now names; webdoc/scripts/check-prose.mjs also reads QueenMap.astro and src/lib/map.ts, which this page does not list.
+# sourceOfTruth re-read 2026-11-19 (openraft 0.10.0, ade314497; stale replication session,
+# 400798d13): Cargo.toml pins openraft 0.10.0 (it was 0.10.0-alpha.37); rust-version stays 1.88, and
+# the server still builds with 1.88.0. Nothing this page states changes.
 ---
 
 QueenMQ is one repository with one Rust binary at its center: the broker, which links the proxy and

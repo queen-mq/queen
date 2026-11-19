@@ -60,6 +60,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-16 (a snapshot received while a node starts): raft/mod.rs takes the exit 75 a running node takes for it (stopped_at_open), where the start failed with `FATAL: raft storage failed to open` and exit 1. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (filtered-group delete): phase2.rs and phase2/admin.rs send each hidden queue's delete as a command of its own (next_command); until now only the first delete of a queue with filtered groups ran. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (ephemeral hand-over fix, Jepsen W20): ephemeral.rs keeps what the groups of a ring created while partitions may still be moving take until the old owner's ring lands (HANDOVER_HOLD_MS), and a moving ring carries what each group already took (GroupExport.skip); handlers/ephemeral.rs opens that window on a leaving notice, a placement change and at start, and sends `skip` between brokers. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-19 (openraft 0.10.0, ade314497; stale replication session,
+# 400798d13): mod.rs reads the learners with non_write_voter_ids() (the same list under openraft
+# 0.10's name), hands the transport the log, and gains a test-only snapshot helper; admin.rs answers
+# openraft 0.10's refusal of a membership change by a leader that has not yet committed an entry of
+# its own term as in_flight (reference/errors.mdx says so). Nothing this page states changes.
 ---
 
 A cluster is three copies of the same broker, each on its own machine, each told where the other two are. Together they keep one log. The leader puts every write in that log and sends it to the others, and a write is answered only when a majority of the nodes (two of three) has it on disk. Any node serves any client: it prepares the work of its own clients and sends the leader only the prepared command.
