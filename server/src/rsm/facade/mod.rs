@@ -1313,9 +1313,12 @@ pub trait Rsm: Send + Sync {
     /// The `/health` raft block (§14.1). Cheap and non-async: a node-local read.
     fn health(&self) -> RaftHealth;
 
-    /// Whether this node leads the raft group that serves `tenant`, now: a
-    /// cheap read for a per-request decision (the Kafka facade pipelines its
-    /// produce only where the push is planned, [`OrderedPush`]).
+    /// Whether this node leads the raft group that serves `tenant`, now, under
+    /// openraft's leader lease: a cheap read for a per-request decision (the
+    /// Kafka facade pipelines its produce only where the push is planned,
+    /// [`OrderedPush`], answers Metadata, Fetch, ListOffsets and the
+    /// coordinator as the leader only where this holds, and drops its groups
+    /// and open transactions when it stops holding).
     fn leads(&self, _tenant: &str) -> bool {
         false
     }

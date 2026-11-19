@@ -2948,6 +2948,21 @@ impl<S: Store + 'static> RaftReplicator<S> {
         }
         quorum_age(&m)
     }
+
+    /// Whether this node leads under openraft's leader lease: a quorum
+    /// acknowledged an RPC it sent within `election_timeout_max`, the time each
+    /// of those voters refuses to vote for another node. Until then no other
+    /// node can be elected; past it one can, while openraft keeps this node
+    /// Leader until a newer term reaches it, which never happens while a
+    /// partition cuts it off. openraft refuses its writes past it too
+    /// ([`SubmitGate`]).
+    pub fn leader_lease_holds(&self) -> bool {
+        let Some(raft) = self.raft.as_ref() else {
+            return false;
+        };
+        let lease = Duration::from_millis(raft.config().election_timeout_max);
+        self.quorum_ack_age().is_some_and(|age| age < lease)
+    }
 }
 
 impl<S: Store + 'static> Drop for RaftReplicator<S> {

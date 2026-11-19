@@ -116,6 +116,13 @@ speaks only those. This is that answer, with the reason each window stops where 
   every partition, and the raft leader leads every partition and coordinates every group and every
   transactional id. Produce, Fetch, ListOffsets and the group and transaction APIs reach the leader;
   another node answers `NOT_LEADER_OR_FOLLOWER` or `NOT_COORDINATOR` and the client asks again.
+  A leader counts as the leader only while a quorum of voters has answered it within the raft leader
+  lease (twice the election timeout, 2 s by default), the time in which no other node can be
+  elected. Why: a leader that a network partition cut off keeps its raft role until the partition
+  heals, but its data stops where the partition began.
+  Without the lease, a consumer that reached it saw no new records. One that asked for an offset past
+  the end of that old data got `OFFSET_OUT_OF_RANGE` and went back to its reset offset. Past the
+  lease, that node answers like any other node, and the client asks again elsewhere.
 - A transactional id nobody used for 7 days is forgotten, as Kafka's
   `transactional.id.expiration.ms` does by default: its next InitProducerId starts it again with a
   new producer id. Each id is coordinated on its own, so a slow commit holds back only its producer.

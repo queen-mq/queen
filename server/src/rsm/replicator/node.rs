@@ -239,6 +239,16 @@ impl<S: Store + 'static> NodeReplicator<S> {
         }
     }
 
+    /// Whether this node leads under openraft's leader lease
+    /// ([`RaftReplicator::leader_lease_holds`]). A local replicator is a single
+    /// node, its own quorum: while it leads.
+    pub fn leader_lease_holds(&self) -> bool {
+        match self {
+            NodeReplicator::Local(r) => Replicator::role(r).is_leader(),
+            NodeReplicator::Raft(r) => r.leader_lease_holds(),
+        }
+    }
+
     /// Where a follower forwards client requests: the leader's HTTP address,
     /// when another node leads. `None` on the leader, on a single node, and
     /// while no leader is known.

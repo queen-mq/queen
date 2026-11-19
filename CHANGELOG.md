@@ -29,6 +29,20 @@ request below the purge point. CI saw it as `an_empty_member_gets_the_whole_stat
 failing now and then; a test now holds the leader's stream across exactly that, and fails every
 time without the fix.
 
+**Kafka facade: a leader cut off from the others stops answering as the leader.** When a network
+partition cut the raft leader off, it went on calling itself the leader to the Kafka clients that
+still reached it, until the partition healed: raft keeps a leader in its role until it hears of a
+newer term, and none reaches it. Its state stopped where the partition began, while the leader
+elected on the other side went on. So a consumer that had read further on the new leader, and then
+took its metadata from the old one, fetched past the end of that old state, was answered
+`OFFSET_OUT_OF_RANGE`, and went back to the offset `auto.offset.reset` names (`earliest`: the
+start of the partition). Nothing was lost or changed, but the consumer read everything again. A node
+now counts as the leader for Kafka clients only while a quorum has acknowledged it within raft's
+leader lease (twice `QUEEN_RAFT_ELECTION_MS`, 2 s by default), the time in which no other node can
+be elected and past which raft refuses its writes too: past it, Metadata names no leader, Fetch and
+Produce answer `NOT_LEADER_OR_FOLLOWER`, and the client asks another node. Jepsen's Kafka workload
+found it, once in a campaign, under a partition that cut the leader off.
+
 ## JS client 2.9.2 - 2026-11-18
 
 **JS client: it works on Node 26.** On Node 26 the JS client up to 2.9.1 sent no request at all:

@@ -7700,11 +7700,20 @@ impl Rsm for RaftFacade {
         }
     }
 
+    /// The role alone is not enough: openraft keeps a leader that a partition
+    /// cut off from the others in its role until a newer term reaches it, and
+    /// its state stops there while the new leader goes on. Its Kafka clients
+    /// read that state (a fetch past its end answered OFFSET_OUT_OF_RANGE, and
+    /// the consumer went back to its reset offset). Under openraft's leader
+    /// lease it stops leading before another node can be elected, and its
+    /// clients ask another node. That lease, not the engine's shorter one: a
+    /// node that stops leading drops its Kafka groups and open transactions,
+    /// which a leader whose quorum answered a moment late must not.
     fn leads(&self, _tenant: &str) -> bool {
         matches!(
             self.repl.role(),
             crate::rsm::replicator::Role::Leader { .. }
-        )
+        ) && self.repl.leader_lease_holds()
     }
 
     fn leader_node(&self, _tenant: &str) -> Option<u64> {
