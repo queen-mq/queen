@@ -48,7 +48,7 @@ use openraft::errors::{
 use openraft::network::v2::RaftNetworkV2;
 use openraft::network::{stream_append_sequential, RPCOption, RaftNetworkFactory};
 use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, StreamAppendResult,
+    AppendEntriesRequest, AppendEntriesResponse, AppendResult, SnapshotResponse,
     TransferLeaderRequest, TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 use openraft::OptionalSend;
@@ -90,7 +90,7 @@ impl RaftNetworkV2<TypeConfig> for NoPeer {
         &mut self,
         _rpc: AppendEntriesRequest<TypeConfig>,
         _option: RPCOption,
-    ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
+    ) -> Result<AppendResult<TypeConfig>, RPCError<TypeConfig>> {
         Err(no_peer())
     }
 
@@ -480,7 +480,7 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
     ) -> BoxFuture<
         's,
         Result<
-            BoxStream<'s, Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>>,
+            BoxStream<'s, Result<AppendResult<TypeConfig>, RPCError<TypeConfig>>>,
             RPCError<TypeConfig>,
         >,
     >
@@ -521,7 +521,7 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
         option: RPCOption,
-    ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
+    ) -> Result<AppendResult<TypeConfig>, RPCError<TypeConfig>> {
         let zstd = self.reads_zstd && wire::zstd_from_env() && !rpc.entries.is_empty();
         if zstd {
             wire::prepare_zstd(&rpc).await.map_err(|e| {
@@ -533,8 +533,13 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
             tracing::error!(target: "rsm", target_node = self.target, error = %e, "raft append does not encode");
             RPCError::Network(NetworkError::new(&e))
         })?;
-        let cut = n < rpc.entries.len();
-        let last_sent = n.checked_sub(1).map(|i| rpc.entries[i].log_id);
+        // The last entry this request carries (a heartbeat: its prev_log_id);
+        // under MAX_APPEND_BYTES only a prefix goes, and openraft sends the
+        // rest next.
+        let last_sent = n
+            .checked_sub(1)
+            .map(|i| rpc.entries[i].log_id)
+            .or(rpc.prev_log_id);
         let ttl = append_ttl(option.soft_ttl(), n, body.len());
         // Every append — heartbeats included — carries the leader's members
         // view: the liveness evidence and the view of it travel together
@@ -561,13 +566,10 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
         if n > 0 {
             super::state_machine::stage_add(6, t_rpc.elapsed());
         }
+        // The wire keeps the answer 2.9.0 sends (no conflict hint): a success
+        // acknowledges what this request carried.
         match res {
-            // The request was cut at MAX_APPEND_BYTES: report how far it got,
-            // openraft sends the rest next.
-            Ok(AppendEntriesResponse::Success) if cut => {
-                Ok(AppendEntriesResponse::PartialSuccess(last_sent))
-            }
-            Ok(r) => Ok(r),
+            Ok(r) => Ok(r.into_append_result(rpc.prev_log_id, last_sent)),
             Err(e) => Err(self.remote(e)),
         }
     }
@@ -647,7 +649,7 @@ mod server {
     use axum::response::{IntoResponse, Response};
     use axum::routing::post;
     use openraft::errors::RaftError;
-    use openraft::raft::{TransferLeaderRequest, VoteRequest};
+    use openraft::raft::{AppendEntriesResponse, TransferLeaderRequest, VoteRequest};
 
     use super::super::cluster::TOKEN_HEADER;
     use super::super::snapshot::RecvCtx;
@@ -834,7 +836,13 @@ mod server {
         };
         let has_entries = !req.entries.is_empty();
         let t1 = std::time::Instant::now();
-        let res = st.raft.append_entries(req).await;
+        // Answered in the format 2.9.0 reads: the acknowledged log id is the
+        // request's own last one, and the conflict hint is dropped.
+        let res = st
+            .raft
+            .append_entries(req)
+            .await
+            .map(AppendEntriesResponse::<TypeConfig>::from);
         if has_entries {
             crate::rsm::replicator::raft::state_machine::stage_add(4, t1.duration_since(t0));
             crate::rsm::replicator::raft::state_machine::stage_add(5, t1.elapsed());

@@ -3,6 +3,22 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Server: openraft 0.10.0.** The consensus library moves from the 0.10.0-alpha.37 prerelease to
+the 0.10.0 release, pinned exactly as before. It brings the fixes openraft made in between; three of
+them are on paths QueenMQ takes, all needing rare timing that no Jepsen campaign showed: a stale
+replication stream could send an old term's entries with a later commit point, a late reply on a
+pipelined stream could confirm a linearizable read for a leader already replaced, and two membership
+changes made from one configuration in two terms could both commit. The frames between nodes keep
+their 2.9.0 form, so nodes of this release and 2.9.0 nodes replicate to each other during a rolling
+restart (the conflict hint 0.10.0 adds to append answers is not sent). Two things behave
+differently. A leader elected a moment ago refuses a membership change until it has committed an
+entry of its own term; the refusal is `409 in_flight`, as for a change in progress: retry it. And
+while the cluster runs both releases, a leadership transfer between a node of each, the hand-off on
+SIGTERM among them, counts as an ordinary election, which can wait up to an election timeout for
+the old leader's lease to run out.
+
 ## JS client 2.9.2 - 2026-11-18
 
 **JS client: it works on Node 26.** On Node 26 the JS client up to 2.9.1 sent no request at all:

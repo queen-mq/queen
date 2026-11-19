@@ -310,7 +310,7 @@ pub(crate) fn status(m: &Metrics, members: &MembersState, ctx: &AdminCtx) -> Mem
         .map(|c| c.iter().copied().collect())
         .collect();
     let voters: BTreeSet<NodeId> = mem.voter_ids().collect();
-    let learners: Vec<NodeId> = mem.learner_ids().collect();
+    let learners: Vec<NodeId> = mem.non_write_voter_ids().collect();
     let mlog = *m.membership_config.log_id();
     let committed = m.local_committed;
     let membership_committed = mlog <= committed;
@@ -515,7 +515,7 @@ fn plan(m: &Metrics, ctx: &AdminCtx, change: &MembershipChange) -> Result<Plan, 
     let mem = m.membership_config.membership();
     let joint = mem.get_joint_config();
     let voters: BTreeSet<NodeId> = mem.voter_ids().collect();
-    let learners: BTreeSet<NodeId> = mem.learner_ids().collect();
+    let learners: BTreeSet<NodeId> = mem.non_write_voter_ids().collect();
     let mlog = *m.membership_config.log_id();
     if mlog > m.local_committed {
         return Err(ReplError::refused(
@@ -877,7 +877,11 @@ fn check_kinds_reported(
     cluster: u32,
     change: &MembershipChange,
 ) -> Result<(), ReplError> {
-    let learners: BTreeSet<NodeId> = m.membership_config.membership().learner_ids().collect();
+    let learners: BTreeSet<NodeId> = m
+        .membership_config
+        .membership()
+        .non_write_voter_ids()
+        .collect();
     let promoted: Vec<NodeId> = match change {
         MembershipChange::Promote { nodes, .. } => nodes.clone(),
         MembershipChange::SetVoters { voters, .. } => voters.clone(),
@@ -926,6 +930,11 @@ fn map_write_error(e: RaftError<TypeConfig, ClientWriteError<TypeConfig>>) -> Re
         RaftError::APIError(ClientWriteError::ChangeMembershipError(c)) => {
             let code = match &c {
                 openraft::errors::ChangeMembershipError::InProgress(_) => "in_flight",
+                // A new leader has not committed its own blank entry yet:
+                // openraft 0.10 refuses every change until it has (two
+                // changes from one parent in different terms could both
+                // commit). Retryable, as a change in flight is.
+                openraft::errors::ChangeMembershipError::UncommittedLeaderLog(_) => "in_flight",
                 openraft::errors::ChangeMembershipError::EmptyMembership(_) => "last_voter",
                 openraft::errors::ChangeMembershipError::LearnerNotFound(_) => "not_a_learner",
                 _ => "membership_invalid",

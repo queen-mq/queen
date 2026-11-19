@@ -2254,7 +2254,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
         let mc = m.membership_config.membership();
         let voters: std::collections::BTreeSet<NodeId> = mc.voter_ids().collect();
         let mut ids: Vec<NodeId> = voters.iter().copied().collect();
-        ids.extend(mc.learner_ids());
+        ids.extend(mc.non_write_voter_ids());
         ids.sort_unstable();
         ids.dedup();
         let members = ids
@@ -3378,7 +3378,7 @@ impl<S: Store + 'static> Replicator for RaftReplicator<S> {
                 let mc = m.membership_config.membership();
                 Membership {
                     voters: mc.voter_ids().collect(),
-                    learners: mc.learner_ids().collect(),
+                    learners: mc.non_write_voter_ids().collect(),
                 }
             }
             None => Membership::single(self.shared.node_id),

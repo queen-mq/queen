@@ -26,7 +26,8 @@
 //! `append` is exactly the unary route's body ([`super::wire`]), `members` the
 //! leader's members view the unary route carries in a header
 //! ([`super::members`]), and the answer is the follower's
-//! `Result<StreamAppendResult, fatal message>`.
+//! `Result<StreamAppendResult, fatal message>`: openraft's `AppendResult` in
+//! the format 2.9.0 sends, without the conflict hint openraft 0.10 added.
 //!
 //! # Sessions
 //!
@@ -71,7 +72,9 @@ use bytes::{Buf, BufMut, BytesMut};
 use futures_util::{Stream, StreamExt};
 use http_body_util::BodyExt;
 use openraft::errors::{NetworkError, RPCError, Unreachable};
-use openraft::raft::{AppendEntriesRequest, StreamAppendResult};
+use openraft::raft::{
+    AppendEntriesRequest, AppendError, AppendResult, StreamAppendError, StreamAppendResult,
+};
 #[cfg(test)]
 use openraft::EntryPayload;
 use tokio::sync::mpsc;
@@ -532,7 +535,7 @@ pub(crate) struct Session<'c, S> {
     done: bool,
 }
 
-type Item = Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>;
+type Item = Result<AppendResult<TypeConfig>, RPCError<TypeConfig>>;
 
 fn net_err(m: impl Into<String>) -> RPCError<TypeConfig> {
     RPCError::Network(NetworkError::new(&io::Error::other(m.into())))
@@ -636,7 +639,7 @@ where
                         // both sides; the connection stays good.
                         Ok(Err(e)) => {
                             self.done = true;
-                            return Some(Ok(Err(e)));
+                            return Some(Ok(Err(AppendError::from(e))));
                         }
                         Err(fatal) => {
                             return self.fail(RPCError::Unreachable(Unreachable::new(
@@ -861,7 +864,7 @@ pub(crate) async fn serve<S: crate::rsm::store::Store + 'static>(
 /// Write one session's answers, in order, until they end.
 async fn answer(
     session: u64,
-    answers: impl Stream<Item = Result<StreamAppendResult<TypeConfig>, openraft::errors::Fatal<TypeConfig>>>
+    answers: impl Stream<Item = Result<AppendResult<TypeConfig>, openraft::errors::Fatal<TypeConfig>>>
         + Send
         + 'static,
     mut sent: mpsc::UnboundedReceiver<(Instant, bool)>,
@@ -874,7 +877,9 @@ async fn answer(
                 super::state_machine::stage_add(5, at.elapsed());
             }
         }
-        let a: Answer = r.map_err(|f| f.to_string());
+        let a: Answer = r
+            .map(|r| r.map_err(StreamAppendError::from))
+            .map_err(|f| f.to_string());
         let end = !matches!(a, Ok(Ok(_)));
         if out.send(answer_frame(session, &a)).await.is_err() || end {
             return;

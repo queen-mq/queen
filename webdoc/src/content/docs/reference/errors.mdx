@@ -319,7 +319,8 @@ every route answers 404 `not_found`; a wrong token answers 401 `unauthorized`, a
 `learner_behind`, `already_voter`, `address_mismatch`, `membership_changed` and `leader_changed`;
 503 for `leader_unreachable`; and 504 `timeout` when the deadline (`?timeoutMs=`, default 30 s)
 passed, in which case the leader goes on with the change and refuses another (`in_flight`) until it
-ends, so read the membership before repeating it. A
+ends, so read the membership before repeating it. A leader elected a moment ago answers `in_flight`
+too, until it has committed an entry of its own term: retry. A
 request that carries a tenant answers 403 `forbidden`: the membership belongs to the whole cluster.
 See [cluster](/manage/docker/).
 

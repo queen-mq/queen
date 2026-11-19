@@ -170,12 +170,12 @@ heed = { version = "0.22", default-features = false }
 # Consensus: openraft supplies the Raft protocol ONLY (elections, terms, commit
 # rules, membership). Its log storage is implemented on the queue logs
 # (rsm/replicator/raft/log_store.rs): no raft-log, no second write-ahead log.
-# Pin the prerelease and its runtime crates together to prevent alpha API drift.
-openraft = { version = "=0.10.0-alpha.37", features = ["serde", "type-alias"] }
-# Keep transitive prerelease dependencies on the same API version.
-openraft-macros = "=0.10.0-alpha.37"
-openraft-rt = "=0.10.0-alpha.37"
-openraft-rt-tokio = "=0.10.0-alpha.37"
+# Pinned exactly, with its runtime crates: a consensus upgrade is a reviewed
+# change (wire frames, Jepsen), never a side effect of `cargo update`.
+openraft = { version = "=0.10.0", features = ["serde", "type-alias"] }
+openraft-macros = "=0.10.0"
+openraft-rt = "=0.10.0"
+openraft-rt-tokio = "=0.10.0"
 futures-util = "0.3"
 # The segment index of a SEALED segment file (§6.1 amendment, §11.2): one
 # immutable `.qidx` beside the file, binary-searched in place. mmap is what
