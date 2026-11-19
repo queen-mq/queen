@@ -166,6 +166,13 @@ sourceOfTruth:
 # raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
 # quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-19 (a transaction waits for a held cursor; Kafka commits the
+# broker asks to retry): facade/intake.rs prepares a transaction refused `reserved` again on the
+# leader until 100 ms before its deadline; consume/mod.rs names the code (RESERVED), which
+# consume/txn.rs and ack.rs use, and consume/txn.rs counts a position's acks once its cursor is
+# reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
+# commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
+# Nothing this page states changes.
 ---
 
 Your job classes do not change: they implement `ShouldQueue`, keep their middleware, `tries`, `backoff` and failure events, and `queue:work` still runs them. What changes is where a job waits and what holds it while it runs. This page follows one job through QueenMQ, one idea at a time, with what Horizon does at the same point. The settings of each idea close its section ([configuration reference](/integrations/laravel/configuration/)).

@@ -28,6 +28,13 @@ sourceOfTruth:
 # names gain headers, link frames, reading queues, filtered groups and `link`. Nothing this page
 # states changes.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): planner/txn.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-19 (a transaction waits for a held cursor; Kafka commits the
+# broker asks to retry): facade/intake.rs prepares a transaction refused `reserved` again on the
+# leader until 100 ms before its deadline; consume/mod.rs names the code (RESERVED), which
+# consume/txn.rs and ack.rs use, and consume/txn.rs counts a position's acks once its cursor is
+# reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
+# commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
+# Nothing this page states changes.
 ---
 
 For building applications, QueenMQ is the better choice: services that handle events per customer, order or conversation, microservices that hand work to each other, and steps that have to commit whole. The one exception is a firehose of millions of messages a second on up to some thousands of partitions, where Kafka and Pulsar are ahead.
