@@ -22,8 +22,9 @@ use tokio::sync::oneshot;
 
 use super::RsmError;
 use crate::rsm::batcher::{Command, CommandTx, Reply, Submission};
-use crate::rsm::consume::{Engine, Served};
+use crate::rsm::consume::{Engine, Served, RESERVED};
 use crate::rsm::effect::Effect;
+use crate::rsm::entry::RequestId;
 use crate::rsm::planner::txn::TxnCommand;
 use crate::rsm::planner::{EffectsCommand, Refusal};
 
@@ -104,15 +105,17 @@ pub(super) async fn submit_here(
         Command::Transaction(t) if has_consumption_half(&t) && engine.recorded(&t.request_id) => {
             Command::Transaction(t)
         }
-        Command::Transaction(t) if has_consumption_half(&t) => match prepare(engine, t) {
-            Ok(c) => c,
-            // This node stopped leading: the caller takes the transaction to
-            // whoever leads now, as it does a batcher's `Retry`.
-            Err(refusal) if refusal.retryable && refusal.code == "not_leader" => {
-                return Ok(Reply::Retry { hint: None })
+        Command::Transaction(t) if has_consumption_half(&t) => {
+            match prepare(engine, t, deadline).await {
+                Ok(c) => c,
+                // This node stopped leading: the caller takes the transaction to
+                // whoever leads now, as it does a batcher's `Retry`.
+                Err(refusal) if refusal.retryable && refusal.code == "not_leader" => {
+                    return Ok(Reply::Retry { hint: None })
+                }
+                Err(refusal) => return Ok(Reply::Refused(refusal)),
             }
-            Err(refusal) => return Ok(Reply::Refused(refusal)),
-        },
+        }
         other => other,
     };
     let mut command = command;
@@ -140,8 +143,42 @@ pub(super) async fn submit_here(
 /// creates (their pids are its to allocate) in the same entry. The planner
 /// (planner/txn.rs) refuses any other consumption leg and records
 /// `engine_acks` as its outcome's acks.
-fn prepare(engine: &Engine, mut t: TxnCommand) -> Result<Command, Refusal> {
-    if let Some(part) = engine.txn_prepare(&t, engine.now_us())? {
+///
+/// A cursor somebody else holds ([`RESERVED`]: another transaction reserved
+/// it, or a checkpoint still carries its last change) is held for one commit,
+/// and the refusal reserved nothing of this transaction: the engine prepares
+/// it again, here on the leader, until `deadline` less
+/// [`RESERVED_ANSWER_MARGIN`], waiting [`RESERVED_FIRST_WAIT`] first and twice
+/// as long each time after, up to [`RESERVED_LONGEST_WAIT`]. Only a cursor
+/// held for that whole time is answered `reserved`: a definite refusal,
+/// nothing written. Answered at once, it reached every caller of a
+/// transaction that met another one on its cursor, though the docs tell them
+/// to send it again (2026-11-19: Kafka transactions that commit one group's
+/// offsets on the same partitions; the facade turned the refusal into a fatal
+/// `INVALID_TXN_STATE`, and a JS worker's handler throws it and nacks its
+/// message).
+async fn prepare(
+    engine: &Engine,
+    mut t: TxnCommand,
+    deadline: Instant,
+) -> Result<Command, Refusal> {
+    let mut wait = RESERVED_FIRST_WAIT;
+    let mut round = 0usize;
+    let part = loop {
+        match engine.txn_prepare(&t, engine.now_us()) {
+            Err(r) if r.retryable && r.code == RESERVED => {
+                let nap = jittered(wait, &t.request_id, round);
+                if Instant::now() + nap + RESERVED_ANSWER_MARGIN >= deadline {
+                    return Err(r);
+                }
+                tokio::time::sleep(nap).await;
+                wait = (wait * 2).min(RESERVED_LONGEST_WAIT);
+                round += 1;
+            }
+            other => break other?,
+        }
+    };
+    if let Some(part) = part {
         t.acks.clear();
         t.positional_acks.clear();
         t.positions = part.planner_positions;
@@ -149,6 +186,31 @@ fn prepare(engine: &Engine, mut t: TxnCommand) -> Result<Command, Refusal> {
         t.engine_acks = part.acks;
     }
     Ok(Command::Transaction(t))
+}
+
+/// The first wait of a transaction whose cursor somebody else holds
+/// ([`prepare`]): a checkpoint is cut every 5 ms and commits within a few,
+/// and another transaction's entry within one commit, so the first try again
+/// usually finds the cursor free.
+const RESERVED_FIRST_WAIT: Duration = Duration::from_millis(2);
+
+/// The longest wait between two tries of a transaction whose cursor
+/// somebody else holds: many transactions on one cursor take it one commit
+/// each, and a free cursor is seen within this.
+const RESERVED_LONGEST_WAIT: Duration = Duration::from_millis(50);
+
+/// How much earlier than its deadline a transaction whose cursor somebody
+/// else holds stops trying: its refusal still has to reach the caller, and a
+/// follower that forwarded it waits on the same budget, before they give up
+/// on it and call the outcome unknown.
+const RESERVED_ANSWER_MARGIN: Duration = Duration::from_millis(100);
+
+/// `wait` less up to half of it, by one of the request id's random bytes
+/// (a uuidv7's last eight): transactions that met one held cursor at the
+/// same moment do not all try it again at the same moment.
+fn jittered(wait: Duration, id: &RequestId, round: usize) -> Duration {
+    let b = u32::from(id[8 + round % 8]);
+    wait - wait * b / 512
 }
 
 /// An answer the engine gives later (a held long-poll, or a claim or an ack

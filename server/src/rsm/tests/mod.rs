@@ -43,6 +43,10 @@
 //!   Kafka facade answers as the leader) once openraft's leader lease runs
 //!   out, while openraft still calls it leader, and a node leads again with a
 //!   quorum.
+//! - [`txn_reserved`] a transaction whose cursor another transaction or a
+//!   checkpoint holds waits on the leader until its deadline, and commits
+//!   once the hold ends; held to the deadline, it is refused `reserved`
+//!   with nothing written; sent to a follower, it waits the same way.
 //! - [`traces`] traces on disk (`PLAN_TRACES_ON_DISK.md`): apply into the
 //!   trace environment, exactly once across a crash replay, bounded trims,
 //!   the tenant purge, two nodes to one digest, a snapshot's catch-up, the
@@ -110,4 +114,5 @@ mod timers;
 mod timers_crash;
 mod traces;
 mod txn_reads;
+mod txn_reserved;
 mod txns_refill;

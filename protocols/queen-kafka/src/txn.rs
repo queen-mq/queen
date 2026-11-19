@@ -25,6 +25,11 @@
 //! records were held by the old one and are lost: that transaction can only
 //! abort (`INVALID_TXN_STATE` to anything else). `token` names the transaction,
 //! so a commit whose answer was lost is recognized when the client retries it.
+//! A commit the broker refuses with a reason that means "retry" (`reserved`:
+//! another transaction or a checkpoint held one of its positions for the
+//! broker's whole wait; `unavailable`) wrote nothing: the transaction stays
+//! open, and EndTxn answers `CONCURRENT_TRANSACTIONS`, which every client
+//! sends again on its own.
 //!
 //! The row expires a week after its last write, as Kafka forgets an id after
 //! `transactional.id.expiration.ms`. In memory each id has its own lock, so a
@@ -675,6 +680,20 @@ impl Txns {
                 t.stage = Stage::Ready;
                 PRODUCER_FENCED
             }
+            Ok(Committed::Busy(why)) => {
+                // Nothing was written, and the same commit can land: the
+                // transaction stays open with its records, and the client
+                // sends its EndTxn again on CONCURRENT_TRANSACTIONS, as every
+                // Kafka client does. Answered INVALID_TXN_STATE, a refusal the
+                // broker asks to retry killed the producer (fatal in the Java
+                // client): ten producers committing one group's offsets on the
+                // same partitions met it in Jepsen.
+                tracing::debug!(target: "kafka", %tid, %why, "a transaction commit met a busy cursor; held for the retry");
+                if let Stage::Open(o) = &mut t.stage {
+                    o.committing = false;
+                }
+                CONCURRENT_TRANSACTIONS
+            }
             Ok(Committed::Refused(why)) => {
                 tracing::warn!(target: "kafka", %tid, %why, "a transaction commit was refused; it is aborted");
                 self.held.fetch_sub(open.bytes as u64, Ordering::Relaxed);
@@ -770,6 +789,289 @@ pub enum Committed {
     },
     /// The fence's precondition was lost: nothing was written.
     Fenced,
+    /// Refused, nothing written, and the same commit can land a moment later:
+    /// another transaction or a checkpoint held a cursor it positions for the
+    /// broker's whole wait (`reserved`), or the leader could not read the
+    /// state it needs (`unavailable`).
+    Busy(String),
     /// Refused for another reason (a body too large, a bad record).
     Refused(String),
+}
+
+#[cfg(test)]
+mod tests {
+    //! The coordinator against a broker that answers from a script: its KV
+    //! rows held in memory, its transactions answered in order.
+
+    use super::*;
+    use crate::core::{
+        BoxFuture, Broker, ClusterView, FetchEntry, LocalAnswer, LocalRequest, LocalResponse,
+        OrderedLocal, Permit, RawFetched,
+    };
+
+    /// What the broker answers a transaction.
+    enum Answer {
+        /// Refused with this reason, nothing written.
+        Refuse(&'static str),
+        /// Committed: the fence lands as a KV write would.
+        Commit,
+    }
+
+    #[derive(Default)]
+    struct State {
+        rows: HashMap<String, (Value, i64)>,
+        version: i64,
+        script: std::collections::VecDeque<Answer>,
+        /// Every transaction body sent, in order.
+        sent: Vec<Value>,
+    }
+
+    struct Scripted(Mutex<State>);
+
+    impl Scripted {
+        fn new(script: Vec<Answer>) -> Arc<Scripted> {
+            Arc::new(Scripted(Mutex::new(State {
+                script: script.into(),
+                ..State::default()
+            })))
+        }
+
+        fn sent(&self) -> Vec<Value> {
+            self.0.lock().unwrap().sent.clone()
+        }
+
+        /// A put at `expect` (0: absent): the new version, or `None` when
+        /// the row is at another one.
+        fn put(st: &mut State, key: &str, value: &Value, expect: i64) -> Option<i64> {
+            let at = st.rows.get(key).map_or(0, |(_, v)| *v);
+            if at != expect {
+                return None;
+            }
+            st.version += 1;
+            st.rows.insert(key.to_string(), (value.clone(), st.version));
+            Some(st.version)
+        }
+
+        fn kv(st: &mut State, body: &Value) -> Value {
+            let mut results = Vec::new();
+            for (index, op) in body["operations"]
+                .as_array()
+                .expect("ops")
+                .iter()
+                .enumerate()
+            {
+                match op["op"].as_str() {
+                    Some("getMany") => {
+                        let rows: Vec<Value> = op["keys"]
+                            .as_array()
+                            .expect("keys")
+                            .iter()
+                            .filter_map(|k| {
+                                let k = k.as_str().expect("key");
+                                st.rows
+                                    .get(k)
+                                    .map(|(v, ver)| json!({"key": k, "value": v, "version": ver}))
+                            })
+                            .collect();
+                        results.push(json!({"index": index, "rows": rows}));
+                    }
+                    Some("put") => {
+                        let key = op["key"].as_str().expect("key");
+                        let expect = op["expect"].as_i64().expect("a conditional put");
+                        match Self::put(st, key, &op["value"], expect) {
+                            Some(v) => {
+                                results.push(json!({"index": index, "applied": true, "version": v}))
+                            }
+                            None => results.push(json!({"index": index, "applied": false})),
+                        }
+                    }
+                    other => panic!("an op this script does not answer: {other:?}"),
+                }
+            }
+            json!({"ok": true, "results": results})
+        }
+
+        fn transaction(st: &mut State, body: &Value) -> Value {
+            st.sent.push(body.clone());
+            match st
+                .script
+                .pop_front()
+                .expect("a transaction the script did not plan")
+            {
+                Answer::Refuse(reason) => json!({
+                    "transactionId": "t",
+                    "success": false,
+                    "reason": reason,
+                    "error": "scripted refusal",
+                    "results": [],
+                }),
+                Answer::Commit => {
+                    let fence = &body["kv"][0];
+                    let v = Self::put(
+                        st,
+                        fence["key"].as_str().expect("fence key"),
+                        &fence["value"],
+                        fence["expect"].as_i64().expect("fence expect"),
+                    )
+                    .expect("the fence holds");
+                    json!({
+                        "transactionId": "t",
+                        "success": true,
+                        "results": [{"type": "kv", "version": v}],
+                    })
+                }
+            }
+        }
+    }
+
+    impl Broker for Scripted {
+        fn call(&self, req: LocalRequest) -> BoxFuture<'static, Result<LocalResponse, String>> {
+            let body: Value =
+                serde_json::from_str(req.body.as_deref().unwrap_or("{}")).expect("JSON");
+            let mut st = self.0.lock().unwrap();
+            let answer = match req.path.as_str() {
+                "/api/v1/kv" => Self::kv(&mut st, &body),
+                "/api/v1/transaction" => Self::transaction(&mut st, &body),
+                other => panic!("a route this script does not answer: {other}"),
+            };
+            Box::pin(async move {
+                Ok(LocalResponse {
+                    status: 200,
+                    retry_after: None,
+                    body: answer.to_string(),
+                })
+            })
+        }
+
+        fn push(&self, _: Option<String>, _: Vec<RawPush>, _: Option<Permit>) -> OrderedLocal {
+            unreachable!("a transaction pushes through its commit")
+        }
+
+        fn fetch(
+            &self,
+            _: Option<String>,
+            _: Vec<FetchEntry>,
+            _: i64,
+            _: i64,
+            _: Option<i64>,
+        ) -> BoxFuture<'static, Result<LocalAnswer<Vec<RawFetched>>, String>> {
+            unreachable!("the coordinator does not fetch")
+        }
+
+        fn cluster(&self) -> ClusterView {
+            ClusterView {
+                node_id: 1,
+                leader: Some(1),
+                nodes: Vec::new(),
+            }
+        }
+    }
+
+    const TID: &str = "jepsen-txn-5";
+
+    /// A producer whose transaction holds one record and one offset of its
+    /// consumer group, as a consume-transform-produce step does, up to its
+    /// EndTxn.
+    async fn open_one(txns: &Txns) -> (i64, i16) {
+        let (pid, epoch) = txns.init(None, TID, 15_000, (-1, -1)).await.expect("init");
+        let parts = [("out".to_string(), 0)];
+        assert_eq!(
+            txns.add_partitions(None, TID, pid, epoch, &parts).await,
+            NONE
+        );
+        let record = RawPush {
+            queue: "out".into(),
+            partition: "0".into(),
+            payload: br#"{"n":1}"#.to_vec(),
+            txn: None,
+        };
+        let staged = txns
+            .stage_records(None, TID, pid, epoch, ("out", 0), vec![record])
+            .await;
+        assert_eq!(staged, NONE);
+        assert_eq!(txns.add_offsets(None, TID, pid, epoch, "g").await, NONE);
+        let offset = PositionOp {
+            queue: "in".into(),
+            partition: "0".into(),
+            group: "g".into(),
+            offset: Some(7),
+            metadata: String::new(),
+        };
+        assert_eq!(
+            txns.stage_offsets(None, TID, pid, epoch, vec![offset])
+                .await,
+            NONE
+        );
+        (pid, epoch)
+    }
+
+    /// A commit the broker asks to retry (another transaction or a checkpoint
+    /// held a cursor it positions for the broker's whole wait, or the leader
+    /// could not read its state) stays open, its records and offsets held,
+    /// and lands when the client sends its EndTxn again. Answered
+    /// INVALID_TXN_STATE before, the Java producer it reached was dead.
+    #[tokio::test]
+    async fn a_commit_the_broker_asks_to_retry_lands_on_the_retry() {
+        for reason in ["reserved", "unavailable"] {
+            let broker = Scripted::new(vec![Answer::Refuse(reason), Answer::Commit]);
+            let txns = Txns::new(Queen::new(broker.clone()));
+            let (pid, epoch) = open_one(&txns).await;
+
+            assert_eq!(
+                txns.end(None, TID, pid, epoch, true).await,
+                CONCURRENT_TRANSACTIONS,
+                "{reason}: answered as a retry the client makes on its own"
+            );
+            assert_eq!(
+                txns.end(None, TID, pid, epoch, true).await,
+                NONE,
+                "{reason}"
+            );
+            let sent = broker.sent();
+            assert_eq!(sent.len(), 2, "{reason}");
+            assert_eq!(
+                sent[0], sent[1],
+                "{reason}: the retry carries the same commit"
+            );
+            assert_eq!(
+                sent[1]["operations"][0]["items"][0]["payload"],
+                json!({"n": 1})
+            );
+            assert_eq!(sent[1]["positions"][0]["offset"], 7);
+
+            // Done: an EndTxn sent again (its answer lost) is answered from
+            // what landed, and nothing is sent.
+            assert_eq!(
+                txns.end(None, TID, pid, epoch, true).await,
+                NONE,
+                "{reason}"
+            );
+            assert_eq!(broker.sent().len(), 2, "{reason}");
+            assert_eq!(
+                txns.held.load(Ordering::Relaxed),
+                0,
+                "{reason}: nothing held"
+            );
+        }
+    }
+
+    /// A commit the broker refuses for good is aborted, its records dropped:
+    /// the client is told its transaction is gone.
+    #[tokio::test]
+    async fn a_commit_refused_for_good_is_aborted() {
+        let broker = Scripted::new(vec![Answer::Refuse("too_large")]);
+        let txns = Txns::new(Queen::new(broker.clone()));
+        let (pid, epoch) = open_one(&txns).await;
+
+        assert_eq!(
+            txns.end(None, TID, pid, epoch, true).await,
+            INVALID_TXN_STATE
+        );
+        assert_eq!(broker.sent().len(), 1);
+        assert_eq!(
+            txns.held.load(Ordering::Relaxed),
+            0,
+            "its records are dropped"
+        );
+    }
 }

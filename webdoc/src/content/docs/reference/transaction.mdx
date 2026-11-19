@@ -99,6 +99,13 @@ sourceOfTruth:
 # raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
 # quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-19 (a transaction waits for a held cursor; Kafka commits the
+# broker asks to retry): facade/intake.rs prepares a transaction refused `reserved` again on the
+# leader until 100 ms before its deadline; consume/mod.rs names the code (RESERVED), which
+# consume/txn.rs and ack.rs use, and consume/txn.rs counts a position's acks once its cursor is
+# reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
+# commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
+# The `reserved` row of the reasons table says so.
 ---
 
 `POST /api/v1/transaction` is the call QueenMQ was built around. It writes a worker's whole step
@@ -420,7 +427,7 @@ A lost `required` KV operation adds the operation that lost:
 | `kv_check_needs_cluster_version_5` | 503 | The transaction carries a `check` and a node of the cluster still runs a release without it. | Retry once the upgrade is done. |
 | `duplicate` | 200 | A pushed item's `transactionId` is already in its partition, inside the queue's `dedupWindowSeconds`. | The step already happened. Ack the input on its own; do not retry. |
 | `rejected_ack` | 200 | A fenced ack's lease is not the partition's live lease, or its message is outside the leased batch; an ack's message is not found after the cursor; or the `partitionId` is unknown or belongs to another tenant. | Do not retry: the message is redelivered to whoever holds it, or was already done. |
-| `reserved` | 200 | Another transaction, or the engine's checkpoint, holds a cursor this transaction acks or positions. | Retry. |
+| `reserved` | 200 | Another transaction, or the engine's checkpoint, held a cursor this transaction acks or positions for the whole wait. A hold lasts one commit, so the leader tries the transaction again (2 ms first, doubling up to 50 ms between tries) until 100 ms before its deadline (`QUEEN_STMT_TIMEOUT_MS`, 30 s), and answers this only if the cursor stayed held. Nothing was written. | Retry. |
 | `unavailable` | 200 | The leader could not read the state the transaction needs. | Retry. |
 | `queue_not_found` | 200 | A position names a queue that does not exist. | Create the queue. |
 | `too_large` | 200 | The pushes to one partition, or the positions, exceed `QUEEN_RAFT_ENTRY_MAX_BYTES` (96 MiB) once planned, or a position's metadata exceeds 4096 bytes. | Split the transaction. |

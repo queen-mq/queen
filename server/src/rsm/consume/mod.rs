@@ -138,6 +138,15 @@ pub fn is_checkpoint_id(id: &RequestId) -> bool {
 /// The refusal code of an answer in doubt ([`in_doubt`]).
 pub const IN_DOUBT: &str = "in_doubt";
 
+/// The refusal code of a command that meets a cursor somebody else holds: a
+/// transaction whose cursor another transaction has reserved, or whose last
+/// change a checkpoint still carries; an ack, a nack or a DLQ head on a
+/// cursor a transaction has reserved. Retryable, and nothing of the command
+/// moved: the hold lasts one commit. The leader's intake prepares a
+/// transaction refused so again until its deadline
+/// ([`crate::rsm::facade::intake`]).
+pub const RESERVED: &str = "reserved";
+
 /// The answer to a command whose change may or may not be in the log when
 /// this node stops leading: a checkpoint carrying it was on its way. Not
 /// retryable — the next leader would run the command again on a state that

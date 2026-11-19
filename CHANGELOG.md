@@ -43,6 +43,31 @@ be elected and past which raft refuses its writes too: past it, Metadata names n
 Produce answer `NOT_LEADER_OR_FOLLOWER`, and the client asks another node. Jepsen's Kafka workload
 found it, once in a campaign, under a partition that cut the leader off.
 
+**Server: a transaction waits for a cursor that another one holds.** A transaction that acks
+messages or sets consumer-group positions holds each cursor it moves, from the moment the leader
+checks it until its entry commits, and the leader's checkpoint holds a cursor while it writes the
+cursor's last change. A second transaction on one of those cursors was refused at once with
+`reserved`, nothing written, although the hold lasts one commit. The docs say to retry it, but no
+SDK does: the JS client throws it, so the handler failed and the consumer nacked its message,
+spending one of the message's retries, and a Kafka transaction got a fatal error (next entry). It
+happened when two writes on one partition and group overlapped: a handler that commits the messages
+of one popped batch in parallel, an ack not awaited before the next transaction, a lease renewal in
+flight while the handler commits. The leader now prepares such a transaction again: it waits 2 ms
+first, and twice as long each time after, up to 50 ms between tries, until 100 ms before the
+request's deadline (`QUEEN_STMT_TIMEOUT_MS`, 30 s by default). Only a cursor held for that whole
+time is answered `reserved`, as before, with nothing written. The dashboard's ack counts no longer
+count the positions of a try that was refused. Tests hold a cursor the way a transaction in flight
+does, on one node and through a follower, and fail every time without the change.
+
+**Kafka facade: a commit that the broker asks to retry no longer kills the producer.** EndTxn
+answered `INVALID_TXN_STATE`, which the Java client treats as fatal (the producer must be closed),
+whenever the broker refused the commit with a reason that means "retry": `reserved` (above) or
+`unavailable`. Kafka never refuses such a commit. Now the transaction stays open with its records
+and offsets, EndTxn answers `CONCURRENT_TRANSACTIONS`, and the client sends it again on its own, as
+every Kafka client does. Jepsen's Kafka workload found it: at the end of a test, ten transactional
+producers committed one consumer group's offsets on the same partitions at the same moment, and six
+of them were refused. Nothing was lost or written twice: each refused commit wrote nothing.
+
 ## JS client 2.9.2 - 2026-11-18
 
 **JS client: it works on Node 26.** On Node 26 the JS client up to 2.9.1 sent no request at all:

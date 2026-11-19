@@ -680,6 +680,14 @@ impl RaftFacade {
         self.store.clone()
     }
 
+    /// The node's consumption engine, for a test that holds a cursor the way
+    /// a transaction in flight does (`Engine::txn_prepare`, then
+    /// `Engine::txn_resolve`).
+    #[cfg(test)]
+    pub(crate) fn engine_for_test(&self) -> Arc<crate::rsm::consume::Engine> {
+        self.engine.clone()
+    }
+
     /// `(meta.last_now_us, meta.max_created_at_us)` as this node has applied
     /// them: what `safeTime` is built from, read straight from the store.
     #[cfg(test)]

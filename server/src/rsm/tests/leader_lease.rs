@@ -27,10 +27,11 @@ use crate::rsm::replicator::raft::{ClusterConfig, RaftOpts};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// One cluster at a time from this file (each runs three whole nodes).
-static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// One cluster at a time from this file and `txn_reserved.rs`, which opens
+/// its cluster with the helpers below (each runs three whole nodes).
+pub(super) static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-const TENANT: &str = crate::config::DEFAULT_TENANT;
+pub(super) const TENANT: &str = crate::config::DEFAULT_TENANT;
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -43,7 +44,7 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-fn free_ports(n: usize) -> Vec<u16> {
+pub(super) fn free_ports(n: usize) -> Vec<u16> {
     let ls: Vec<std::net::TcpListener> = (0..n)
         .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("bind"))
         .collect();
@@ -52,7 +53,7 @@ fn free_ports(n: usize) -> Vec<u16> {
         .collect()
 }
 
-fn cluster_config(ports: &[u16], id: u64) -> ClusterConfig {
+pub(super) fn cluster_config(ports: &[u16], id: u64) -> ClusterConfig {
     let peers = ports
         .iter()
         .enumerate()
@@ -103,7 +104,7 @@ fn open_facade(dir: &Path, cluster: ClusterConfig) -> RaftFacade {
         .unwrap_or_else(|e| panic!("open facade {id}: {e}"))
 }
 
-async fn open(dir: &Path, cluster: ClusterConfig) -> Arc<RaftFacade> {
+pub(super) async fn open(dir: &Path, cluster: ClusterConfig) -> Arc<RaftFacade> {
     let d = dir.to_path_buf();
     Arc::new(
         tokio::task::spawn_blocking(move || open_facade(&d, cluster))
@@ -112,7 +113,7 @@ async fn open(dir: &Path, cluster: ClusterConfig) -> Arc<RaftFacade> {
     )
 }
 
-async fn close(f: Arc<RaftFacade>) {
+pub(super) async fn close(f: Arc<RaftFacade>) {
     let end = Instant::now() + Duration::from_secs(10);
     let mut f = f;
     loop {
@@ -139,7 +140,7 @@ fn raft_leaders(nodes: &[Option<Arc<RaftFacade>>]) -> Vec<usize> {
 }
 
 /// The open nodes that lead: openraft's leader, under the lease.
-fn leading(nodes: &[Option<Arc<RaftFacade>>]) -> Vec<usize> {
+pub(super) fn leading(nodes: &[Option<Arc<RaftFacade>>]) -> Vec<usize> {
     (0..nodes.len())
         .filter(|i| nodes[*i].as_ref().is_some_and(|n| n.leads(TENANT)))
         .collect()

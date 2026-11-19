@@ -825,7 +825,7 @@ impl Engine {
                         .is_some_and(|p| p.reserved.is_some())
                     {
                         return Ok(Err(Refusal::retry(
-                            "reserved",
+                            super::RESERVED,
                             "a transaction holds this partition's cursor",
                         )));
                     }
@@ -868,7 +868,7 @@ impl Engine {
                 if p.reserved.is_some() {
                     if deps.rows.is_empty() {
                         return Ok(Err(Refusal::retry(
-                            "reserved",
+                            super::RESERVED,
                             "a transaction holds this partition's cursor",
                         )));
                     }
@@ -963,7 +963,7 @@ impl Engine {
             };
             if p.reserved.is_some() {
                 return Ok(Err(Refusal::retry(
-                    "reserved",
+                    super::RESERVED,
                     "a transaction holds this partition's cursor",
                 )));
             }
@@ -1030,7 +1030,7 @@ impl Engine {
             }
             if p.reserved.is_some() {
                 return Ok(Err(Refusal::retry(
-                    "reserved",
+                    super::RESERVED,
                     "a transaction holds this partition's cursor",
                 )));
             }
@@ -1201,7 +1201,7 @@ impl Engine {
             }
             if p.reserved.is_some() {
                 return Ok(Err(Refusal::retry(
-                    "reserved",
+                    super::RESERVED,
                     "a transaction holds this partition's cursor",
                 )));
             }
@@ -1321,7 +1321,7 @@ impl Engine {
                     .is_some_and(|p| p.reserved.is_some())
                 {
                     return Ok(Err(Refusal::retry(
-                        "reserved",
+                        super::RESERVED,
                         "a transaction holds this partition's cursor",
                     )));
                 }

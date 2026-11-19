@@ -68,6 +68,13 @@ verifiedBy:
 # raft/mod.rs gain leader_lease_holds; facade/mod.rs rewords its doc), so a leader cut off from its
 # quorum stops answering Kafka clients as the leader; reference/kafka.mdx says so. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-19 (a transaction waits for a held cursor; Kafka commits the
+# broker asks to retry): facade/intake.rs prepares a transaction refused `reserved` again on the
+# leader until 100 ms before its deadline; consume/mod.rs names the code (RESERVED), which
+# consume/txn.rs and ack.rs use, and consume/txn.rs counts a position's acks once its cursor is
+# reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
+# commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
+# The `reserved` row of the rollback table says so.
 ---
 
 The ack, the order's new state, the next event and tomorrow's reminder commit as one log entry, or none of them does. That one call replaces the outbox table, the idempotency table and the cron job.
@@ -115,7 +122,7 @@ A rollback answers HTTP 200 with `success: false`, a `reason`, and nothing writt
 | `rejected_ack` | An ack's lease ran out or moved to another worker. The message goes to whoever holds it now. |
 | `kv_precondition` | A condition with `required: true` failed: a `once` marker that exists, an `expect` that missed, a lock that is gone. |
 | `duplicate` | A pushed `transactionId` is already in its partition's dedup window: the step already committed. |
-| `reserved` | Another write holds that cursor at this moment. Try again. |
+| `reserved` | Another write held that cursor for the whole wait: the broker already tried again until shortly before the deadline. Try again. |
 | `bad_request`, `too_large` | A malformed operation, or a part over the entry limit. |
 
 The JavaScript client returns a lost condition from `commit()` and throws for the other reasons. A 503 is not a rollback: `retry`, `timeout` and `no_leader` mean the outcome is not known, so the call may still commit. Make every step safe to send twice, with a `once` marker or a push with a fixed `transactionId`.

@@ -133,7 +133,7 @@ impl Engine {
                         };
                         if p.reserved.is_some_and(|id| id != txn.request_id) || p.in_flight() {
                             return Ok(Err(Refusal::retry(
-                                "reserved",
+                                super::RESERVED,
                                 "another transaction or a checkpoint holds this cursor; retry",
                             )));
                         }
@@ -291,13 +291,6 @@ impl Engine {
                 }
             }
 
-            // Dashboard counters: what positions moved past, as acked.
-            if let Some(m) = crate::metrics::global() {
-                for (q, n) in &consumed {
-                    m.per_queue.add_ack(&txn.tenant, q, *n, 0);
-                }
-            }
-
             // Reserve, and write out the rows that changed.
             let mut reserved: Vec<(Pid, Gid)> = Vec::new();
             let mut out_shadows = Vec::new();
@@ -324,7 +317,7 @@ impl Engine {
                     drop(sh);
                     self.unreserve(&reserved, &txn.request_id);
                     return Ok(Err(Refusal::retry(
-                        "reserved",
+                        super::RESERVED,
                         "another transaction or a checkpoint holds this cursor; retry",
                     )));
                 }
@@ -376,6 +369,15 @@ impl Engine {
                 .filter(|k| !keep.contains(k))
                 .collect();
             self.unreserve(&idle, &txn.request_id);
+            // Dashboard counters: what positions moved past, as acked. Counted
+            // once the cursors are reserved: a bundle refused above is
+            // prepared again ([`crate::rsm::facade::intake`]), and counted
+            // before, every try counted once more.
+            if let Some(m) = crate::metrics::global() {
+                for (q, n) in &consumed {
+                    m.per_queue.add_ack(&txn.tenant, q, *n, 0);
+                }
+            }
             Ok(Ok((
                 TxnPart {
                     effects,

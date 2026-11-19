@@ -759,10 +759,13 @@ impl Queen {
             serde_json::from_str(&resp.body).map_err(|e| CallError::Body(e.to_string()))?;
         if v.success == Some(false) {
             let reason = v.reason.as_deref().unwrap_or_default();
-            return Ok(if reason == "kv_precondition" {
-                Committed::Fenced
-            } else {
-                Committed::Refused(format!("{reason}: {}", clip(&resp.body, 300)))
+            let why = || format!("{reason}: {}", clip(&resp.body, 300));
+            return Ok(match reason {
+                "kv_precondition" => Committed::Fenced,
+                // The broker's "retry": nothing was written, and the same
+                // commit can land later (docs: reference/transaction.mdx).
+                "reserved" | "unavailable" => Committed::Busy(why()),
+                _ => Committed::Refused(why()),
             });
         }
         let fence_version = v
