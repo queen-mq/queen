@@ -205,6 +205,9 @@ struct Inner {
     /// A test's hold on the replication streams' reads.
     #[cfg(test)]
     read_gate: ReadGate,
+    /// A test's hold on a leader's replication streams before they connect.
+    #[cfg(test)]
+    stream_gate: StreamGate,
 }
 
 /// A test's hold on the replication streams' reads
@@ -259,6 +262,70 @@ impl ReadGate {
             s.held.get_or_insert(start);
         });
         let _ = rx.wait_for(|s| !holds(s)).await;
+    }
+}
+
+/// A test's hold on a leader's replication streams
+/// ([`super::network::HttpPeer`]'s `stream_append`): armed at a member, each
+/// replication session to it waits before it connects, until the test lets
+/// it go ([`StreamGate::release_one`]) or opens the gate. Heartbeats, which
+/// have a session each, go through.
+#[cfg(test)]
+pub(crate) struct StreamGate(tokio::sync::watch::Sender<StreamGateState>);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct StreamGateState {
+    armed: Option<u64>,
+    /// Sessions that came to the gate.
+    waited: u64,
+    /// Sessions let go, in the order they came.
+    released: u64,
+    open: bool,
+}
+
+#[cfg(test)]
+impl StreamGate {
+    fn new() -> StreamGate {
+        StreamGate(tokio::sync::watch::Sender::new(StreamGateState::default()))
+    }
+
+    /// Hold the replication sessions to member `target`.
+    pub(crate) fn arm(&self, target: u64) {
+        self.0.send_replace(StreamGateState {
+            armed: Some(target),
+            ..StreamGateState::default()
+        });
+    }
+
+    /// Once `n` sessions have come to the gate.
+    pub(crate) async fn waited(&self, n: u64) {
+        let mut rx = self.0.subscribe();
+        let _ = rx.wait_for(|s| s.waited >= n).await;
+    }
+
+    /// Let the oldest session still held go.
+    pub(crate) fn release_one(&self) {
+        self.0.send_modify(|s| s.released += 1);
+    }
+
+    /// Let every session through, from now on.
+    pub(crate) fn open(&self) {
+        self.0.send_modify(|s| s.open = true);
+    }
+
+    pub(crate) async fn pass(&self, target: u64) {
+        let mut rx = self.0.subscribe();
+        let s = *rx.borrow_and_update();
+        if s.open || s.armed != Some(target) {
+            return;
+        }
+        let mut ticket = 0;
+        self.0.send_modify(|s| {
+            ticket = s.waited;
+            s.waited += 1;
+        });
+        let _ = rx.wait_for(|s| s.open || s.released > ticket).await;
     }
 }
 
@@ -587,6 +654,8 @@ impl LogStore {
                     committed_at: tokio::sync::watch::Sender::new((0, 0)),
                     #[cfg(test)]
                     read_gate: ReadGate::new(),
+                    #[cfg(test)]
+                    stream_gate: StreamGate::new(),
                 }),
             },
             writer: join,
@@ -707,6 +776,12 @@ impl LogStore {
         &self.inner.read_gate
     }
 
+    /// The test's hold on the replication streams before they connect.
+    #[cfg(test)]
+    pub(crate) fn stream_gate(&self) -> &StreamGate {
+        &self.inner.stream_gate
+    }
+
     fn send(&self, cmd: Cmd) -> io::Result<()> {
         if let Some(why) = self.inner.poison.lock().expect("poison").clone() {
             return Err(io::Error::other(why));
@@ -735,10 +810,13 @@ impl LogStore {
     /// member for good (test builds), and a member holding `prev_log_id` but
     /// not the purged entries would refuse the hole as a storage error and
     /// stop. Nothing comes back instead, and openraft sends a heartbeat at
-    /// `prev_log_id`: the empty member answers it with a conflict that ends
-    /// the stale stream, and openraft ignores that conflict (it counts
+    /// `prev_log_id`. A member still empty answers it with a conflict that
+    /// ends the stale stream, and openraft ignores that conflict (it counts
     /// another request in flight for that member by then: the snapshot it
-    /// planned).
+    /// planned). A member already back on that snapshot holds `prev_log_id`
+    /// and answers with success, and openraft would send that heartbeat
+    /// again without end: the transport ends such a session at its second
+    /// request ([`super::network`], `end_stale_session`).
     fn read_for_replication(&self, start: u64, end: u64) -> io::Result<Vec<REntry>> {
         let first = || self.inner.mem.lock().expect("log mem").first();
         let read = if start < first() {

@@ -40,6 +40,7 @@ use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::http::{header, Method, Request, StatusCode};
+use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use openraft::base::{BoxFuture, BoxStream};
 use openraft::errors::{
@@ -55,9 +56,10 @@ use openraft::OptionalSend;
 use serde::de::DeserializeOwned;
 
 use super::cluster::TOKEN_HEADER;
+use super::log_store::LogStore;
 use super::state_machine::{Checkpoint, Snapshot};
 use super::stream::{Session, SessionCtx, StreamPeer};
-use super::types::{Node, NodeId, TypeConfig, Vote};
+use super::types::{LogId, Node, NodeId, TypeConfig, Vote};
 use super::wire;
 
 // ---------------------------------------------------------------------------
@@ -187,6 +189,8 @@ pub(crate) struct HttpNetwork {
     /// The leader's members view, carried on every append it sends
     /// ([`super::members`]).
     members: Arc<super::members::MembersState>,
+    /// This node's raft log: where it is purged ([`end_stale_session`]).
+    log: LogStore,
 }
 
 impl HttpNetwork {
@@ -194,12 +198,14 @@ impl HttpNetwork {
         token: Option<String>,
         snap: Arc<super::snapshot::SendCtx>,
         members: Arc<super::members::MembersState>,
+        log: LogStore,
     ) -> HttpNetwork {
         HttpNetwork {
             client: http_client(),
             token: token.map(Arc::from),
             snap,
             members,
+            log,
         }
     }
 }
@@ -218,7 +224,19 @@ impl RaftNetworkFactory<TypeConfig> for HttpNetwork {
             members: self.members.clone(),
             reads_zstd: false,
             stream: StreamPeer::default(),
+            log: self.log.clone(),
+            #[cfg(test)]
+            heartbeat: false,
         }
+    }
+
+    /// The same peer, marked: a test holds a member's replication sessions
+    /// and lets its heartbeats through (`log_store::StreamGate`).
+    #[cfg(test)]
+    async fn new_heartbeat_client(&mut self, target: NodeId, node: &Node) -> HttpPeer {
+        let mut peer = self.new_client(target, node).await;
+        peer.heartbeat = true;
+        peer
     }
 }
 
@@ -236,6 +254,75 @@ pub(crate) struct HttpPeer {
     reads_zstd: bool,
     /// The pipelined append stream to this peer ([`super::stream`]).
     stream: StreamPeer,
+    /// This node's raft log: where it is purged ([`end_stale_session`]).
+    log: LogStore,
+    /// openraft's heartbeat client for this peer (tests).
+    #[cfg(test)]
+    heartbeat: bool,
+}
+
+/// Whether `req` needs an entry the log has purged: the first entry after its
+/// `prev_log_id` is at or below `purged`.
+fn needs_purged(req: &AppendEntriesRequest<TypeConfig>, purged: Option<LogId>) -> bool {
+    let Some(purged) = purged else {
+        return false;
+    };
+    let next = req.prev_log_id.as_ref().map_or(0, |p| p.index + 1);
+    next <= purged.index
+}
+
+/// openraft's requests of one replication session (one `stream_append`), up
+/// to the first one after the session's first that needs an entry the log
+/// has purged (`purged`): that session is one openraft has stopped counting,
+/// and it would go on without end.
+///
+/// openraft gives a session of its own to each heartbeat, to each probe, and
+/// to a commit point it sends when nothing else goes out (at what the member
+/// last matched, which the purge may have passed by then): one request each,
+/// sent whatever its `prev_log_id`. Only a stream of entries (`LogsSince`)
+/// sends more than one, and a live stream never needs a purged entry:
+/// openraft holds the purge back for the log a member's stream reads, and
+/// sends a snapshot to a member whose next entry is purged. But a heartbeat
+/// that finds a member's log gone (a member back with an empty data
+/// directory, after `allow_next_revert`) makes openraft forget the stream it
+/// planned for that member, send it a snapshot and plan a new stream after
+/// it, and its replication task looks for a new plan only between sessions
+/// or while it has nothing to send. A session that took the old plan before,
+/// and connected late (the stream's reopen pause, [`super::stream`]), reads
+/// entries the purge has passed since: the log gives none
+/// (`read_for_replication`), openraft sends a heartbeat at the old
+/// `prev_log_id` instead, and a member already back on that snapshot holds
+/// that entry and answers with success. It never ended, and the member got
+/// no entry again (4,932 heartbeats in 63 s, "nodes [(1, 385)] did not apply
+/// 602", 2026-11-18). Here its second request ends it: the first is
+/// answered, the session ends, and openraft starts the stream it planned.
+fn end_stale_session<S>(
+    input: S,
+    target: NodeId,
+    purged: impl Fn() -> Option<LogId> + Send + 'static,
+) -> impl futures_util::Stream<Item = AppendEntriesRequest<TypeConfig>> + OptionalSend + Unpin + 'static
+where
+    S: futures_util::Stream<Item = AppendEntriesRequest<TypeConfig>>
+        + OptionalSend
+        + Unpin
+        + 'static,
+{
+    let mut first = true;
+    input.take_while(move |req| {
+        let later = !std::mem::take(&mut first);
+        let stale = later && needs_purged(req, purged());
+        if stale {
+            tracing::warn!(
+                target: "rsm",
+                target_node = target,
+                prev = ?req.prev_log_id,
+                purged = ?purged(),
+                "raft: a replication session goes on below the purge point: it ends, and \
+                 openraft starts the one it planned since",
+            );
+        }
+        std::future::ready(!stale)
+    })
 }
 
 /// POST `body` to `url` and return the answer's bytes; anything but a 2xx is a
@@ -490,10 +577,16 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
             + Unpin
             + 'static,
     {
+        let log = self.log.clone();
+        let input = end_stale_session(input, self.target, move || log.purged_log_id());
         if self.stream.unary() {
             return stream_append_sequential(self, input, option);
         }
         Box::pin(async move {
+            #[cfg(test)]
+            if !self.heartbeat {
+                self.log.stream_gate().pass(self.target).await;
+            }
             let open = self
                 .stream
                 .conn(&self.client, &self.base, &self.token)
@@ -1347,6 +1440,66 @@ mod server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session's first request goes out whatever its `prev_log_id`: a
+    /// heartbeat, a probe, or a commit point at what the member last matched,
+    /// which the purge may have passed (an empty `prev_log_id` to a member
+    /// that joined seeded: a standby, a learner). A later request that needs
+    /// a purged entry ends the session; requests at or after the purge point
+    /// never do.
+    #[tokio::test]
+    async fn a_session_ends_at_a_later_request_below_the_purge_point() {
+        use super::super::types::{log_id, REntry};
+        let req = |prev: Option<LogId>, entries: &[u64]| AppendEntriesRequest::<TypeConfig> {
+            vote: Vote::new_committed(1, 1),
+            prev_log_id: prev,
+            entries: entries
+                .iter()
+                .map(|&i| REntry {
+                    log_id: log_id(1, i),
+                    payload: openraft::EntryPayload::Blank,
+                })
+                .collect(),
+            leader_commit: None,
+        };
+        let sent = |reqs: Vec<AppendEntriesRequest<TypeConfig>>, purged: Option<LogId>| async move {
+            let s = end_stale_session(futures_util::stream::iter(reqs), 2, move || purged);
+            s.map(|r| r.prev_log_id.map(|p| p.index))
+                .collect::<Vec<_>>()
+                .await
+        };
+        let purged = Some(log_id(1, 384));
+        // The session of 2026-11-18: it streamed after 201, and the log gave
+        // its reads nothing: one heartbeat, answered, then it ends.
+        let stale = vec![req(Some(log_id(1, 201)), &[]); 3];
+        assert_eq!(sent(stale, purged).await, vec![Some(201)]);
+        // A heartbeat, a probe, a commit point below the purge point: one
+        // request, sent.
+        assert_eq!(sent(vec![req(None, &[])], purged).await, vec![None]);
+        assert_eq!(
+            sent(vec![req(Some(log_id(1, 201)), &[])], purged).await,
+            vec![Some(201)]
+        );
+        // The stream after the snapshot at 384, and one further on.
+        let after = vec![
+            req(Some(log_id(1, 384)), &[385, 386]),
+            req(Some(log_id(1, 386)), &[]),
+            req(Some(log_id(1, 386)), &[387]),
+        ];
+        assert_eq!(
+            sent(after, purged).await,
+            vec![Some(384), Some(386), Some(386)]
+        );
+        // A stream the purge overtook after it sent entries.
+        let overtaken = vec![
+            req(Some(log_id(1, 201)), &[202, 203]),
+            req(Some(log_id(1, 203)), &[]),
+        ];
+        assert_eq!(sent(overtaken, purged).await, vec![Some(201)]);
+        // Nothing purged: every request goes.
+        let all = vec![req(None, &[0]), req(Some(log_id(1, 0)), &[])];
+        assert_eq!(sent(all, None).await, vec![None, Some(0)]);
+    }
 
     #[test]
     fn an_append_without_entries_keeps_the_heartbeat_deadline() {

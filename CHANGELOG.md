@@ -19,6 +19,16 @@ while the cluster runs both releases, a leadership transfer between a node of ea
 SIGTERM among them, counts as an ordinary election, which can wait up to an election timeout for
 the old leader's lease to run out.
 
+**Server: a member wiped in place gets its entries again.** A member back with an empty data
+directory (the same node id, its disk lost) could stay at the snapshot it was sent and receive no
+further entry until the leader changed. The leader's stream to it, planned before the leader found
+its log gone and connected late, asked for entries the purge had passed since; the member, back on
+its snapshot, answered with success each heartbeat sent in their place, and that stream never
+ended, so the one planned after the snapshot never started. Such a stream now ends at its second
+request below the purge point. CI saw it as `an_empty_member_gets_the_whole_state_with_its_indexes`
+failing now and then; a test now holds the leader's stream across exactly that, and fails every
+time without the fix.
+
 ## JS client 2.9.2 - 2026-11-18
 
 **JS client: it works on Node 26.** On Node 26 the JS client up to 2.9.1 sent no request at all:
