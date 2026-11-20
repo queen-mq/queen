@@ -102,6 +102,8 @@ sourceOfTruth:
 # queen:consume stops for queue:restart under a supervisor (RestartSignal). The pools table, its notes and Refused at start say so.
 # sourceOfTruth re-read 2026-11-18 (urls string): QueenServiceProvider::clientConfig splits a comma-separated
 # `urls`, as QueenConnector does, so queen:consume and the Queen facade accept 'urls' => env('QUEEN_URLS'). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-20 (supervisor 0.10.0): SupervisorBinary pins 0.10.0 for PHP client
+# 2.10.0. Nothing this page states changes.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. The file reads 20 environment variables, for what differs between environments (the broker, its credentials, the queue and group, paths, and the switches of optional features); every other setting is a plain value in the file. This page lists the 20, then every key area by area, with its default in PHP client 2.1.0 and later.

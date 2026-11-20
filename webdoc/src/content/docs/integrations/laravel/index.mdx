@@ -368,7 +368,7 @@ Both supervisors read the same `supervisor` section of `config/queen.php`, publi
 
 ## Versions
 
-The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a separate binary whose version each client release pins. These pages describe PHP client 2.7.0, which pins supervisor 0.9.0, published for Linux (amd64, arm64) and macOS with a signed manifest. Everything not listed works from 1.6.0.
+The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a separate binary whose version each client release pins. These pages describe PHP client 2.10.0, which pins supervisor 0.10.0, published for Linux (amd64, arm64) and macOS with a signed manifest. Everything not listed works from 1.6.0.
 
 | PHP client | Supervisor | Brings |
 | --- | --- | --- |
@@ -387,6 +387,7 @@ The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a s
 | 2.5.0 | 0.8.1 | `binary_push`, `push_compression` and `framed_pop`, off by default ([the queue driver's settings](/integrations/laravel/configuration/#queue-driver)); the first two need a 2.3 broker on every node, and compression and framed pops need the zstd extension |
 | 2.6.0 | 0.8.1 | `fetch` and `changedSince` read a partition by position, with no lease, cursor or ack ([reads by offset](/writing-applications/clients/#reads-by-offset-by-sdk)) |
 | 2.7.0 | 0.9.0 | supervisor 0.9.0: a SIGTERM during a broker call or during start-up reaches the workers sooner, a pool is refilled at once after a deploy, a master that is PID 1 reaps the orphans it inherits, a status that cannot be written or a closed stderr no longer costs the workers, a fork server that failed to boot is not booted again at every exit, and a bad control request is discarded instead of stopping the master |
+| 2.10.0 | 0.10.0 | pools of `queen:consume` handlers under the master, for messages that carry no Laravel job ([pools of queen:consume handlers](/integrations/laravel/supervisors/#pools-of-queenconsume-handlers)); the container's client splits a comma-separated `QUEEN_URLS` |
 
 ## Limits
 

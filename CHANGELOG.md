@@ -3,7 +3,16 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## 2.10.0 - 2026-11-20
+
+**Upgrading from 2.9.x: a rolling restart.** 2.10.0 keeps the data format of 2.9.0 (cluster
+version 8), and nodes of the two releases replicate to each other while the roll runs. The PHP
+client moves to 2.10.0 and pins supervisor 0.10.0, which carry the last two entries below. The
+JavaScript client stays at 2.9.2, the Python, Go, Rust and C++ clients at 2.9.0, `queen-protocol`
+at 1.7.0 and queenctl at 2.7.1: their code did not change, and they talk to a 2.10.0 broker as to
+2.9.0. Jepsen ran the whole suite, 568 tests, on `b0d3a5c67`, the code of this release before the
+LMDB fix below, and all were valid; on 2.10.0 itself (`930578e2b`) it ran the 59 tests of the
+gate, all valid.
 
 **Server: openraft 0.10.0.** The consensus library moves from the 0.10.0-alpha.37 prerelease to
 the 0.10.0 release, pinned exactly as before. It brings the fixes openraft made in between; three of
@@ -85,6 +94,23 @@ from RAM, as writes already did, where before every read failed. The gauge
 at a few instead of growing with the threads that had read. Tests let as many threads read once and
 stay alive as there are reader slots, then read once more: before the change that read was refused,
 every time.
+
+**PHP client 2.10.0 and supervisor 0.10.0: pools of `queen:consume` handlers.** A supervisor pool
+can name `'handlers' => [queue => HandlerClass::class]` instead of `'queues'`. For each queue, both
+engines, the Rust master and the PHP one, then run `queen:consume <queue> <handler>` workers, with
+the scaling, restart backoff, prefork, drain, status and dashboard of a `queue:work` pool: one
+master runs every consumer of the application. The workers pop with `--subscription-mode=all`, so a
+group the pool opens reads the backlog the master scales on. A pool of handlers is refused with
+balance off, the `time` strategy, a connection other than queen, queues beside the handlers, a
+`lease_renewal` other than the one in `config/queen.php`, a `shutdown_grace` shorter than the
+timeout plus the 10 s long poll, or a class without `handle()`. A `queen:consume` that a supervisor
+runs stops for `queue:restart` and exits 0. The fork server speaks protocol 2, whose request names
+the command (`queue:work` or `queen:consume`), and still protocol 1 to an older master.
+
+**PHP client: a comma-separated `QUEEN_URLS` works in the container's client too.** The queue
+connector split `'urls' => env('QUEEN_URLS')` on commas, but the client that the service container
+builds took the string as it was, so the `Queen` facade and `queen:consume` failed at boot with
+"urls must be a non-empty array". That client splits it the same way now.
 
 ## JS client 2.9.2 - 2026-11-18
 
