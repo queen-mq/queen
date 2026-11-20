@@ -102,7 +102,7 @@ jobs:
           - os: darwin
             arch: arm64
             target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
