@@ -1,6 +1,6 @@
 <script setup>
 // The newest messages of every queue (or of one queue, a namespace or a task)
-// in the band's window, 20 a page; a click opens one beside the list. The list
+// in the band's window (set in the band or in the filters, any day), 20 a page; a click opens one beside the list. The list
 // holds still while you read it: a refresh updates each row's status in place
 // and counts what arrived since, until you ask for it. Its address fields:
 // ?mstatus= ?mq= ?mns= ?mtask= ?mpart=, and the pick ?mpid= ?mtx=.
@@ -13,6 +13,7 @@ import { filtersForPushedMessage } from '@/composables/usePushVerdict'
 import { currentEpoch, useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import QcSeg from '../QcSeg.vue'
+import TimeChip from '../TimeChip.vue'
 import QueuePush from '../queue/QueuePush.vue'
 import { clock, useWindow } from '../useWindow'
 import { fmt } from '../useQueuePage'
@@ -189,6 +190,7 @@ function pushed() {
     <div class="qmv-tools">
       <QcSeg v-model="status" :options="STATUSES" label="Status" />
       <MessagesWhere :queue="filters.queue" :namespace="filters.namespace" :task="filters.task" :queues="qs.queues.value" @pick="setFilters" />
+      <TimeChip filter />
       <label class="qn-field qmv-part">
         <span class="qn-vh">Partition</span>
         <input v-model="partText" class="qn-mono" type="text" placeholder="Partition, then Enter" spellcheck="false" autocomplete="off" @keydown.enter="applyPartition" @keydown.esc="partText = filters.partition" @blur="applyPartition" />

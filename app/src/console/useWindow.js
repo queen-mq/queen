@@ -42,15 +42,8 @@ export function longDate(ms) {
 export function timeZone() {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time' } catch { return 'local time' }
 }
-// "14:05" today -> epoch ms, or null.
-export function todayAt(text, base = Date.now()) {
-  const m = /^\s*(\d{1,2})[:.](\d{2})\s*$/.exec(text || '')
-  if (!m) return null
-  const h = Number(m[1]); const mi = Number(m[2])
-  if (h > 23 || mi > 59) return null
-  const d = new Date(base); d.setHours(h, mi, 0, 0)
-  return d.getTime()
-}
+// A window that starts more than 6 days ago names its month: "Thu 12" alone could be October.
+const DAY_MONTH = new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
 
 const one = (v) => (Array.isArray(v) ? v[0] : v)
 function isoMs(v) {
@@ -74,7 +67,8 @@ export function useWindow() {
     if (from && to && to > from) {
       const span = to - from
       const withDay = span >= 1440 * MIN || new Date(from).toDateString() !== new Date(now).toDateString()
-      const label = stamp(from, withDay) + ' – ' + stamp(to, withDay)
+      const at = now - from > 6 * 1440 * MIN ? (ms) => DAY_MONTH.format(new Date(ms)) + ' ' + clock(ms) : (ms) => stamp(ms, withDay)
+      const label = at(from) + ' – ' + at(to)
       w = { id: 'custom', live: false, custom: true, from, to, label, long: label }
     } else {
       const p = BY_ID[one(q.range)] || BY_ID['1h']

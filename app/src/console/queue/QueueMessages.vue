@@ -1,5 +1,6 @@
 <script setup>
-// The newest messages, 20 at a time, by status; a click opens one beside the
+// The newest messages pushed in the page's time window (the band's, also set
+// from the filters, any day), 20 at a time, by status; a click opens one beside the
 // list, in the same detail as Queues › Messages (console/queues/MessageDetail.vue):
 // about half the page, kept in view while the list scrolls, its payload as
 // tall as the window lets it be. Stacked under the list below 1000px.
@@ -8,7 +9,10 @@ import { messages as messagesApi } from '@/api'
 import { describeApiError } from '@/api/errors'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import QcSeg from '../QcSeg.vue'
+import TimeChip from '../TimeChip.vue'
 import MessageDetail from '../queues/MessageDetail.vue'
+import { listCall, listParams, windowWords } from '../queues/messagesView'
+import { useWindow } from '../useWindow'
 import { fmt } from '../useQueuePage'
 
 const props = defineProps({ queue: { type: String, required: true }, where: { type: String, default: '' } })
@@ -31,27 +35,40 @@ const data = shallowRef(null)
 const error = ref(null)
 const loading = ref(false)
 const picked = ref(null)
+const { win } = useWindow()
+// A moving window's from and to step every 10 s: only a new window reloads,
+// and each read (a page, a refresh) takes the window as it is then.
+const winKey = computed(() => (win.value.custom ? `${win.value.from}-${win.value.to}` : win.value.id))
+const params = computed(() => listParams({ queue: props.queue, status: status.value, partition: applied.value }, win.value.iso, offset.value, LIMIT))
+const call = computed(() => listCall(params.value))
+const when = computed(() => windowWords(win.value))
 
+let seq = 0
 async function load() {
+  const my = ++seq
   loading.value = true
-  const params = { queue: props.queue, limit: LIMIT, offset: offset.value }
-  if (status.value) params.status = status.value
-  if (applied.value) params.partition = applied.value
   try {
-    const r = await messagesApi.list(params, { quiet: true })
+    const r = await messagesApi.list(params.value, { quiet: true })
+    if (my !== seq) return // a newer read (another window, filter or page) is on its way
     data.value = r.data
     error.value = null
   } catch (e) {
+    if (my !== seq) return
     error.value = describeApiError(e)
   } finally {
-    loading.value = false
+    if (my === seq) loading.value = false
   }
 }
 useAutoRefresh(load)
 load()
-watch([status, applied], () => { offset.value = 0; picked.value = null; load() })
+// Back to the first page: one read, by the offset's watcher when it moves.
+function first() {
+  picked.value = null
+  if (offset.value) offset.value = 0
+  else load()
+}
+watch([status, applied, winKey, () => props.queue], first)
 watch(offset, load)
-watch(() => props.queue, () => { offset.value = 0; picked.value = null; load() })
 
 const rows = computed(() => (data.value?.messages || []).map((m) => ({
   key: m.id || m.transactionId,
@@ -85,6 +102,7 @@ async function choose(key) {
     <div class="qm-list">
       <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px">
         <QcSeg v-model="status" :options="STATUSES" label="Status" />
+        <TimeChip filter />
         <label class="qn-field" style="width: 240px; max-width: 100%">
           <span class="qn-vh">Partition</span>
           <input v-model="partition" class="qn-mono" type="text" placeholder="Partition, then Enter" spellcheck="false" @keydown.enter="applied = partition.trim()" @blur="applied = partition.trim()" />
@@ -92,7 +110,7 @@ async function choose(key) {
       </div>
       <p v-if="error" class="qn-t2" style="padding: 16px 0"><span class="qn-mark red" aria-hidden="true" style="margin-right: 8px" />The broker did not answer: {{ error }}</p>
       <p v-else-if="data && !rows.length" class="qn-t2" style="padding: 16px 0">
-        No {{ status ? STATUSES.find((s) => s.value === status).label.toLowerCase() : 'messages' }}{{ applied ? ` in ${applied}` : '' }}.
+        No {{ status ? STATUSES.find((s) => s.value === status).label.toLowerCase() : 'messages' }}{{ applied ? ` in ${applied}` : '' }} {{ when }}.
         <button v-if="status || applied" type="button" class="qn-link" @click="status = ''; partition = ''; applied = ''">Show all</button>
       </p>
       <div v-else class="qm-table" role="table" aria-label="Newest messages" style="--cols: minmax(0, 1.5fr) minmax(0, 1.1fr) 150px 96px">
@@ -111,12 +129,12 @@ async function choose(key) {
         </div>
       </div>
       <div v-if="rows.length" style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 12px">
-        <span class="qn-num qn-t3">{{ fmt(offset + 1) }}–{{ fmt(offset + rows.length) }}, newest first</span>
+        <span class="qn-num qn-t3">{{ fmt(offset + 1) }}–{{ fmt(offset + rows.length) }}, newest first, {{ when }}</span>
         <div style="flex: 1 1 0" />
         <button type="button" class="qn-btn2" :disabled="offset === 0" @click="offset = Math.max(0, offset - LIMIT)">Newer</button>
         <button type="button" class="qn-btn2" :disabled="rows.length < LIMIT" @click="offset += LIMIT">Older</button>
       </div>
-      <p class="qn-read" style="margin-top: 12px">Read from <span class="qn-mono">GET /api/v1/messages?queue={{ queue }}&amp;limit=20</span>.</p>
+      <p class="qn-read" style="margin-top: 12px; overflow-wrap: anywhere">Read from <span class="qn-mono">{{ call }}</span>.</p>
     </div>
 
     <div v-if="pick" ref="side" class="qm-detail">
