@@ -17,12 +17,12 @@ Open source (Apache-2.0), Rust, one binary. In production at [Smartness](https:/
 </div>
 
 ```bash
-docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.9.0
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.10.0
 ```
 
 <div align="center">
 
-[Documentation](https://queenmq.com) · [Five-minute guide](https://queenmq.com/#guide) · [The little book (PDF)](https://queenmq.com/book/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/writing-applications/ai-agents/) · Apache-2.0 · v2.9
+[Documentation](https://queenmq.com) · [Five-minute guide](https://queenmq.com/#guide) · [The little book (PDF)](https://queenmq.com/book/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/writing-applications/ai-agents/) · Apache-2.0 · v2.10
 
 </div>
 
@@ -37,7 +37,7 @@ JavaScript, Python, Go, Rust and PHP. Every snippet, here and on the site, is cu
 ### 1. Run a node
 
 ```bash
-docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.9.0
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.10.0
 npm install queen-mq
 ```
 
