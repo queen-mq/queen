@@ -109,6 +109,10 @@ verifiedBy:
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-20 (the guide's wire check): book-client-guide.mjs records the
+# requests through undici's diagnostics channels instead of a wrapper around globalThis.fetch,
+# which the JS client stopped calling in 2.9.2; its regions are unchanged. Nothing this page
+# states changes.
 ---
 
 There are two ways to read. `consume()` is a loop: it takes messages, calls your handler, acks them when the handler returns, and goes on. `pop()` is one call: it hands you the messages and leaves the ack to you.

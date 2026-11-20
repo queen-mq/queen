@@ -12,6 +12,7 @@
 // run.sh runs a copy with localhost:6632 replaced by $QUEEN_URL.
 
 import assert from 'node:assert/strict'
+import { subscribe, unsubscribe } from 'node:diagnostics_channel'
 import { Queen, Stream } from 'queen-mq'
 
 const queen = new Queen({ url: 'http://localhost:6632', handleSignals: false })
@@ -90,15 +91,32 @@ await queen.flushAllBuffers()                         // before exiting, send wh
   console.log('ok: push-buffer')
 }
 
-// Record what goes over the wire, to check the binary forms below.
+// Record what goes over the wire, to check the binary forms below. The client
+// sends with its own undici, not the global fetch, so a wrapper around
+// globalThis.fetch would see nothing: listen where every undici publishes its
+// requests. undici keeps headers as a flat [name, value, ...] list, of strings
+// for a request and of Buffers for a response.
 const wire = []
-const realFetch = globalThis.fetch
-globalThis.fetch = async (url, options = {}) => {
-  const response = await realFetch(url, options)
-  wire.push({ url: String(url), body: options.body, got: response.headers.get('content-type'),
-    sent: new Headers(options.headers).get('content-type') })
-  return response
+const recorded = new Map()
+const header = (list, name) => {
+  for (let i = 0; i + 1 < list.length; i += 2) {
+    if (String(list[i]).toLowerCase() === name) return String(list[i + 1])
+  }
+  return null
 }
+const onRequest = ({ request }) => {
+  const w = { url: request.origin + request.path, sent: header(request.headers, 'content-type'), body: [], got: null }
+  recorded.set(request, w)
+  wire.push(w)
+}
+const onBody = ({ request, chunk }) => { recorded.get(request)?.body.push(Buffer.from(chunk)) }
+const onResponse = ({ request, response }) => {
+  const w = recorded.get(request)
+  if (w) w.got = header(response.headers, 'content-type')
+}
+subscribe('undici:request:create', onRequest)
+subscribe('undici:request:bodyChunkSent', onBody)
+subscribe('undici:request:headers', onResponse)
 let wireData = null
 // guide:start(wire-forms)
 const fast = new Queen({
@@ -118,12 +136,14 @@ await fast.queue('invoices').each().limit(1).consume(async (msg) => {
 })
 // guide:end
 {
-  globalThis.fetch = realFetch
+  unsubscribe('undici:request:create', onRequest)
+  unsubscribe('undici:request:bodyChunkSent', onBody)
+  unsubscribe('undici:request:headers', onResponse)
   const push = wire.find((w) => w.url.includes('/api/v1/push'))
   const pop = wire.find((w) => w.url.includes('/api/v1/pop/') && w.url.includes('frames=true'))
   assert.equal(push.sent, 'application/x-queen-push', 'the push went as a binary body')
   const zstdMagic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
-  assert.ok(Buffer.from(push.body).includes(zstdMagic), 'the binary push carried a zstd frame')
+  assert.ok(Buffer.concat(push.body).includes(zstdMagic), 'the binary push carried a zstd frame')
   assert.equal(pop.got, 'application/x-queen-pop', 'the broker answered the pop with frames')
   assert.deepEqual(wireData, { orderId: 2001, total: 12.5 })
   console.log('ok: wire-forms')

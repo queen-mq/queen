@@ -77,6 +77,10 @@ verifiedBy:
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-20 (the guide's wire check): book-client-guide.mjs records the
+# requests through undici's diagnostics channels instead of a wrapper around globalThis.fetch,
+# which the JS client stopped calling in 2.9.2; its regions are unchanged. Nothing this page
+# states changes.
 ---
 
 A queue is a named set of partitions that share one configuration. You never have to create one: the first push that names a queue creates it, with the defaults. Configure it when you want other settings.

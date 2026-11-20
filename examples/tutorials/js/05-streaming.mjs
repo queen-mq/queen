@@ -78,6 +78,13 @@ try {
       maxWaitMillis: 200,
     })
 
+  // run() resolves as soon as the query is registered, with the poll loop
+  // started but its first pop not yet sent. That first pop is what creates the
+  // stream's consumer group, and a new group starts at the tail: give it that
+  // first poll before producing, or the earliest events race past a cursor
+  // that does not exist yet and are never seen.
+  await new Promise((resolve) => setTimeout(resolve, 500))
+
   console.log('\npushing sales')
   for (const sale of SALES) {
     // The partition is the aggregation key: window state is per partition, so

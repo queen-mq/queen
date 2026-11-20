@@ -86,6 +86,10 @@ verifiedBy:
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-20 (the guide's wire check): book-client-guide.mjs records the
+# requests through undici's diagnostics channels instead of a wrapper around globalThis.fetch,
+# which the JS client stopped calling in 2.9.2; its regions are unchanged. Nothing this page
+# states changes.
 ---
 
 In Kafka you choose a number of partitions and hash keys onto them, so a slow customer holds up every customer that shares its partition. Here a partition is one entity: a customer, an order, a conversation. The push that names it creates it, order holds inside it, and one queue has held ten million.
