@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::rsm::dedup;
 use crate::rsm::effect::{CursorRow, GarbageScope, GroupMeta, SubscriptionMode};
+use crate::rsm::store::integrity::ScrubCursor;
 use crate::rsm::store::keys::{self, Counter};
 use crate::rsm::store::rows::{
     self, DlqRow, FileRow, GarbageRow, GroupRow, PartitionRow, SegLocRow,
@@ -838,8 +839,7 @@ fn an_aborted_transaction_is_not_rolled_back() {
 // The pins
 // ---------------------------------------------------------------------------
 
-/// PIN 2. A second read transaction on one thread is refused by construction,
-/// before LMDB is asked (where it would be `MDB_BAD_RSLOT`).
+/// PIN 2. A second read on one thread is refused by construction.
 #[test]
 fn a_second_read_on_one_thread_is_impossible() {
     let t = TempStore::new();
@@ -883,6 +883,11 @@ fn a_panic_inside_a_read_does_not_poison_the_thread() {
 
 /// PIN 3. `max_readers` is a ceiling and `MDB_READERS_FULL` is a RETRYABLE
 /// refusal, not a panic.
+///
+/// [`Store::read`] takes no reader slot while every keyspace is in RAM
+/// (`reads_of_an_all_ram_store_take_no_reader_slot`), so the readers here
+/// hold LMDB read transactions, as the load, the scrub and a checkpoint copy
+/// do.
 #[test]
 fn running_out_of_reader_slots_is_a_refusal() {
     let t = TempStore::with(StoreOpts {
@@ -903,12 +908,11 @@ fn running_out_of_reader_slots_is_a_refusal() {
             let tx = tx.clone();
             let rel_rx = &rel_rx;
             scope.spawn(move || {
-                let r = s.read(|_h| {
+                let r = s.with_lmdb_read(|| {
                     // Say so BEFORE blocking, so the parent always gets n
                     // messages whatever happens.
                     tx.send(Ok(())).unwrap();
                     let _ = rel_rx.lock().unwrap().recv();
-                    Ok(())
                 });
                 if let Err(e) = r {
                     tx.send(Err(e)).unwrap();
@@ -931,6 +935,156 @@ fn running_out_of_reader_slots_is_a_refusal() {
     });
     assert!(full > 0, "{n} concurrent readers over a 2-slot table");
     assert_eq!(StoreMetrics::get(&s.metrics().readers_full), full as u64);
+}
+
+/// While every keyspace is in RAM (all of them, [`Keyspace::is_ram`]) a read
+/// opens no LMDB transaction, so reads cannot run out of reader slots: twice
+/// as many reads as the table has slots, all open at once, are all served.
+/// When each one held an LMDB read transaction, the ones over the ceiling
+/// were refused (pin 3).
+#[test]
+fn reads_of_an_all_ram_store_take_no_reader_slot() {
+    assert!(Keyspace::ALL.iter().all(|k| k.is_ram()));
+    let t = TempStore::with(StoreOpts {
+        map_bytes: Some(16 << 20),
+        max_readers: 2,
+        ..Default::default()
+    });
+    let s = t.s();
+    let n = 2 * s.map_usage().max_readers as usize;
+
+    let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<(), StoreError>>();
+    let (rel_tx, rel_rx) = std::sync::mpsc::channel::<()>();
+    let rel_rx = std::sync::Mutex::new(rel_rx);
+    let mut refused = Vec::new();
+    std::thread::scope(|scope| {
+        // Owned here, so a failed wait below drops it and frees the threads.
+        let rel_tx = rel_tx;
+        for _ in 0..n {
+            let tx = tx.clone();
+            let rel_rx = &rel_rx;
+            scope.spawn(move || {
+                let r = s.read(|_h| {
+                    // Say so BEFORE blocking, so the parent always gets n
+                    // messages whatever happens.
+                    let _ = tx.send(Ok(()));
+                    let _ = rel_rx.lock().unwrap().recv();
+                    Ok(())
+                });
+                if let Err(e) = r {
+                    let _ = tx.send(Err(e));
+                }
+            });
+        }
+        for _ in 0..n {
+            if let Err(e) = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap() {
+                refused.push(e);
+            }
+        }
+        for _ in 0..n {
+            let _ = rel_tx.send(());
+        }
+    });
+    assert!(
+        refused.is_empty(),
+        "{n} reads open at once over {} reader slots: refused {refused:?}",
+        n / 2
+    );
+    assert_eq!(StoreMetrics::get(&s.metrics().readers_full), 0);
+}
+
+/// `op` once on each of `n` threads that then stay alive, then once more on a
+/// fresh thread while they still are: what every call answered, the fresh
+/// thread's last. A thread that kept a reader slot after its call keeps it
+/// until it exits, so with `n` the number of slots the last call is refused.
+pub(crate) fn beside_threads_that_have_read<T: Send>(
+    n: usize,
+    op: impl Fn() -> std::result::Result<T, StoreError> + Sync,
+) -> Vec<std::result::Result<T, StoreError>> {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let (rel_tx, rel_rx) = std::sync::mpsc::channel::<()>();
+    let rel_rx = std::sync::Mutex::new(rel_rx);
+    std::thread::scope(|scope| {
+        // Owned here, so a failed wait below drops it and frees the threads.
+        let rel_tx = rel_tx;
+        for _ in 0..n {
+            let (done_tx, op, rel_rx) = (done_tx.clone(), &op, &rel_rx);
+            scope.spawn(move || {
+                let _ = done_tx.send(op());
+                // Alive, with whatever the call left on this thread, until
+                // the last call has run.
+                let _ = rel_rx.lock().unwrap().recv();
+            });
+        }
+        let mut answers: Vec<_> = (0..n)
+            .map(|_| {
+                done_rx
+                    .recv_timeout(std::time::Duration::from_secs(20))
+                    .expect("every thread answers")
+            })
+            .collect();
+        answers.push(scope.spawn(&op).join().expect("the last call"));
+        for _ in 0..n {
+            let _ = rel_tx.send(());
+        }
+        answers
+    })
+}
+
+/// A thread keeps no reader slot once its read is over.
+///
+/// With LMDB's thread-local reader slots (heed's `WithTls`) every thread that
+/// ever read kept a slot until it exited, and a pthread-key destructor cleared
+/// it on the way out, in the lock file's mmap. A thread that exited while its
+/// store closed wrote to the lock file `mdb_env_close` had just unmapped, and
+/// the process died of SIGSEGV (heed_store's module header). Here as many
+/// threads as the table has slots read once and stay alive, and one more read
+/// must still find a slot: with thread-local slots it is `ReadersFull`.
+#[test]
+fn a_thread_keeps_no_reader_slot_after_its_read() {
+    let t = TempStore::with(StoreOpts {
+        map_bytes: Some(16 << 20),
+        max_readers: 2,
+        ..Default::default()
+    });
+    let s = t.s();
+    let n = s.map_usage().max_readers as usize;
+    let answers = beside_threads_that_have_read(n, || s.read(|r| r.applied_index()));
+    assert!(
+        answers.iter().all(|a| a.is_ok()),
+        "{n} threads read once and stay alive, then one more reads: {answers:?}"
+    );
+    assert_eq!(StoreMetrics::get(&s.metrics().readers_full), 0);
+}
+
+/// The same for the store's reads that still open an LMDB read transaction:
+/// a step of the background scrub (`rsm::scrub`) and a checkpoint copy (a
+/// raft snapshot).
+#[test]
+fn a_thread_keeps_no_reader_slot_after_a_scrub_step_or_a_checkpoint_copy() {
+    let t = TempStore::with(StoreOpts {
+        map_bytes: Some(16 << 20),
+        max_readers: 2,
+        ..Default::default()
+    });
+    let s = t.s();
+    let n = s.map_usage().max_readers as usize;
+    let answers =
+        beside_threads_that_have_read(n, || s.scrub_step(&mut ScrubCursor::default(), 64));
+    assert!(
+        answers.iter().all(|a| a.is_ok()),
+        "{n} threads take a scrub step and stay alive, then one more does: {answers:?}"
+    );
+    let copies = AtomicU64::new(0);
+    let answers = beside_threads_that_have_read(n, || {
+        let i = copies.fetch_add(1, Ordering::Relaxed);
+        s.copy_checkpoint(&t.dir.join(format!("copy-{i}")))
+    });
+    assert!(
+        answers.iter().all(|a| a.is_ok()),
+        "{n} threads copy the checkpoint and stay alive, then one more does: {answers:?}"
+    );
+    assert_eq!(StoreMetrics::get(&s.metrics().readers_full), 0);
 }
 
 /// PIN 4. `MDB_MAP_FULL` is typed, counted, and FATAL for this node: a

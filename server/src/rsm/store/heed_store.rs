@@ -16,13 +16,25 @@
 //! timeout, so a second caller would block with no deadline, which is what
 //! I15 forbids; it is refused with [`StoreError::WriterBusy`] instead.
 //!
-//! The environment is opened in heed's DEFAULT reader mode — thread-local
-//! reader slots (`WithTls`) — which is the mode S1 measured at 9.96 M gets/s
-//! on 8 threads against 2.08 M for `MDB_NOTLS` (R-06). The price is that
-//! `RoTxn` is not `Send`: a read cannot cross an `.await` and cannot move
-//! between tokio workers. That is pin 2's rule turned into a type, and
-//! [`HeedStore::read`]'s closure is what keeps it: the handle is borrowed for
-//! the length of one blocking call and cannot escape it.
+//! The environment is opened with `MDB_NOTLS` (heed's `WithoutTls`): an LMDB
+//! read transaction takes a reader slot when it begins and gives it back when
+//! it ends. In heed's default mode (`WithTls`) a slot stays on every thread
+//! that ever read, and LMDB registers a pthread key whose destructor clears
+//! that slot, in the lock file's mmap, when the thread exits. `mdb_env_close`
+//! deletes the key and then unmaps the lock file, and nothing orders that
+//! against a destructor that is already running: a thread that exited while
+//! the store closed wrote to unmapped memory, and the process died of SIGSEGV
+//! in `mdb_env_reader_dest` (the broker's test binaries, which open and close
+//! hundreds of stores, 2026-10-13 to 11-19).
+//!
+//! What `MDB_NOTLS` costs is a turn on LMDB's reader mutex each time a read
+//! transaction begins (R-06: 2.06/1.97/2.08 M gets/s at 1/4/8 threads, against
+//! 2.10/8.18/9.96 M with thread-local slots). [`HeedStore::read`] does not pay
+//! it: while every keyspace is in RAM (all of them, [`Keyspace::is_ram`]) it
+//! opens no LMDB transaction at all. The ones left are the load at open, the
+//! scrub and a checkpoint copy. [`HeedStore::read`]'s closure keeps pin 2: the
+//! handle is borrowed for the length of one blocking call and cannot escape
+//! it.
 //!
 //! # Phase C: RAM keyspaces over an LMDB checkpoint
 //!
@@ -120,7 +132,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use heed::types::Bytes;
-use heed::{Database, Env, EnvFlags, EnvOpenOptions, RwTxn, WithTls};
+use heed::{Database, Env, EnvFlags, EnvOpenOptions, RwTxn, WithoutTls};
 
 use super::integrity::{
     self, CorruptHook, Mismatch, ScrubCursor, ScrubPhase, ScrubReport, StoreFormat, CHECKSUM_LEN,
@@ -157,9 +169,8 @@ const RAM_SCAN_MAX_CHUNK: usize = 1024;
 const RAM_SCAN_FIRST: usize = 64;
 
 thread_local! {
-    /// Pin 2. True while this thread is inside [`HeedStore::read`]. With
-    /// thread-local reader slots a second read transaction on one thread is
-    /// `MDB_BAD_RSLOT`; the adapter refuses before LMDB is asked.
+    /// Pin 2. True while this thread is inside [`HeedStore::read`]: a nested
+    /// read is refused before it begins ([`StoreError::NestedRead`]).
     static READ_OPEN: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -301,7 +312,7 @@ static CKPT_TXNS_WITHOUT_HASHES: std::sync::LazyLock<bool> = std::sync::LazyLock
 });
 
 pub struct HeedStore {
-    env: Env<WithTls>,
+    env: Env<WithoutTls>,
     /// Indexed by [`Keyspace::slot`].
     dbs: Vec<Database<Bytes, Bytes>>,
     /// Indexed by [`Keyspace::slot`]; `Some` exactly for the RAM keyspaces
@@ -398,7 +409,7 @@ impl HeedStore {
             .unwrap_or(0);
         let map_bytes = opts.map_size_for(used, MAP_ROUND);
 
-        let mut o = EnvOpenOptions::new();
+        let mut o = EnvOpenOptions::new().read_txn_without_tls();
         o.map_size(map_bytes);
         o.max_dbs(MAX_DBS);
         o.max_readers(opts.max_readers);
@@ -416,7 +427,7 @@ impl HeedStore {
         // bytes reach the platter, not every commit.
         unsafe { o.flags(flags) };
 
-        let env: Env<WithTls> = unsafe { o.open(dir) }.map_err(|e| match e {
+        let env: Env<WithoutTls> = unsafe { o.open(dir) }.map_err(|e| match e {
             heed::Error::EnvAlreadyOpened => StoreError::Io(format!(
                 "{} is already open in this process (one store per data dir)",
                 dir.display()
@@ -439,7 +450,7 @@ impl HeedStore {
     /// [`HeedStore::open`] from the open environment on: the keyspaces, the
     /// format, the migration, the scrub and the verified load.
     fn open_env(
-        env: Env<WithTls>,
+        env: Env<WithoutTls>,
         dir: &Path,
         opts: &StoreOpts,
         sigbus: sigbus::Notice,
@@ -661,6 +672,17 @@ impl HeedStore {
 
     pub fn path(&self) -> &Path {
         &self.dir
+    }
+
+    /// TEST ONLY: run `f` inside one LMDB read transaction, which holds a
+    /// reader slot until `f` returns: what the load, the scrub and a
+    /// checkpoint copy open, and what [`HeedStore::read`] does not open while
+    /// every keyspace is in RAM. Pin 3's refusal comes back as theirs does.
+    #[cfg(test)]
+    pub fn with_lmdb_read<R>(&self, f: impl FnOnce() -> R) -> Result<R> {
+        let _guard = ReadGuard::acquire(&self.metrics)?;
+        let _txn = self.env.read_txn().map_err(|e| err(self, e))?;
+        Ok(f())
     }
 
     /// Copy the committed LMDB image into `dir/data.mdb` — one read
@@ -1471,7 +1493,14 @@ impl Store for HeedStore {
         self.check_poison()?;
         // PIN 2: one read per thread, beginning and ending inside this call.
         let _guard = ReadGuard::acquire(&self.metrics)?;
-        let txn = self.env.read_txn().map_err(|e| err(self, e))?;
+        // Every keyspace in RAM: nothing is read from LMDB, so no LMDB
+        // transaction, no reader slot and no turn on the reader mutex that
+        // `MDB_NOTLS` takes at every begin.
+        let txn = if self.all_ram {
+            None
+        } else {
+            Some(self.env.read_txn().map_err(|e| err(self, e))?)
+        };
         StoreMetrics::inc(&self.metrics.read_txns, 1);
         let handle = HeedRead {
             store: self,
@@ -1855,17 +1884,28 @@ fn ram_get_with(
     }
 }
 
-/// A read transaction. Cannot be `Send` (thread-local reader slots) and cannot
-/// outlive the [`Store::read`] call that made it.
+/// A read transaction. It cannot outlive the [`Store::read`] call that made
+/// it.
 ///
 /// LMDB-direct keyspaces are read from the transaction's snapshot; RAM
 /// keyspaces from the live tables (module header).
 pub struct HeedRead<'s> {
     store: &'s HeedStore,
-    txn: heed::RoTxn<'s, WithTls>,
+    /// `None` while every keyspace is in RAM: there is nothing to read from
+    /// LMDB ([`Store::read`]).
+    txn: Option<heed::RoTxn<'s, WithoutTls>>,
     /// The RAM values this handle has returned from `get_raw`, kept for as
     /// long as the handle ([`Arena`], [`arena_slice`]).
     arena: RefCell<Arena>,
+}
+
+impl<'s> HeedRead<'s> {
+    /// The LMDB snapshot an LMDB-direct keyspace is read from.
+    fn lmdb(&self) -> Result<&heed::RoTxn<'s, WithoutTls>> {
+        self.txn.as_ref().ok_or_else(|| {
+            StoreError::Io("no LMDB read transaction is open (every keyspace is RAM)".into())
+        })
+    }
 }
 
 impl super::Reads for HeedRead<'_> {
@@ -1885,7 +1925,7 @@ impl super::Reads for HeedRead<'_> {
         match self
             .store
             .db(ks)
-            .get(&self.txn, key)
+            .get(self.lmdb()?, key)
             .map_err(|e| err(self.store, e))?
         {
             None => Ok(None),
@@ -1920,7 +1960,7 @@ impl super::Reads for HeedRead<'_> {
         if let Some(t) = self.store.ram(ks) {
             return ram_scan(self.store, t, ks, from, prefix, limit, false, cb);
         }
-        scan_with(self.store, &self.txn, ks, from, prefix, limit, false, cb)
+        scan_with(self.store, self.lmdb()?, ks, from, prefix, limit, false, cb)
     }
 
     fn scan_rev_raw(
@@ -1935,7 +1975,7 @@ impl super::Reads for HeedRead<'_> {
         if let Some(t) = self.store.ram(ks) {
             return ram_scan(self.store, t, ks, from, prefix, limit, true, cb);
         }
-        scan_with(self.store, &self.txn, ks, from, prefix, limit, true, cb)
+        scan_with(self.store, self.lmdb()?, ks, from, prefix, limit, true, cb)
     }
 
     fn count(&self, ks: Keyspace) -> Result<u64> {
@@ -2871,7 +2911,7 @@ enum Migration {
 /// sync. A crash anywhere before the commit leaves the store format 0, and the
 /// next open migrates again.
 fn migrate_to_v1(
-    env: &Env<WithTls>,
+    env: &Env<WithoutTls>,
     dbs: &[Database<Bytes, Bytes>],
     seeds: &Seeds,
     fail_before_commit: bool,
@@ -3141,12 +3181,12 @@ fn inspect_image(dir: &Path, scrub: bool) -> Result<(u64, u64, Option<ScrubRepor
     let notice = sigbus::Notice::for_dir(dir);
     let _watch = MapWatch::new(&notice);
     let map = (used + 2 * MAP_ROUND).div_ceil(MAP_ROUND) * MAP_ROUND;
-    let mut o = EnvOpenOptions::new();
+    let mut o = EnvOpenOptions::new().read_txn_without_tls();
     o.map_size(map);
     o.max_dbs(MAX_DBS);
     // SAFETY: a read-only, lock-free open of a copy nobody else writes.
     unsafe { o.flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK) };
-    let env: Env<WithTls> = unsafe { o.open(dir) }
+    let env: Env<WithoutTls> = unsafe { o.open(dir) }
         .map_err(|e| StoreError::Mdb(format!("open {} read-only: {e}", dir.display())))?;
     let seeds = integrity::seeds();
     let out = (|| {

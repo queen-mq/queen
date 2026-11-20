@@ -74,7 +74,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, Weak};
 
 use heed::types::Bytes;
-use heed::{Database, Env, EnvFlags, EnvOpenOptions, RoTxn, RwTxn, WithTls};
+use heed::{Database, Env, EnvFlags, EnvOpenOptions, RoTxn, RwTxn, WithoutTls};
 use xxhash_rust::xxh3::{xxh3_128, xxh3_64_with_seed};
 
 use crate::rsm::effect::{Pid, TraceEvent};
@@ -368,7 +368,7 @@ fn corrupt(db: Db, detail: impl Into<String>) -> StoreError {
 // ---------------------------------------------------------------------------
 
 pub struct TraceStore {
-    env: Env<WithTls>,
+    env: Env<WithoutTls>,
     dbs: [Database<Bytes, Bytes>; 5],
     seeds: [u64; 5],
     dir: PathBuf,
@@ -424,7 +424,9 @@ impl TraceStore {
             map_bytes: opts.map_bytes,
             ..StoreOpts::default()
         };
-        let mut o = EnvOpenOptions::new();
+        // MDB_NOTLS, as the store: no reader slot is left on a thread for a
+        // thread exit to clear while the environment closes (`heed_store`).
+        let mut o = EnvOpenOptions::new().read_txn_without_tls();
         o.map_size(rule.map_size_for(used, MAP_ROUND));
         o.max_dbs(8);
         o.max_readers(opts.max_readers);
@@ -432,7 +434,7 @@ impl TraceStore {
         // point: the durable point decides when these bytes reach the platter
         // ([`TraceStore::sync`]), as for the store (its pin 1).
         unsafe { o.flags(EnvFlags::NO_SYNC) };
-        let env: Env<WithTls> = match unsafe { o.open(dir) } {
+        let env: Env<WithoutTls> = match unsafe { o.open(dir) } {
             Ok(env) => env,
             Err(heed::Error::EnvAlreadyOpened) => {
                 // A previous instance of this process is still closing (its
@@ -874,7 +876,7 @@ impl TraceWrite<'_> {
 /// One read transaction over the environment ([`TraceStore::read`]).
 pub struct TraceRead<'s> {
     store: &'s TraceStore,
-    txn: RoTxn<'s, WithTls>,
+    txn: RoTxn<'s, WithoutTls>,
 }
 
 /// What `/traces/names` reports for one name.

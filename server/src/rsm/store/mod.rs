@@ -19,14 +19,15 @@
 //!    (§11.4) and nowhere else. NOMETASYNC was measured at 87% of the rate,
 //!    1.8× the kernel writes and a **123 ms** store-commit p99 on the apply
 //!    thread (RAFT_STATUS.md R-05).
-//! 2. **A read-transaction HANDLE, never a free-standing `get`/`scan`.** With
-//!    thread-local reader slots a second read transaction on one thread is
-//!    `MDB_BAD_RSLOT`, and the `Send`-capable mode (`MDB_NOTLS`) does not
-//!    scale: 2.06/1.97/2.08 M gets/s at 1/4/8 threads against 2.10/8.18/**9.96**
-//!    M with TLS slots (R-06). So [`Store::read`] takes a closure: a read
-//!    BEGINS AND ENDS inside one blocking call, never crosses an `.await`, and
-//!    a nested one is refused by construction ([`StoreError::NestedRead`])
-//!    instead of reaching LMDB and coming back as `MDB_BAD_RSLOT`.
+//! 2. **A read-transaction HANDLE, never a free-standing `get`/`scan`.**
+//!    [`Store::read`] takes a closure: a read BEGINS AND ENDS inside one
+//!    blocking call, never crosses an `.await`, and a nested one is refused by
+//!    construction ([`StoreError::NestedRead`]). While every keyspace is in
+//!    RAM (all of them, [`Keyspace::is_ram`]) a read opens no LMDB
+//!    transaction. The LMDB ones that are left run with `MDB_NOTLS`, so a
+//!    reader slot is held only while its transaction runs: with thread-local
+//!    slots a thread that exits while the store closes writes to the unmapped
+//!    lock file ([`heed_store`]).
 //! 3. **`max_readers` ≥ the blocking pool**, and `MDB_READERS_FULL` is a
 //!    REFUSAL ([`StoreError::ReadersFull`], retryable), never a panic.
 //! 4. **The map-size rule** (§11.8): the map is sized at open from what the
@@ -508,10 +509,10 @@ pub mod meta {
 /// store exactly as it applies to the planner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreError {
-    /// Pin 2. A read transaction was asked for while this thread already held
-    /// one. LMDB would answer `MDB_BAD_RSLOT` (measured: the 2nd of 200 on one
-    /// thread, R-06); the adapter refuses first, so the caller gets a named
-    /// error instead of a reader-slot corruption.
+    /// Pin 2. A read was asked for while this thread was already inside one.
+    /// The adapter refuses it by construction. With LMDB's thread-local reader
+    /// slots, which the store no longer uses ([`heed_store`]), LMDB answered
+    /// it `MDB_BAD_RSLOT` (measured: the 2nd of 200 on one thread, R-06).
     NestedRead,
     /// Pin 3. `MDB_READERS_FULL`: every reader slot is taken. RETRYABLE — the
     /// caller answers a retryable error and the slot frees when a read ends.
@@ -1267,8 +1268,8 @@ impl Default for EntryGate {
 /// call). D9 ratified ONE engine, so nothing needs `dyn Store`; a second
 /// engine would be a second `impl` and a type parameter on the apply thread.
 pub trait Store: Send + Sync {
-    /// The read handle. `!Send` by construction with thread-local reader
-    /// slots, which is half of why it cannot cross an `.await`.
+    /// The read handle, borrowed for one blocking call: it cannot cross an
+    /// `.await`.
     type Read<'s>: Reads
     where
         Self: 's;

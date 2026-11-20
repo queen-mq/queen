@@ -68,6 +68,24 @@ every Kafka client does. Jepsen's Kafka workload found it: at the end of a test,
 producers committed one consumer group's offsets on the same partitions at the same moment, and six
 of them were refused. Nothing was lost or written twice: each refused commit wrote nothing.
 
+**Server: no crash when a store closes while a thread that read it exits.** The store and the trace
+store kept an LMDB reader slot on every thread that had ever read them, until the thread exited, and
+LMDB frees such a slot from a hook that runs as the thread exits. When a thread exited while its
+store was closing, that hook could write into the store's lock file after the close had unmapped it,
+and the process died of SIGSEGV. The broker process never closes its store while it runs (installing
+a snapshot restarts it), so it was not exposed; an application that embeds the broker and restarts
+it in its own process was, and so were the broker's test binaries, which open and close hundreds of
+stores: 3 times in about 100 CI runs. Both stores now hold a reader slot only while an LMDB read
+lasts (LMDB's `MDB_NOTLS`), so no slot is left for a thread's exit to free. That mode takes a lock
+inside LMDB at the start of each LMDB read, so the store's reads, all served from RAM, now open no
+LMDB read at all; the LMDB reads left are the load at boot, the background scrub, a snapshot's copy
+and trace queries. One thing behaves differently: after a fatal LMDB error, reads go on answering
+from RAM, as writes already did, where before every read failed. The gauge
+`queen_raft_store_readers{kind="used"}`, the most reader slots in use at once since boot, now stays
+at a few instead of growing with the threads that had read. Tests let as many threads read once and
+stay alive as there are reader slots, then read once more: before the change that read was refused,
+every time.
+
 ## JS client 2.9.2 - 2026-11-18
 
 **JS client: it works on Node 26.** On Node 26 the JS client up to 2.9.1 sent no request at all:

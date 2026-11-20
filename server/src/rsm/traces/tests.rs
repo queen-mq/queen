@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::*;
+use crate::rsm::tests::store::beside_threads_that_have_read;
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -428,6 +429,32 @@ fn ties_order_a_legacy_row_before_a_disk_row_of_the_same_message() {
     // A message that sorts lower comes first whatever its source.
     let lower = legacy_tie("acme", &keys::trace("acme", Some(7), "s", 99)).unwrap();
     assert!(lower < ties[0]);
+    drop(t);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A thread keeps no reader slot once its read is over, as in the store
+/// (`rsm::tests::store::a_thread_keeps_no_reader_slot_after_its_read`). The
+/// facade reads traces on blocking-pool threads, which exit when idle: with
+/// thread-local slots each one kept a slot until then, and one that exited
+/// while the environment closed wrote to its unmapped lock file.
+#[test]
+fn a_thread_keeps_no_reader_slot_after_its_trace_read() {
+    let dir = scratch("slots");
+    let t = open(
+        &dir,
+        TraceOpts {
+            max_readers: 2,
+            ..small()
+        },
+    )
+    .unwrap();
+    let n = t.map_usage().max_readers as usize;
+    let answers = beside_threads_that_have_read(n, || t.read(|r| r.rows()));
+    assert!(
+        answers.iter().all(|a| a.is_ok()),
+        "{n} threads read once and stay alive, then one more reads: {answers:?}"
+    );
     drop(t);
     let _ = std::fs::remove_dir_all(&dir);
 }

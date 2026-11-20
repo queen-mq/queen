@@ -104,7 +104,7 @@ pub(super) mod samples;
 #[cfg(feature = "server")]
 mod scope;
 mod stale_leader;
-mod store;
+pub(super) mod store;
 mod store_crash;
 mod store_integrity;
 mod store_scrub;
