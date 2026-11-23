@@ -1,0 +1,157 @@
+# The debug MCP server in its own namespace, reached only by port-forward.
+#
+#   kubectl --context <yours> apply -f install.yaml
+#   kubectl --context <yours> -n queen-debug port-forward deploy/queen-debug 7700:7700
+#   claude mcp add --transport http queen-debug http://localhost:7700/mcp
+#
+# Before applying, set these to your cluster:
+#   - `namespace: queen` on the Role and RoleBinding, and QUEEN_DEBUG_NAMESPACE
+#   - QUEEN_DEBUG_SELECTOR: `app.kubernetes.io/name=queen` for the operator,
+#     `run=<release>` for a Helm release of the broker chart
+#
+# WHO GETS IN: this server has no login. Whoever may port-forward in the
+# queen-debug namespace can use it, and through it read your queues. Keep it in
+# its own namespace: port-forward rights are per namespace, so people let in
+# here get this server and not the brokers, whose port may have no login at all.
+# Grant access by binding the `queen-debug-user` Role below to a group.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: queen-debug
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: queen-debug
+  namespace: queen-debug
+---
+# What the server reads about the broker pods: their state, logs and events.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: queen-debug-reader
+  namespace: queen
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: queen-debug-reader
+  namespace: queen
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: queen-debug-reader
+subjects:
+  - kind: ServiceAccount
+    name: queen-debug
+    namespace: queen-debug
+---
+# What a person needs to open the port-forward, and nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: queen-debug-user
+  namespace: queen-debug
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # `get` for kubectl over WebSockets, `create` for the older protocol.
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["get", "create"]
+---
+# Uncomment and name your group to let it in.
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: RoleBinding
+# metadata:
+#   name: queen-debug-users
+#   namespace: queen-debug
+# roleRef:
+#   apiGroup: rbac.authorization.k8s.io
+#   kind: Role
+#   name: queen-debug-user
+# subjects:
+#   - apiGroup: rbac.authorization.k8s.io
+#     kind: Group
+#     name: your-team@example.com
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: queen-debug
+  namespace: queen-debug
+  labels:
+    app.kubernetes.io/name: queen-debug
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: queen-debug
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: queen-debug
+    spec:
+      serviceAccountName: queen-debug
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: queen-debug
+          image: ghcr.io/queen-mq/queen-debug:2.10.0
+          args: ["--transport", "http"]
+          env:
+            - name: QUEEN_DEBUG_NAMESPACE
+              value: queen
+            - name: QUEEN_DEBUG_SELECTOR
+              value: app.kubernetes.io/name=queen
+            # Bodies and headers go to your AI provider when this is on.
+            - name: QUEEN_DEBUG_READ_MESSAGES
+              value: "false"
+            # Fields to hide even with bodies on: data.guest.email,headers.authorization
+            - name: QUEEN_DEBUG_MASK
+              value: ""
+            # On a broker with JWT on, a read-only token:
+            # - name: QUEEN_DEBUG_TOKEN
+            #   valueFrom:
+            #     secretKeyRef: { name: queen-debug, key: token }
+          # It listens on the pod's loopback, where a port-forward arrives and
+          # no other pod can. So there is no Service, and the probe runs inside.
+          livenessProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - "fetch('http://127.0.0.1:7700/healthz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

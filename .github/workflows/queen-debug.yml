@@ -1,0 +1,108 @@
+name: Debug MCP
+
+# deploy/queen-debug: its tests on every change, and its image beside the
+# broker's on a release:
+#   ghcr.io/queen-mq/queen-debug
+#
+# It imports the console's rules and checks itself against the broker's route
+# table, so a change to either runs these tests too. The image is versioned
+# from server.json, like the broker's and the operator's. A package is PRIVATE
+# the first time it is published: flip `queen-debug` once by hand at
+# https://github.com/orgs/queen-mq/packages -> package -> Package settings.
+
+on:
+  push:
+    branches: [ "master", "release" ]
+    tags: [ "v*" ]
+    paths:
+      - "deploy/queen-debug/**"
+      - "app/src/api/**"
+      - "app/src/composables/**"
+      - "app/src/console/**"
+      - "webdoc/src/content/partials/generated/broker-routes.mdx"
+      - ".github/workflows/queen-debug.yml"
+      - "server/server.json"
+  pull_request:
+    paths:
+      - "deploy/queen-debug/**"
+      - "app/src/api/**"
+      - "app/src/composables/**"
+      - "app/src/console/**"
+      - "webdoc/src/content/partials/generated/broker-routes.mdx"
+      - ".github/workflows/queen-debug.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: queen-debug-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+        cache: npm
+        cache-dependency-path: |
+          app/package-lock.json
+          deploy/queen-debug/package-lock.json
+
+    # The rules it imports live in app/src and resolve their packages there.
+    - name: Install
+      run: |
+        npm ci --ignore-scripts --prefix app
+        npm ci --ignore-scripts --prefix deploy/queen-debug
+
+    - name: Test
+      run: npm test --prefix deploy/queen-debug
+
+    - name: The image builds and starts
+      run: |
+        docker build -f deploy/queen-debug/Dockerfile -t queen-debug:ci .
+        docker run --rm queen-debug:ci --help
+
+  image:
+    needs: test
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: docker/setup-qemu-action@v3
+    - uses: docker/setup-buildx-action@v3
+
+    - name: Resolve the version
+      id: meta
+      run: |
+        VERSION=$(jq -r '.version' server/server.json)
+        test -n "$VERSION" || { echo "could not resolve the version"; exit 1; }
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+    - uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: deploy/queen-debug/Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository_owner }}/queen-debug:${{ steps.meta.outputs.version }}
+          ghcr.io/${{ github.repository_owner }}/queen-debug:latest
+        labels: |
+          org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          org.opencontainers.image.revision=${{ github.sha }}
+          org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          org.opencontainers.image.licenses=Apache-2.0
+        cache-from: type=gha,scope=queen-debug
+        cache-to: type=gha,scope=queen-debug,mode=max

@@ -1,0 +1,22 @@
+{
+  "name": "queen-debug",
+  "version": "2.10.0",
+  "description": "A read-only MCP server to debug a running QueenMQ cluster: nodes, queues, consumer groups, messages, dead letters and application state.",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": {
+    "queen-debug": "bin/queen-debug.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node bin/queen-debug.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:live": "node test/live/run.mjs"
+  },
+  "dependencies": {
+    "fzstd": "0.1.1"
+  }
+}

@@ -1,0 +1,9 @@
+# Used instead of the root .dockerignore, which leaves out deploy/.
+*
+!app/src/api/*.js
+!app/src/composables/*.js
+!app/src/console/**/*.js
+!deploy/queen-debug/package.json
+!deploy/queen-debug/package-lock.json
+!deploy/queen-debug/bin/**
+!deploy/queen-debug/src/**
