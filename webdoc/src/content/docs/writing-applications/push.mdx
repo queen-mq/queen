@@ -90,6 +90,9 @@ verifiedBy:
 # requests through undici's diagnostics channels instead of a wrapper around globalThis.fetch,
 # which the JS client stopped calling in 2.9.2; its regions are unchanged. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/pop.rs files a
+# caught-up record that holds nothing under the end of its idle window. What a pop, an ack, a lease
+# or a transaction answers does not change: nothing this page states changes.
 ---
 
 In Kafka you choose a number of partitions and hash keys onto them, so a slow customer holds up every customer that shares its partition. Here a partition is one entity: a customer, an order, a conversation. The push that names it creates it, order holds inside it, and one queue has held ten million.

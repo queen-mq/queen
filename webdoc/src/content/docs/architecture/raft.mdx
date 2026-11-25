@@ -64,6 +64,9 @@ sourceOfTruth:
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/mod.rs gives each
+# shard its idle window; hooks.rs notes when a group reads the whole queue. What a pop, an ack, a
+# lease or a transaction answers does not change: nothing this page states changes.
 ---
 
 The nodes agree on the log with Raft, through the openraft library. Raft decides who leads and when an entry is committed. An entry is committed when a majority of the nodes has written it and synced it to disk (fsync).

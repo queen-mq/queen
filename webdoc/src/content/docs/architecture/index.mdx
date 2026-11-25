@@ -77,6 +77,9 @@ digest: >-
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/mod.rs gives each
+# shard its idle window; hooks.rs notes when a group reads the whole queue. What a pop, an ack, a
+# lease or a transaction answers does not change: nothing this page states changes.
 ---
 
 A QueenMQ node is one process. Every write is decided once, on the leader, and then applied on every node. These pages follow a write through the process, from the request to the disk.

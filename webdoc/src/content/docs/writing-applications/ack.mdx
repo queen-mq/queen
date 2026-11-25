@@ -105,6 +105,10 @@ verifiedBy:
 # requests through undici's diagnostics channels instead of a wrapper around globalThis.fetch,
 # which the JS client stopped calling in 2.9.2; its regions are unchanged. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/pop.rs files a
+# caught-up record that holds nothing under the end of its idle window; state.rs keeps those windows
+# in a wheel per shard (Part.idle_at). What a pop, an ack, a lease or a transaction answers does not
+# change: nothing this page states changes.
 ---
 
 An ack tells the broker what happened to a message. A `completed` ack moves the consumer group's cursor past it, and that is all: the message stays in its partition until retention removes it.

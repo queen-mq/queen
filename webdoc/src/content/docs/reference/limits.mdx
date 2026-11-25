@@ -152,6 +152,9 @@ sourceOfTruth:
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/wait.rs drops the
+# due ones, at most 1,024 a shard per tick. The cap this page reads from wait.rs
+# (QUEEN_MAX_PARKED_POPS, 50,000) does not change.
 ---
 
 Most of QueenMQ's limits exist to keep one request from costing everyone else: a body cap, a ceiling

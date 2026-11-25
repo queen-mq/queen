@@ -106,6 +106,10 @@ verifiedBy:
 # requests through undici's diagnostics channels instead of a wrapper around globalThis.fetch,
 # which the JS client stopped calling in 2.9.2; its regions are unchanged. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/pop.rs files a
+# caught-up record that holds nothing under the end of its idle window; state.rs keeps those windows
+# in a wheel per shard (Part.idle_at). What a pop, an ack, a lease or a transaction answers does not
+# change: nothing this page states changes.
 ---
 
 Every `failed` ack spends one retry. The message comes back after the queue's `retryDelay`, and its partition waits with it, for that consumer group. After `retryLimit` failures, the message goes to the dead-letter queue and the group moves on. You set both on the queue (see [Create and configure queues](/writing-applications/queues/)).

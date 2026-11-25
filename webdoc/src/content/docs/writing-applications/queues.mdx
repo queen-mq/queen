@@ -81,6 +81,9 @@ verifiedBy:
 # requests through undici's diagnostics channels instead of a wrapper around globalThis.fetch,
 # which the JS client stopped calling in 2.9.2; its regions are unchanged. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/pop.rs files a
+# caught-up record that holds nothing under the end of its idle window. What a pop, an ack, a lease
+# or a transaction answers does not change: nothing this page states changes.
 ---
 
 A queue is a named set of partitions that share one configuration. You never have to create one: the first push that names a queue creates it, with the defaults. Configure it when you want other settings.

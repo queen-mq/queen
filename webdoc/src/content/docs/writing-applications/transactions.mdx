@@ -75,6 +75,9 @@ verifiedBy:
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # The `reserved` row of the rollback table says so.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/txn.rs files the
+# records a committed transaction leaves holding nothing. What a pop, an ack, a lease or a
+# transaction answers does not change: nothing this page states changes.
 ---
 
 The ack, the order's new state, the next event and tomorrow's reminder commit as one log entry, or none of them does. That one call replaces the outbox table, the idempotency table and the cron job.

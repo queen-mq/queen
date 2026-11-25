@@ -135,6 +135,9 @@ sourceOfTruth:
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/mod.rs gives each
+# shard its idle window. The QUEEN_CONSUME_IDLE_UNLOAD_S row now holds on time, however many
+# partitions came before; no setting this page lists changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

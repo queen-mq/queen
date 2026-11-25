@@ -75,6 +75,10 @@ digest: >-
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/pop.rs files a
+# caught-up record that holds nothing under the end of its idle window; txn.rs files the records a
+# committed transaction leaves holding nothing. What a pop, an ack, a lease or a transaction answers
+# does not change: nothing this page states changes.
 ---
 
 The model of QueenMQ is easy to understand. It rests on four ideas: partitions, leases, transactions and a simple interface.
