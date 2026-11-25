@@ -505,6 +505,7 @@ impl Engine {
         let (waiters, held, cat_waiters) = {
             let mut st = lock(&g.st);
             st.dropped = true;
+            g.sync_whole(&st);
             (
                 std::mem::take(&mut st.waiters),
                 std::mem::take(&mut st.held),

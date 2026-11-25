@@ -3,6 +3,27 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Server: an idle partition leaves the leader's memory on time, however many partitions came
+before it.** The leader keeps a small record for each consumer group's partition and drops it once
+the partition has held nothing for `QUEEN_CONSUME_IDLE_UNLOAD_S` (600 s). Until now a background
+pass found those records by walking every partition id from the oldest live partition to the
+newest one ever created, deleted ones included, one step per consumer group for each id. Ids are
+never reused, so a broker that keeps creating partitions (one per chat, trace or reservation) made
+that pass longer every day: with 196 consumer groups it walked about 1,000 ids a second, and idle
+records stayed in memory for hours past their window (a production leader held 117,000 of them).
+Now a record that goes quiet is filed under the end of its window, in a list each shard keeps in
+10 ms slots, and the clock work drops it at the first tick after that time, unless it got work in
+between. The cost is one entry per record that goes quiet, whatever the number of partitions,
+groups or ids ever used, and an ack files its record without reading the partition: the partition
+is checked once, when the window ends. The clock work takes at most 1,024 due records from a shard
+per tick, so a new leader whose idle windows all end together never holds a shard's lock for long.
+Nothing changes in what a pop, an ack or a lease answers: a dropped record is read back from its
+cursor row with its partition's next message, as before. Over three hours of a production-like
+load (75,000 partitions), the leader held a steady 32,000 records where 2.10.0 climbed to 149,000,
+at the same throughput and latency; Jepsen ran 30 tests with the window at 1 s, all valid.
+
 ## 2.10.0 - 2026-11-20
 
 **Upgrading from 2.9.x: a rolling restart.** 2.10.0 keeps the data format of 2.9.0 (cluster

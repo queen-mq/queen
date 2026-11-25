@@ -372,7 +372,7 @@ impl Engine {
                 });
             }
         }
-        let _ = now_us;
+        ticket.taken_us = now_us;
         ticket.ids = commands.iter().map(|c| c.request_id).collect();
         let id = {
             let mut t = lock(&self.tickets);
@@ -420,8 +420,18 @@ impl Engine {
         let mut settled: Vec<u64> = Vec::new();
         for (pid, gid, ver) in &t.rows {
             let mut sh = lock(&self.shards[shard_of(*pid)]);
-            let sh = &mut *sh;
-            let Some(p) = sh.groups.get_mut(gid).and_then(|gs| gs.parts.get_mut(pid)) else {
+            let super::state::Shard {
+                groups,
+                dirty,
+                idle,
+                idle_us,
+                ..
+            } = &mut *sh;
+            let Some(gs) = groups.get_mut(gid) else {
+                continue;
+            };
+            let super::state::GroupShard { g, parts, .. } = gs;
+            let Some(p) = parts.get_mut(pid) else {
                 continue;
             };
             if p.sent_ver == *ver {
@@ -450,9 +460,16 @@ impl Engine {
                 p.dlq = back;
                 if !p.dirty {
                     p.dirty = true;
-                    sh.dirty.push((*pid, *gid));
+                    dirty.push((*pid, *gid));
                 }
                 gone.push(*pid);
+            }
+            if committed {
+                // Its change is durable: a part that holds nothing now has
+                // held nothing since about the take ([`super::unload`]). The
+                // part alone says so: its partition is read when the window
+                // ends, not here, where every ack's answer waits.
+                super::unload::arm_idle(idle, p, None, g, *idle_us, t.taken_us, *gid, *pid);
             }
         }
         let by_id: Vec<(Arc<Group>, u64)> = {

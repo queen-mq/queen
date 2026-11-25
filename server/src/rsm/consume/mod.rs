@@ -369,6 +369,7 @@ impl Engine {
     }
 
     pub(crate) fn with_knobs(store: Arc<HeedStore>, k: Knobs) -> Arc<Engine> {
+        let idle_us = k.idle_unload_us.max(0);
         Arc::new_cyclic(|me| Engine {
             me: me.clone(),
             store,
@@ -388,7 +389,14 @@ impl Engine {
             own_from: AtomicU64::new(u64::MAX),
             cluster: AtomicU32::new(crate::rsm::effect::BASELINE_KINDS_VERSION),
             reg: RwLock::new(Registry::default()),
-            shards: (0..SHARDS).map(|_| Mutex::new(Shard::default())).collect(),
+            shards: (0..SHARDS)
+                .map(|_| {
+                    Mutex::new(Shard {
+                        idle_us,
+                        ..Shard::default()
+                    })
+                })
+                .collect(),
             appends: (0..SHARDS).map(|_| Mutex::new(Vec::new())).collect(),
             appends_pending: AtomicBool::new(false),
             answers: Mutex::new(Answers::default()),
@@ -877,6 +885,7 @@ impl Engine {
             let (waiters, held) = {
                 let mut st = lock(&g.st);
                 st.dropped = true;
+                g.sync_whole(&st);
                 (
                     std::mem::take(&mut st.waiters),
                     std::mem::take(&mut st.held),
@@ -891,7 +900,11 @@ impl Engine {
             }
         }
         for s in self.shards.iter() {
-            *lock(s) = Shard::default();
+            // Everything goes but the idle window, a knob of the engine.
+            *lock(s) = Shard {
+                idle_us: self.k.idle_unload_us.max(0),
+                ..Shard::default()
+            };
         }
         for a in self.appends.iter() {
             lock(a).clear();

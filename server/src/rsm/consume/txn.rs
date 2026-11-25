@@ -504,10 +504,22 @@ impl Engine {
                         sh.index_lease(&w, pid, gid);
                     }
                 }
-                let super::state::Shard { groups, timers, .. } = sh;
-                if let Some(p) = groups.get_mut(&gid).and_then(|gs| gs.parts.get_mut(&pid)) {
-                    if let Some(t) = p.cur.lease_until(grace) {
-                        super::state::schedule(timers, p, t, gid, pid);
+                let super::state::Shard {
+                    groups,
+                    timers,
+                    idle,
+                    idle_us,
+                    ..
+                } = sh;
+                if let Some(gs) = groups.get_mut(&gid) {
+                    let super::state::GroupShard { g, parts, .. } = gs;
+                    if let Some(p) = parts.get_mut(&pid) {
+                        if let Some(t) = p.cur.lease_until(grace) {
+                            super::state::schedule(timers, p, t, gid, pid);
+                        }
+                        // Durable at once: a part the transaction left holding
+                        // nothing gets its idle look ([`super::unload`]).
+                        super::unload::arm_idle(idle, p, None, g, *idle_us, now, gid, pid);
                     }
                 }
             }

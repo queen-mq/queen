@@ -49,6 +49,8 @@ pub(crate) fn arm(sh: &mut Shard, gid: Gid, pid: Pid, now_us: i64, grace_us: i64
         pids,
         groups,
         timers,
+        idle,
+        idle_us,
         ..
     } = sh;
     let (Some(pi), Some(gs)) = (pids.get(&pid), groups.get_mut(&gid)) else {
@@ -67,6 +69,9 @@ pub(crate) fn arm(sh: &mut Shard, gid: Gid, pid: Pid, now_us: i64, grace_us: i64
         return false;
     }
     if pi.tail <= part.cur.committed && part.seed_ts.is_none() {
+        // Caught up. A part that holds nothing gets its idle look
+        // ([`super::unload`]).
+        super::unload::arm_idle(idle, part, Some(pi), &gs.g, *idle_us, now_us, gid, pid);
         return false;
     }
     if part.ready_at > now_us {
@@ -723,6 +728,7 @@ impl Engine {
                 Load::Loading => false,
                 Load::Partial => {
                     st.load = Load::Loading;
+                    g.sync_whole(&st);
                     true
                 }
             }
@@ -1041,7 +1047,9 @@ impl Engine {
                 let meta = registration_meta(&c.namespace, &c.task, &c.sub, c.conflate, now);
                 let v = self.register(&g, meta, None);
                 deps.cats.push((g.clone(), v));
-                lock(&g.st).bulk_pending = true;
+                let mut st = lock(&g.st);
+                st.bulk_pending = true;
+                g.sync_whole(&st);
             }
         } else if let Some(v) = self.cat_pending(&g) {
             deps.cats.push((g.clone(), v));
@@ -1052,7 +1060,14 @@ impl Engine {
                 return Ok(PopStep::Taken);
             }
             self.attach_late(r, fr, &g, now)?;
-            let owed = std::mem::replace(&mut lock(&g.st).bulk_pending, false);
+            let (owed, whole) = {
+                let mut st = lock(&g.st);
+                let owed = std::mem::replace(&mut st.bulk_pending, false);
+                (owed, g.sync_whole(&st))
+            };
+            if whole {
+                self.arm_idle_group(&g, now);
+            }
             if owed {
                 self.bulk_seed(&g, &mut deps);
             }
