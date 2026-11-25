@@ -18,6 +18,7 @@ import { figureMarkdown } from "@/lib/figure-markdown";
 import {
   HOME_SUMMARY as SUMMARY,
   hero,
+  kernelSection,
   guideSection,
   guideRun,
   guideSteps,
@@ -55,6 +56,7 @@ export function homepageBody(): string {
 
   lines.push(`*${hero.eyebrow}*`, "");
   lines.push(`${hero.lead.text.join(" ")} **${hero.lead.close}**`, "");
+  lines.push(hero.lines.join("  \n"), "");
   lines.push(hero.proof.map((p) => link(p)).join(" · "), "");
   lines.push(
     `${link(hero.primary)} · ${link(hero.secondary)} · [GitHub](https://github.com/queen-mq/queen)`,
@@ -63,6 +65,14 @@ export function homepageBody(): string {
   lines.push(`${hero.talk.label} [${hero.talk.more}](${url(hero.talk.href)})`, "");
   lines.push(`${hero.map.label} [${hero.map.more}](${url(hero.map.href)})`, "");
   lines.push(`${hero.limit.text} ${link(hero.limit.link)}`, "");
+
+  // Why a kernel: the same table and the two cards the page shows under the hero.
+  lines.push(`## ${kernelSection.title}`, "", kernelSection.lead, "");
+  lines.push(`| ${kernelSection.head.join(" | ")} |`, "| --- | --- |");
+  for (const [a, b] of kernelSection.rows) lines.push(`| ${a} | ${b} |`);
+  lines.push("", kernelSection.close, "");
+  for (const c of [kernelSection.replaces, kernelSection.keeps]) lines.push(`- **${c.label}** ${c.text}`);
+  lines.push("");
 
   // The guide: every step in every language, since a reader of the markdown has
   // no language picker. Each language's code is the program that ran it.

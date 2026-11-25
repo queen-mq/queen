@@ -16,16 +16,18 @@ export const IMAGE = "ghcr.io/queen-mq/queen:2.10.0";
 
 /**
  * The `<title>`. NimbusHead appends " | QueenMQ" because this differs from
- * the site title, so the brand stays out of the string. It leads with the
- * words a reader searches for ("message broker"). 45 characters: with the
- * suffix it stays under the 65 that scripts/check-seo.mjs allows.
+ * the site title, so the brand stays out of the string. It leads with what
+ * QueenMQ is and keeps the words a reader searches for ("message broker").
+ * 54 characters: with the suffix it stays under the 65 that
+ * scripts/check-seo.mjs allows.
  */
-export const HOME_TITLE = "The ACID message broker: a queue per customer";
+export const HOME_TITLE = "A kernel for distributed systems, and a message broker";
 
 /** One line describing the page, for the index and corpus rows that list it. */
 export const HOME_SUMMARY =
-  "The landing page: the ACID message broker, with a queue per customer, one commit per step, " +
-  "its proof and its limit, then a five-minute guide in " +
+  "The landing page: a kernel for distributed systems (a FIFO queue and state per entity, one " +
+  "transaction per step, all in one log, and so also the broker), why a kernel, what it replaces " +
+  "and what you keep, its proof and its limit, then a five-minute guide in " +
   "JavaScript, Python, Go, Rust, PHP and C++ (run a node, configure a queue, push to a partition, " +
   "consume, commit one step as one transaction, replay from a time and fetch by offset, run a job " +
   "once under a lock, aggregate with a stream, request/reply over an ephemeral queue), the " +
@@ -41,23 +43,29 @@ const LINE = IMAGE.slice(IMAGE.lastIndexOf(":") + 1).split(".").slice(0, 2).join
  */
 export const hero = {
   eyebrow: `QueenMQ ${LINE}`,
-  headline: "The ACID message broker.",
+  headline: "A kernel for distributed systems.",
   /** Second line of the `<h1>`, drawn dimmer. Empty: the headline stands alone. */
   subline: "",
   /**
-   * Under the headline: QueenMQ as the Kafka a reader already knows, with what
-   * Kafka cannot do, then the name. "One transaction covers" and not "spans
-   * everything": the reader's own database is outside it (the limit, below).
+   * Under the headline: what the kernel means, with the promise on its own
+   * line. The README's first screen says the same words.
    */
   lead: {
-    text: [
-      "Imagine a Kafka with millions of named partitions, created on the fly,",
-      "where you ack or nack each message,",
-      "where one transaction covers the ack, the next messages and your state,",
-      "with its own KV store and stream processing.",
-    ],
-    close: "That is QueenMQ.",
+    text: ["What a kernel gives a program (queues, memory, timers, locks),", "QueenMQ gives a distributed system."],
+    close: "And they commit together.",
   },
+  /**
+   * The definition, one line each, in this order: the entity, the transaction,
+   * the log, the broker that follows from it, and what there is to run.
+   * "Commit together" and not "runs once": delivery is at-least-once.
+   */
+  lines: [
+    "Every queue splits into FIFO subqueues, one per entity, each with its own state.",
+    "Take a message, update the state, send the next ones: one transaction.",
+    "All in one log.",
+    "So it's also the broker: any number of readers, replay from any point.",
+    "One Rust binary, replicated with Raft, Apache-2.0. Nothing else to run.",
+  ],
   /** The proof, one short claim per pill, each a link to the page that backs it. */
   proof: [
     { label: "568 Jepsen tests passed", href: "/benchmarks/jepsen/" },
@@ -84,6 +92,44 @@ export const hero = {
     text:
       "The limit: a transaction is one call, not a SQL session. Your own database is outside it.",
     link: { label: "Transactions", href: "/writing-applications/transactions/" },
+  },
+};
+
+/**
+ * Under the hero: why "kernel", as a table a reader can check line by line,
+ * then what QueenMQ takes off their stack and what stays. The README's
+ * "Why a kernel" and "What it replaces, what you keep" say the same.
+ */
+export const kernelSection = {
+  eyebrow: "The idea",
+  title: "Why a kernel",
+  lead:
+    "A program does not build its own queues, memory, timers and locks: the kernel gives it those, " +
+    "and they work together. A distributed system usually builds them out of separate services and " +
+    "glues them with code. QueenMQ gives them to it the way a kernel does:",
+  head: ["A kernel gives a program", "QueenMQ gives a distributed system"],
+  rows: [
+    ["message queues and pipes", "a FIFO queue per entity, consumer groups, replay"],
+    ["memory and files", "state, in a key-value store"],
+    ["timers and alarms", "timers that fire as messages"],
+    ["mutexes and semaphores", "locks and semaphores"],
+    ["atomic system calls", "one transaction: the ack, the state, the next messages, the timer"],
+  ],
+  close:
+    "They all live in one replicated log, so a step that touches all of them is one entry: it all " +
+    "applies, or none of it does. A worker that dies halfway leaves nothing half-done, and its " +
+    "message comes back.",
+  replaces: {
+    label: "It replaces",
+    text:
+      "the broker (Kafka, RabbitMQ, SQS) and the glue around it: the Redis lock, the cron job, the " +
+      "retry table, the idempotency table. With the PostgreSQL connector, Debezium too.",
+  },
+  keeps: {
+    label: "You keep",
+    text:
+      "your database. QueenMQ's state has no queries, so the records you search stay in PostgreSQL, " +
+      "or wherever they live today.",
   },
 };
 

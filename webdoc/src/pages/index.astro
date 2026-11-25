@@ -7,6 +7,7 @@ import { config } from "virtual:nimbus/config";
 import {
   HOME_TITLE,
   hero,
+  kernelSection,
   guideSection,
   guideRun,
   guideSteps,
@@ -57,120 +58,144 @@ const cardStatic = "block rounded-card bg-card p-5";
     <Header transparentTop showSidebar={false} />
 
     <main class="w-full flex-1">
-      {/* Hero: full height, two halves from lg up; the scene fills the right
-          42% under the clear header. Below lg the scene sits under the text.
-          The text is the talk's title slide: a big line, the promise under it,
-          the proof as pills, the way in, and the limit in small. */}
-      <section class="lg:-mt-[calc(3.5rem+1px)] lg:grid lg:min-h-svh lg:grid-cols-[minmax(0,1fr)_42%]">
-        <div class="flex lg:items-center lg:justify-center lg:px-16 xl:px-24">
-          <div class="mx-auto w-full max-w-6xl px-6 pb-14 pt-14 lg:max-w-[40rem] lg:px-0 lg:py-24">
-            <p class="text-[0.75rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground">{hero.eyebrow}</p>
-            <h1 data-md class="mt-5 text-foreground">
-              <span
-                class="block"
-                style="font-size: clamp(2.5rem, 4.4vw, 4rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
-              >
-                {hero.headline}
-              </span>
-              {hero.subline && (
-                <>
-                  {" "}
-                  <span
-                    class="block text-muted-foreground"
-                    style="font-size: clamp(2.5rem, 4.4vw, 4rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
-                  >
-                    {hero.subline}
-                  </span>
-                </>
-              )}
-            </h1>
-            {/* The setup dimmer, the name on a line of its own: the line lands there. */}
-            <p data-md class="mt-6 max-w-[38rem] text-[1.125rem] leading-normal text-muted-foreground lg:text-[1.25rem]">
-              {hero.lead.text.join(" ")}
-              <strong class="mt-2 block font-semibold text-foreground">{hero.lead.close}</strong>
-            </p>
-            {/* The proof as pills: filled with the card tone, a step quieter than the
-                buttons below, each a link to the page that backs it. Two by two
-                from sm up, so four of them make a block rather than 3 + 1. */}
-            <ul class="mt-8 flex flex-wrap gap-2.5 sm:grid sm:grid-cols-[repeat(2,max-content)]">
-              {
-                hero.proof.map((p) => (
-                  <li>
-                    <a
-                      href={p.href}
-                      class="block rounded-ctl bg-card px-3 py-1.5 text-[0.875rem] text-foreground no-underline transition-colors hover:bg-selected"
-                    >
-                      {p.label}
-                    </a>
-                  </li>
-                ))
-              }
-            </ul>
-
-            <div class="mt-10 flex flex-wrap items-center gap-3">
-              <a
-                href={hero.primary.href}
-                class="rounded-ctl bg-primary px-5 py-2.5 text-[0.875rem] font-medium text-primary-foreground no-underline transition-colors hover:bg-primary-hover"
-              >
-                {hero.primary.label}
-              </a>
-              <a
-                href={hero.secondary.href}
-                class="rounded-ctl bg-muted px-5 py-2.5 text-[0.875rem] font-medium text-foreground no-underline transition-colors hover:bg-selected"
-              >
-                {hero.secondary.label}
-              </a>
-              <a
-                href="https://github.com/queen-mq/queen"
-                class="px-2 py-2.5 text-[0.875rem] text-muted-foreground no-underline transition-colors hover:text-foreground"
-              >
-                GitHub →
-              </a>
-            </div>
-            {/* The talk, on a line of its own under the buttons: the way in for a
-                reader who already runs another broker. */}
-            <a
-              href={hero.talk.href}
-              class="mt-5 inline-block text-[0.9375rem] font-medium text-foreground/85 no-underline transition-colors hover:text-foreground"
+      {/* Hero: the words alone, no picture, on the column the sections under
+          it use, so its left edge is theirs. It is the talk's title slide: a
+          big line, the promise under it, the definition, the proof as pills,
+          the way in, and the limit in small. */}
+      <section>
+        <div class="mx-auto w-full max-w-5xl px-6 pb-20 pt-14 lg:px-10 lg:pb-28 lg:pt-24">
+          <p class="text-[0.75rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground">{hero.eyebrow}</p>
+          <h1 data-md class="mt-5 text-balance text-foreground">
+            <span
+              class="block"
+              style="font-size: clamp(2.5rem, 5.6vw, 5rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
             >
-              {hero.talk.label} <span class="text-muted-foreground">{hero.talk.more}</span> →
-            </a>
-            {/* The map, on the line under it: every part and option on one screen. */}
-            <a
-              href={hero.map.href}
-              class="mt-2 block w-fit text-[0.9375rem] font-medium text-foreground/85 no-underline transition-colors hover:text-foreground"
-            >
-              {hero.map.label} <span class="text-muted-foreground">{hero.map.more}</span> →
-            </a>
-            <p data-md class="mt-8 text-[0.8125rem] leading-relaxed text-muted-foreground">
-              {hero.limit.text}{" "}
-              <a
-                href={hero.limit.link.href}
-                class="whitespace-nowrap text-foreground/80 no-underline transition-colors hover:text-foreground"
-              >
-                {hero.limit.link.label} →
-              </a>
-            </p>
+              {hero.headline}
+            </span>
+            {hero.subline && (
+              <>
+                {" "}
+                <span
+                  class="block text-muted-foreground"
+                  style="font-size: clamp(2.5rem, 5.6vw, 5rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
+                >
+                  {hero.subline}
+                </span>
+              </>
+            )}
+          </h1>
+          {/* The setup dimmer, the name on a line of its own: the line lands there. */}
+          <p data-md class="mt-6 max-w-[38rem] text-[1.125rem] leading-normal text-muted-foreground lg:text-[1.25rem]">
+            {hero.lead.text.join(" ")}
+            <strong class="mt-2 block font-semibold text-foreground">{hero.lead.close}</strong>
+          </p>
+          {/* The definition, one line each, set apart by a rule so it reads as
+              one block: the five lines the README carries too. */}
+          <div data-md class="mt-6 max-w-[38rem] space-y-1.5 border-l-2 border-line pl-4 text-[0.9375rem] leading-relaxed text-foreground/85 lg:text-[1rem]">
+            {hero.lines.map((l) => <p>{l}</p>)}
           </div>
-        </div>
+          {/* The proof as pills: filled with the card tone, a step quieter than the
+              buttons below, each a link to the page that backs it. Two by two
+              from sm up, so four of them make a block rather than 3 + 1. */}
+          <ul class="mt-8 flex flex-wrap gap-2.5 sm:grid sm:grid-cols-[repeat(2,max-content)]">
+            {
+              hero.proof.map((p) => (
+                <li>
+                  <a
+                    href={p.href}
+                    class="block rounded-ctl bg-card px-3 py-1.5 text-[0.875rem] text-foreground no-underline transition-colors hover:bg-selected"
+                  >
+                    {p.label}
+                  </a>
+                </li>
+              ))
+            }
+          </ul>
 
-        <div class="relative aspect-[4/5] w-full sm:mx-auto sm:mb-12 sm:max-w-xl sm:overflow-hidden sm:rounded-xl lg:mx-0 lg:mb-0 lg:aspect-auto lg:max-w-none lg:rounded-none">
-          <img
-            src="/queen-scene-on-light.svg"
-            alt=""
-            width="1200"
-            height="1536"
-            class="hero-scene-light absolute inset-0 h-full w-full object-cover"
-            style="object-position: 48% 50%;"
-          />
-          <img
-            src="/queen-scene-on-dark.svg"
-            alt=""
-            width="1200"
-            height="1536"
-            class="hero-scene-dark absolute inset-0 h-full w-full object-cover"
-            style="object-position: 48% 50%;"
-          />
+          <div class="mt-10 flex flex-wrap items-center gap-3">
+            <a
+              href={hero.primary.href}
+              class="rounded-ctl bg-primary px-5 py-2.5 text-[0.875rem] font-medium text-primary-foreground no-underline transition-colors hover:bg-primary-hover"
+            >
+              {hero.primary.label}
+            </a>
+            <a
+              href={hero.secondary.href}
+              class="rounded-ctl bg-muted px-5 py-2.5 text-[0.875rem] font-medium text-foreground no-underline transition-colors hover:bg-selected"
+            >
+              {hero.secondary.label}
+            </a>
+            <a
+              href="https://github.com/queen-mq/queen"
+              class="px-2 py-2.5 text-[0.875rem] text-muted-foreground no-underline transition-colors hover:text-foreground"
+            >
+              GitHub →
+            </a>
+          </div>
+          {/* The talk, on a line of its own under the buttons: the way in for a
+              reader who already runs another broker. */}
+          <a
+            href={hero.talk.href}
+            class="mt-5 inline-block text-[0.9375rem] font-medium text-foreground/85 no-underline transition-colors hover:text-foreground"
+          >
+            {hero.talk.label} <span class="text-muted-foreground">{hero.talk.more}</span> →
+          </a>
+          {/* The map, on the line under it: every part and option on one screen. */}
+          <a
+            href={hero.map.href}
+            class="mt-2 block w-fit text-[0.9375rem] font-medium text-foreground/85 no-underline transition-colors hover:text-foreground"
+          >
+            {hero.map.label} <span class="text-muted-foreground">{hero.map.more}</span> →
+          </a>
+          <p data-md class="mt-8 max-w-[40rem] text-[0.8125rem] leading-relaxed text-muted-foreground">
+            {hero.limit.text}{" "}
+            <a
+              href={hero.limit.link.href}
+              class="whitespace-nowrap text-foreground/80 no-underline transition-colors hover:text-foreground"
+            >
+              {hero.limit.link.label} →
+            </a>
+          </p>
+        </div>
+      </section>
+
+      {/* Why a kernel: the table a reader can check line by line, then what
+          QueenMQ takes off their stack and what stays, as two cards. */}
+      <section class="bg-zone">
+        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
+          <p class={eyebrow}>{kernelSection.eyebrow}</p>
+          <h2 data-md class={h2}>{kernelSection.title}</h2>
+          <p data-md class={lead}>{kernelSection.lead}</p>
+          <div class="mt-8 max-w-3xl overflow-x-auto">
+            <table class="w-full border-collapse text-left text-[0.9375rem]">
+              <thead>
+                <tr class="border-b border-border">
+                  {kernelSection.head.map((h) => <th class="py-2.5 pr-6 font-semibold text-foreground">{h}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {
+                  kernelSection.rows.map(([a, b]) => (
+                    <tr class="border-b border-border/60">
+                      <td class="py-2.5 pr-6 text-muted-foreground">{a}</td>
+                      <td class="py-2.5 text-foreground">{b}</td>
+                    </tr>
+                  ))
+                }
+              </tbody>
+            </table>
+          </div>
+          <p data-md class={lead}>{kernelSection.close}</p>
+          <div class="mt-10 grid max-w-3xl gap-3 sm:grid-cols-2">
+            {
+              [kernelSection.replaces, kernelSection.keeps].map((c) => (
+                <div class={cardStatic}>
+                  <p class="text-[0.9375rem] font-semibold text-foreground">{c.label}</p>
+                  <p data-md class="mt-2 text-[0.9375rem] leading-relaxed text-muted-foreground">{c.text}</p>
+                </div>
+              ))
+            }
+          </div>
         </div>
       </section>
 
@@ -462,9 +487,8 @@ const cardStatic = "block rounded-card bg-card p-5";
     /* the wrapper scrolls; a second scroller here showed an empty track */
     overflow: visible !important;
   }
-  /* The hero scene and the dashboard screenshot exist once per theme.
+  /* The dashboard screenshot exists once per theme.
      BaseLayout stamps data-mode="dark" on <html> for the dark theme only. */
-  .hero-scene-dark,
   .home-shot-dark {
     display: none;
   }
@@ -546,11 +570,9 @@ const cardStatic = "block rounded-card bg-card p-5";
       font-size: 0.75rem;
     }
   }
-  :global(:root[data-mode="dark"]) .hero-scene-light,
   :global(:root[data-mode="dark"]) .home-shot-light {
     display: none;
   }
-  :global(:root[data-mode="dark"]) .hero-scene-dark,
   :global(:root[data-mode="dark"]) .home-shot-dark {
     display: block;
   }

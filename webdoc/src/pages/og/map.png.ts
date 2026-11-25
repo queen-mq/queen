@@ -42,7 +42,7 @@ function elements(svg: string): { tag: string; a: Record<string, string> }[] {
 export async function GET() {
   const ck = await canvasKit();
   const inter = await readFile(require.resolve("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2"));
-  const logo = await readFile(resolve("src/assets/q.svg"), "utf8");
+  const logo = await readFile(resolve("src/assets/queenmq-icon.svg"), "utf8");
   const fonts = ck.TypefaceFontProvider.Make();
   fonts.registerFont(inter.buffer.slice(inter.byteOffset, inter.byteOffset + inter.byteLength), "Inter");
 
@@ -163,18 +163,25 @@ export async function GET() {
   }
   canvas.restore();
 
-  // The title, in the drawing's empty top-left corner: the logo, two lines, the address.
-  const [, vx, vy, , vh] = logo.match(/viewBox="([\d.-]+) ([\d.-]+) ([\d.-]+) ([\d.-]+)"/)!.map(Number);
+  // The title, in the drawing's empty top-left corner: the icon, two lines, the address.
+  // The icon as the dark theme shows it: the box takes the text colour, and the
+  // q ("knock") is the background showing through it.
+  const [, vx, vy, vw, vh] = logo.match(/viewBox="([\d.-]+) ([\d.-]+) ([\d.-]+) ([\d.-]+)"/)!.map(Number);
+  // From the first line's cap height to the second line's baseline.
   const ls = 44 / vh;
   canvas.save();
-  canvas.translate(34, 30);
+  canvas.translate(34, 36);
   canvas.scale(ls, ls);
   canvas.translate(-vx, -vy);
-  for (const { a } of elements(logo)) path(a.d, [fill(a.fill === "currentColor" ? C.fg : a.fill)], a["fill-rule"] === "evenodd");
+  for (const { a } of elements(logo)) {
+    const hex = a.class === "knock" ? C.bg : a.fill === "currentColor" ? C.fg : a.fill;
+    path(a.d, [fill(hex)], a["fill-rule"] === "evenodd");
+  }
   canvas.restore();
+  const tx = 34 + vw * ls + 14;
   const lines = MAP_TITLE.match(/^(.+?) (does, .+)$/)?.slice(1) ?? [MAP_TITLE];
-  lines.forEach((line, i) => text(line, 78, 52 + i * 28, { size: 23, weight: 650, hex: C.fg }));
-  text("queenmq.com/map", 78, 48 + lines.length * 28, { size: 14, hex: C.muted });
+  lines.forEach((line, i) => text(line, tx, 52 + i * 28, { size: 23, weight: 650, hex: C.fg }));
+  text("queenmq.com/map", tx, 48 + lines.length * 28, { size: 14, hex: C.muted });
 
   const png = surface.makeImageSnapshot().encodeToBytes();
   surface.delete();

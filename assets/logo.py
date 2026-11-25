@@ -24,8 +24,8 @@ alone for small sizes, one colour, and the badge.
   assets/logo/q-badge{,-on-dark}.svg, -512.png    the badge: a disc with the small logo cut out of it
   assets/logo/overview.png                        everything on one sheet, for looking at
 
-and the copies the dashboard (app/), its sign-in page, the Laravel supervisor
-dashboard and the docs (webdoc/) use.
+and the copies the dashboard (app/), its sign-in page and the Laravel supervisor
+dashboard use. The docs (webdoc/) carry the new logo: assets/redesign/src/web.py.
 
 Run:  python3 assets/logo.py     (needs rsvg-convert and Pillow)
 """
@@ -301,10 +301,11 @@ def main():
 
 
 def place_inline():
-    """The copies the dashboard (app/), Laravel supervisor dashboard and docs (webdoc/) use.
+    """The copies the dashboard (app/) and the Laravel supervisor dashboard use. The docs (webdoc/)
+    carry the new logo since 2026-11-25: assets/redesign/src/web.py writes theirs.
     Inlined ones are lettered "currentColor", so they take the text colour of the page's theme."""
     view, shapes = lockup("q")
-    for name in ("app", "webdoc"):
+    for name in ("app",):
         write(inline(view, *shapes(YELLOW, "currentColor", "")), name, "src", "assets", "q.svg", root=ROOT)
     # The Laravel header embeds the same small logo, without an XML namespace:
     # it is HTML, with no external image request or asset publishing required.
@@ -313,7 +314,7 @@ def place_inline():
     write("{{-- The Queen logo, inline. Written by assets/logo.py: do not edit. --}}\n" + mark,
           "clients", "client-php", "resources", "views", "dashboard", "partials", "mark.blade.php", root=ROOT)
     view, shapes = lockup("queen")
-    for name in ("app", "webdoc"):
+    for name in ("app",):
         write(inline(view, *shapes(YELLOW, "currentColor", "")), name, "src", "assets", "queen.svg", root=ROOT)
     # the logo with its line, for the dashboard's sign-in page
     view, shapes = lockup("queen-tagline")
@@ -322,19 +323,12 @@ def place_inline():
 
 
 def place():
-    """Place the inline logos and the browser icons."""
-    from PIL import Image
-
+    """Place the inline logos and the browser icons (the dashboard's; the docs' come from
+    assets/redesign/src/web.py)."""
     place_inline()
     site = lambda *path: os.path.join(ROOT, *path)
-    for name in ("app", "webdoc"):
-        shutil.copyfile(os.path.join(OUT, "q-auto.svg"), site(name, "public", "favicon.svg"))
-        shutil.copyfile(os.path.join(OUT, "q-32.png"), site(name, "public", "favicon-32.png"))
-    sizes = [Image.open(os.path.join(OUT, f"q-{n}.png")).convert("RGBA") for n in (48, 32, 16)]
-    sizes[0].save(site("webdoc", "public", "favicon.ico"), sizes=[(16, 16), (32, 32), (48, 48)],
-                  append_images=sizes[1:])
-    shutil.copyfile(os.path.join(OUT, "q-tile-on-dark-512.png"), site("webdoc", "public", "queen-tile.png"))
-    png(os.path.join(OUT, "q-tile-on-dark.svg"), site("webdoc", "public", "apple-touch-icon.png"), 180)
+    shutil.copyfile(os.path.join(OUT, "q-auto.svg"), site("app", "public", "favicon.svg"))
+    shutil.copyfile(os.path.join(OUT, "q-32.png"), site("app", "public", "favicon-32.png"))
 
 
 def overview():

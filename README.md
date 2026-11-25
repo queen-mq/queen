@@ -1,18 +1,22 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/logo/queen-tagline-on-dark.svg">
-  <img src="assets/logo/queen-tagline.svg" alt="Queen, message queue" width="340">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/redesign/logo/queenmq-logo-on-dark.svg">
+  <img src="assets/redesign/logo/queenmq-logo.svg" alt="QueenMQ" width="360">
 </picture>
 
-## The ACID message broker.
+# A kernel for distributed systems.
 
-Imagine a Kafka with millions of named partitions, created on the fly, where you ack or nack each message, where one transaction covers the ack, the next messages and your state, with its own KV store and stream processing.<br>
-**That is QueenMQ.**
+What a kernel gives a program (queues, memory, timers, locks),<br>
+QueenMQ gives a distributed system. And they commit together.
 
-**Proof:** [568 Jepsen tests passed](https://queenmq.com/benchmarks/jepsen/) · [3M msg/s](https://queenmq.com/benchmarks/queen-vs-kafka/#3000000-msgs-of-256-byte-messages) on three nodes and ten million queues, with every write synced to disk on two.
+Every queue splits into FIFO subqueues, one per entity, each with its own state.<br>
+Take a message, update the state, send the next ones: one transaction.<br>
+All in one log.<br>
+So it's also the broker: any number of readers, replay from any point.<br>
+One Rust binary, replicated with Raft, Apache-2.0. Nothing else to run.
 
-Open source (Apache-2.0), Rust, one binary. In production at [Smartness](https://www.smartness.com/en).
+**Proof:** [568 Jepsen tests passed](https://queenmq.com/benchmarks/jepsen/) · [3M msg/s](https://queenmq.com/benchmarks/queen-vs-kafka/#3000000-msgs-of-256-byte-messages) on three nodes and ten million queues, with every write synced to disk on two. In production at [Smartness](https://www.smartness.com/en).
 
 </div>
 
@@ -27,6 +31,31 @@ docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.10.0
 </div>
 
 ---
+
+## Why a kernel
+
+A program does not build its own queues, memory, timers and locks: the kernel gives it those, and
+they work together. A distributed system usually builds them out of separate services and glues
+them with code. QueenMQ gives them to it the way a kernel does:
+
+| A kernel gives a program | QueenMQ gives a distributed system |
+| --- | --- |
+| message queues and pipes | a FIFO queue per entity, consumer groups, replay |
+| memory and files | state, in a key-value store |
+| timers and alarms | timers that fire as messages |
+| mutexes and semaphores | locks and semaphores |
+| atomic system calls | one transaction: the ack, the state, the next messages, the timer |
+
+They all live in one replicated log, so a step that touches all of them is one entry: it all
+applies, or none of it does. A worker that dies halfway leaves nothing half-done, and its message
+comes back.
+
+## What it replaces, what you keep
+
+- **It replaces** the broker (Kafka, RabbitMQ, SQS) and the glue around it: the Redis lock, the
+  cron job, the retry table, the idempotency table. With the PostgreSQL connector, Debezium too.
+- **You keep** your database. QueenMQ's state has no queries, so the records you search stay in
+  PostgreSQL, or wherever they live today.
 
 ## QueenMQ in five minutes
 
