@@ -290,10 +290,14 @@ pub(crate) struct Part {
     pub reserved: Option<[u8; 16]>,
     /// The due time of the timer pending for this part (`0`: none).
     pub timer_at: i64,
-    /// The idle-part unloader's view ([`super::unload`]): the version it last
-    /// saw, and since when it has seen no other.
-    pub seen_ver: u64,
+    /// The idle drop's view ([`super::unload`]): the version the part held
+    /// when it was last found holding nothing, and since when. It goes a
+    /// window after that, or after the partition's last append.
+    pub idle_ver: u64,
     pub idle_since_us: i64,
+    /// The due time of the entry its shard's idle wheel holds for it (`0`:
+    /// none): an entry due at any other time is not its own any more.
+    pub idle_at: i64,
 }
 
 impl Part {
@@ -317,9 +321,10 @@ impl Part {
             dlq_sent: Vec::new(),
             reserved: None,
             timer_at: 0,
-            // Never a version: the unloader's first look starts the clock.
-            seen_ver: u64::MAX,
+            // Never a version: the first time it holds nothing starts the clock.
+            idle_ver: u64::MAX,
             idle_since_us: 0,
+            idle_at: 0,
         }
     }
 
@@ -390,6 +395,7 @@ impl GroupShard {
 }
 
 /// A timer: at `due`, look at `(gid, pid)` again (a lease expiry, a hold).
+/// The ends of idle windows are kept apart, in [`Shard::idle`].
 pub(crate) type Timer = Reverse<(i64, Gid, Pid)>;
 
 /// Schedule a look at `(gid, pid)` at `t`, unless one no later is pending
@@ -412,13 +418,14 @@ pub(crate) fn schedule(
 #[derive(Default)]
 pub(crate) struct Shard {
     pub pids: HashMap<Pid, PidInfo>,
-    /// The lowest and highest partition id `pids` ever held since it was last
-    /// empty ([`Shard::note_pid`]): the range the idle-part unloader walks
-    /// ([`super::unload`]). A partition that left does not narrow it.
-    pub pid_lo: Pid,
-    pub pid_hi: Pid,
+    /// The engine's idle window in µs (`QUEEN_CONSUME_IDLE_UNLOAD_S`; `0`: no
+    /// part is ever dropped), read where a part that holds nothing gets its
+    /// idle look ([`super::unload::arm_idle`]).
+    pub idle_us: i64,
     pub groups: HashMap<Gid, GroupShard>,
     pub timers: BinaryHeap<Timer>,
+    /// The ends of this shard's idle windows ([`super::unload::IdleWheel`]).
+    pub idle: super::unload::IdleWheel,
     /// Every live lease of a worker in this shard.
     pub workers: HashMap<Arc<str>, HashSet<(Pid, Gid)>>,
     /// Parts to checkpoint (`Part::dirty` dedups).
@@ -426,17 +433,6 @@ pub(crate) struct Shard {
 }
 
 impl Shard {
-    /// `pid` is about to enter `pids`.
-    pub fn note_pid(&mut self, pid: Pid) {
-        if self.pids.is_empty() {
-            self.pid_lo = pid;
-            self.pid_hi = pid;
-        } else {
-            self.pid_lo = self.pid_lo.min(pid);
-            self.pid_hi = self.pid_hi.max(pid);
-        }
-    }
-
     pub fn index_lease(&mut self, worker: &Arc<str>, pid: Pid, gid: Gid) {
         if worker.is_empty() {
             return;
@@ -552,6 +548,11 @@ pub(crate) struct Group {
     /// Dropped (deleted, or a leadership change reset the engine): nothing
     /// may be added under it any more.
     pub dead: std::sync::atomic::AtomicBool,
+    /// The group may lose parts to the idle drop: it holds its whole queue
+    /// ([`Load::Full`]), is not dropped and owes no bulk seed. A mirror of
+    /// [`GroupSt`] ([`Group::sync_whole`]) for the timer work, which holds a
+    /// shard and so may not take `st` (the lock order puts `st` first).
+    pub whole: std::sync::atomic::AtomicBool,
 }
 
 impl Group {
@@ -583,7 +584,17 @@ impl Group {
             waiting: AtomicUsize::new(0),
             wake_seq: AtomicU64::new(0),
             dead: std::sync::atomic::AtomicBool::new(false),
+            whole: std::sync::atomic::AtomicBool::new(load == Load::Full),
         }
+    }
+
+    /// Mirror `st` into [`Group::whole`]: call it, `st` held, after every
+    /// change of `load`, `dropped` or `bulk_pending`. `true` when the group
+    /// has just become whole: the parts it holds need their idle looks armed
+    /// ([`Engine::arm_idle_group`](super::Engine::arm_idle_group)).
+    pub fn sync_whole(&self, st: &GroupSt) -> bool {
+        let whole = st.load == Load::Full && !st.dropped && !st.bulk_pending;
+        !self.whole.swap(whole, Ordering::AcqRel) && whole
     }
 
     pub fn cfg(&self) -> Arc<GroupCfg> {
@@ -732,6 +743,9 @@ pub(crate) struct Ticket {
     pub cats: Vec<(Gid, u64)>,
     /// The request ids of its commands (answered at commit: [`Tickets::ids`]).
     pub ids: Vec<crate::rsm::entry::RequestId>,
+    /// When it was taken (the engine's clock): a part it makes durable has held
+    /// nothing since about then ([`super::unload::arm_idle`]).
+    pub taken_us: i64,
 }
 
 #[derive(Default)]

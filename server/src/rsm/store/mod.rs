@@ -182,6 +182,7 @@ pub(crate) mod sigbus;
 pub mod typed;
 
 pub use heed_store::HeedStore;
+pub use heed_store::RepackCursor;
 // The shard writer's type is named by the sharded apply through
 // `Store::Shard` and by the tests; a build that compiles these modules without
 // them (the binary) would call the re-export unused.
@@ -973,6 +974,12 @@ pub struct StoreMetrics {
     /// Rows the incremental scrub has verified (the background pass's
     /// progress, [`integrity::ScrubCursor`]).
     pub scrubbed_rows: AtomicU64,
+    /// Rows the background repack copied into fresh allocations
+    /// ([`HeedStore::repack_step`]), and their value bytes.
+    pub repacked_rows: AtomicU64,
+    pub repacked_bytes: AtomicU64,
+    /// Repack passes that walked every RAM keyspace.
+    pub repack_passes: AtomicU64,
 }
 
 impl StoreMetrics {
@@ -1002,6 +1009,9 @@ impl StoreMetrics {
             ("commit_failed", Self::get(&self.commit_failed)),
             ("corrupt_values", Self::get(&self.corrupt_values)),
             ("scrubbed_rows", Self::get(&self.scrubbed_rows)),
+            ("repacked_rows", Self::get(&self.repacked_rows)),
+            ("repacked_bytes", Self::get(&self.repacked_bytes)),
+            ("repack_passes", Self::get(&self.repack_passes)),
         ]
     }
 }
@@ -1054,6 +1064,14 @@ pub trait Reads {
     /// the handle and not only on [`Store`], which a rebuild running against a
     /// read transaction does not hold.
     fn max_key_len(&self) -> usize;
+
+    /// The stored bytes of a RAM keyspace's values now
+    /// ([`HeedStore::ram_value_bytes`]), on the handle for the same reason;
+    /// `None` when this handle cannot tell. A bound for an estimate (the
+    /// dead letters' caps), never a hot path.
+    fn ram_value_bytes(&self, _ks: Keyspace) -> Option<u64> {
+        None
+    }
 
     /// Ascending range scan. Starts at the first key ≥ `from`, stops at the
     /// first key that does not start with `prefix`, after `limit` rows, or

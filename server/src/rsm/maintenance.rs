@@ -98,7 +98,8 @@ pub struct DlqCaps {
     /// `QUEEN_DLQ_MAX_ROWS_PER_QUEUE` (default 100,000).
     pub max_rows: u64,
     /// `QUEEN_DLQ_MAX_BYTES_PER_QUEUE` (default 1 GiB), estimated from the
-    /// average size of the queue's oldest dead letters.
+    /// average size of the queue's oldest dead letters, and never more than
+    /// every dead letter holds together.
     pub max_bytes: u64,
     /// `QUEEN_DLQ_MAX_AGE_S` (default 1,209,600 = 14 days).
     pub max_age_s: i64,
@@ -629,10 +630,12 @@ fn uuidv7_ms(id: &[u8; 16]) -> i64 {
 /// Delete the oldest dead letters of the queues over their caps
 /// ([`Config::dlq`]): past the row cap, past the byte cap (estimated from the
 /// average size of the queue's oldest [`DLQ_SAMPLE_ROWS`] and its
-/// `DlqCount`), and older than the age cap. Bounded: [`DLQ_QUEUES_PER_PASS`]
-/// queues, [`DLQ_VISITS_PER_PASS`] rows read and [`DLQ_DELETES_PER_PASS`]
-/// deletes a pass, resuming where the last pass stopped. A dead letter's id is
-/// a UUIDv7, so a queue's rows come oldest first and the id says its age.
+/// `DlqCount`, bounded by what every dead letter holds, then the oldest by
+/// their own sizes until the rest fits), and older than the age cap.
+/// Bounded: [`DLQ_QUEUES_PER_PASS`] queues, [`DLQ_VISITS_PER_PASS`] rows read
+/// and [`DLQ_DELETES_PER_PASS`] deletes a pass, resuming where the last pass
+/// stopped. A dead letter's id is a UUIDv7, so a queue's rows come oldest
+/// first and the id says its age.
 fn plan_dlq_caps<R: Reads + ?Sized>(
     r: &R,
     now_us: i64,
@@ -655,6 +658,8 @@ fn plan_dlq_caps<R: Reads + ?Sized>(
     let mut visits = 0usize;
     let mut queues = 0usize;
     let mut from = std::mem::take(&mut walk.from);
+    // What every dead letter's value holds together, when the store can tell.
+    let held = r.ram_value_bytes(Keyspace::Dlq).unwrap_or(u64::MAX);
     loop {
         if queues >= DLQ_QUEUES_PER_PASS
             || visits >= DLQ_VISITS_PER_PASS
@@ -692,13 +697,15 @@ fn plan_dlq_caps<R: Reads + ?Sized>(
         // The next queue's rows start past this one's prefix range.
         let next_queue = crate::rsm::store::prefix_end(&prefix);
         let count = r.queue_counter(&tenant, &queue, Counter::DlqCount)?.max(0) as u64;
-        let (mut sample_n, mut sample_bytes, mut oldest_ms) = (0u64, 0u64, None::<i64>);
+        let (mut sample_n, mut sample_bytes, mut sample_keys, mut oldest_ms) =
+            (0u64, 0u64, 0u64, None::<i64>);
         r.scan_raw(Keyspace::Dlq, &[], &prefix, DLQ_SAMPLE_ROWS, &mut |k, v| {
             if oldest_ms.is_none() {
                 oldest_ms = keys::dlq_parts(k).map(|(_, _, id)| uuidv7_ms(&id));
             }
             sample_n += 1;
             sample_bytes += (k.len() + v.len()) as u64;
+            sample_keys += k.len() as u64;
             true
         })?;
         visits += sample_n as usize;
@@ -706,36 +713,48 @@ fn plan_dlq_caps<R: Reads + ?Sized>(
         // never fewer than the sample saw.
         let count = count.max(sample_n);
         let avg = (sample_bytes / sample_n.max(1)).max(1);
-        let keep_rows = if caps.max_rows > 0 {
-            caps.max_rows
+        // Past the row cap: the oldest `over_rows`.
+        let over_rows = if caps.max_rows > 0 {
+            count.saturating_sub(caps.max_rows)
         } else {
-            u64::MAX
+            0
         };
-        let keep_bytes = if caps.max_bytes > 0 {
-            caps.max_bytes / avg
+        // Past the byte cap: the queue's bytes as its oldest rows say, never
+        // more than its keys and every dead letter's value together. Its
+        // oldest may have kept large bodies and its newer ones been filed
+        // without them (`consume::dlq_budget`): judged by its oldest alone, a
+        // queue holding 70 MB read as 3 GB. The oldest then go, each by its
+        // own size, until the rest fits.
+        let mut over_bytes = if caps.max_bytes > 0 {
+            let keys_bytes = (sample_keys / sample_n.max(1)).saturating_mul(count);
+            avg.saturating_mul(count)
+                .min(held.saturating_add(keys_bytes))
+                .saturating_sub(caps.max_bytes)
         } else {
-            u64::MAX
+            0
         };
-        let over = count.saturating_sub(keep_rows.min(keep_bytes));
         let aged = matches!((age_cut_ms, oldest_ms), (Some(cut), Some(ms)) if ms < cut);
         let mut stopped_inside = false;
-        if over > 0 || aged {
+        if over_rows > 0 || over_bytes > 0 || aged {
             let visit_room = DLQ_VISITS_PER_PASS.saturating_sub(visits).max(1);
             let mut i = 0u64;
             let mut seen = 0usize;
-            r.scan_raw(Keyspace::Dlq, &[], &prefix, visit_room, &mut |k, _| {
+            r.scan_raw(Keyspace::Dlq, &[], &prefix, visit_room, &mut |k, v| {
                 seen += 1;
                 let Some((_, _, id)) = keys::dlq_parts(k) else {
                     i += 1;
                     return true;
                 };
-                let capped = i < over;
+                let capped = i < over_rows || over_bytes > 0;
                 let expired = age_cut_ms.is_some_and(|cut| uuidv7_ms(&id) < cut);
                 i += 1;
                 if !capped && !expired {
                     // Oldest first: nothing after this one is due.
                     return false;
                 }
+                // This one goes, now or by a delete planned before: what is
+                // left is smaller by its size.
+                over_bytes = over_bytes.saturating_sub((k.len() + v.len()) as u64);
                 if walk.recent.contains_key(&id) {
                     // Planned already, its entry not applied yet.
                     return true;

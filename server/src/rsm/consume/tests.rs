@@ -48,6 +48,8 @@ pub(super) fn knobs() -> Knobs {
             .ok()
             .and_then(|v| v.trim().parse::<i64>().ok())
             .unwrap_or(0),
+        // The production default ([`super::dlq_budget`]).
+        dlq_max_bytes: 512 << 20,
     }
 }
 
@@ -143,9 +145,10 @@ impl H {
             )
             .expect("open store"),
         );
+        // Idle parts go by their own timers at the commands' clock (every
+        // command ticks it, [`H::serve`]) when the knobs give a window;
+        // `knobs()` gives none ([`super::unload`]).
         let e = Engine::with_knobs(store.clone(), k);
-        // The suite drives the idle-part unloader by hand ([`super::unload`]).
-        e.unload.auto_off.store(true, Ordering::Release);
         e.set_mode(IndexMode::Txns);
         e.on_leader(1, u64::MAX);
         e.serve_after_us.store(0, Ordering::Release);
@@ -168,7 +171,6 @@ impl H {
     pub fn failover_with(&mut self, k: Knobs) {
         self.e.on_step_down();
         let e = Engine::with_knobs(self.store.clone(), k);
-        e.unload.auto_off.store(true, Ordering::Release);
         e.set_mode(IndexMode::Txns);
         e.on_leader(2, u64::MAX);
         e.serve_after_us.store(0, Ordering::Release);
@@ -177,6 +179,12 @@ impl H {
 
     pub fn advance(&mut self, us: i64) {
         self.now += us;
+    }
+
+    /// Hand the next partition ids out `n` later: the ids of the partitions a
+    /// busy queue created and deleted meanwhile (ids are never reused).
+    pub fn skip_pids(&mut self, n: u64) {
+        self.next_pid += n;
     }
 
     pub fn rid(&mut self) -> [u8; 16] {
@@ -442,6 +450,8 @@ impl H {
 
     /// Serve a command to its answer, committing checkpoints as they come.
     pub fn serve(&mut self, cmd: Command) -> Reply {
+        // Every group's whole-queue flag says what its state says.
+        self.e.assert_whole_flags();
         // The clock work at the commands' clock (lease expiries, holds).
         self.e.tick(self.now);
         // `QUEEN_TEST_IDLE_UNLOAD_US`: every part that could go goes first,
@@ -471,6 +481,7 @@ impl H {
 
     /// Serve expecting a held answer (the group loaded first if it had to).
     pub fn later(&mut self, cmd: Command) -> tokio::sync::oneshot::Receiver<Reply> {
+        self.e.assert_whole_flags();
         self.e.tick(self.now);
         if aggressive_unload() {
             self.e.unload_now(self.now);

@@ -322,7 +322,6 @@ impl Engine {
             // This group's part is the one being loaded.
             reload.retain(|(rg, _)| rg.id != g.id);
         }
-        sh.note_pid(pid);
         let pi = sh.pids.entry(pid).or_insert_with(|| PidInfo {
             tail: now_head.last_offset,
             log_start: now_head.log_start,
@@ -456,14 +455,15 @@ impl Engine {
             tracing::warn!(target: "rsm", error = %e, tenant = %g.tenant, queue = %g.queue,
                 group = %g.name, "consume: group load failed; its commands are refused");
         }
-        let held = {
+        let (held, whole) = {
             let mut st = lock(&g.st);
             st.load = if res.is_ok() {
                 Load::Full
             } else {
                 Load::Partial
             };
-            std::mem::take(&mut st.held)
+            let whole = g.sync_whole(&st);
+            (std::mem::take(&mut st.held), whole)
         };
         if me.gen.load(Ordering::Acquire) != gen {
             for h in held {
@@ -474,6 +474,11 @@ impl Engine {
             return;
         }
         let now = me.now_us();
+        // The parts the load brought in were found holding nothing while the
+        // group was not whole yet: their idle looks start now.
+        if whole {
+            me.arm_idle_group(g, now);
+        }
         for h in held {
             me.run_held(h, now);
         }

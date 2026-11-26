@@ -1,0 +1,40 @@
+# The idle-drop subset (2026-11-25, branch partitionrmfix): an idle (group, partition)
+# record now leaves the leader's memory when its idle window ends (each shard keeps the
+# windows in a wheel of 10 ms slots), and the next append there loads it back from its
+# cursor row. The window is shortened to 1 s (QUEEN_CONSUME_IDLE_UNLOAD_S=1, default 600)
+# so records leave and come back all through the faults: on pop and ack (queue), in
+# transactions that ack (pipeline), retries and dead letters (dlq, dlqops), fired timers
+# (timers), filtered groups (filtered), a group moved by a seek (seek), a queue deleted
+# and made again (lifecycle), delayed messages (queueopts delayed) and the retention scan
+# (retention). Every test here consumes with a group: the KV and read-by-offset workloads
+# (claim, txnmix) hold no consume record, so they never drop one (first run: 0 dropped).
+# The last two lines run at the default window: it is armed on every caught-up record and
+# never ends inside a test. Each broker logs "consume: idle parts unloaded" at most once a
+# minute with the count: grep the node logs of a test's store to see that it dropped.
+# Five nodes: RUNS=... BIN=... ./run-campaign.sh matrix-idle-drop-2026-11-25.txt
+
+idle-queue-kill           --workload queue --nemesis kill --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-queue-lz-kill        --workload queue --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-queue-part           --workload queue --nemesis partition --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-queue-pause          --workload queue --nemesis pause --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-queue-leader-deaf    --workload queue --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-queue-restart        --workload queue --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-pipeline-kill        --workload pipeline --nemesis kill --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-pipeline-lz-kill     --workload pipeline --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-pipeline-part        --workload pipeline --nemesis partition --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-pipeline-pause       --workload pipeline --nemesis pause --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-pipeline-leader-deaf --workload pipeline --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-dlq-kill             --workload dlq --nemesis kill --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-dlq-part             --workload dlq --nemesis partition --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-dlqops-part          --workload dlqops --nemesis partition --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-timers-kill          --workload timers --nemesis kill --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-timers-txn-part      --workload timers --timers-in-txn --nemesis partition --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-filtered-kill        --workload filtered --nemesis kill --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-filtered-part        --workload filtered --nemesis partition --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-seek-kill            --workload seek --nemesis kill --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-seek-part            --workload seek --nemesis partition --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-lifecycle-part       --workload lifecycle --nemesis partition --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-qo-delayed-kill      --workload queueopts --queue-opt delayed --nemesis kill --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+idle-retention-kill       --workload retention --nemesis kill --time-limit 300 --rate 200 --env QUEEN_CONSUME_IDLE_UNLOAD_S=1
+default-queue-kill        --workload queue --nemesis kill --time-limit 300 --rate 200
+default-pipeline-part     --workload pipeline --nemesis partition --time-limit 300 --rate 200

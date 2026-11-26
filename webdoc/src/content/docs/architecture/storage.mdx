@@ -58,6 +58,11 @@ sourceOfTruth:
 # while its store closed wrote to the unmapped lock file: the test binaries' SIGSEGV), and
 # Store::read opens no LMDB transaction while every keyspace is in RAM; store/mod.rs rewords pin 2
 # and NestedRead. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (store repack 64b742a1d, dead-letter budget 1aad003b0):
+# store/heed_store.rs and store/mod.rs gain the repack step (rows copied into fresh allocations;
+# nothing on disk changes) and the byte count of a RAM keyspace (Reads::ram_value_bytes);
+# maintenance.rs bounds a queue's dead-letter byte estimate by what all dead letters hold and
+# deletes the oldest by their own size. Nothing this page states changes.
 ---
 
 A message is written once, in its queue's log files, and that write is what makes it durable: there is no second copy. We built it this way on purpose. An earlier design wrote every message twice, first in a consensus log and then in a segment file. Now the bytes that make a message durable are the bytes a pop reads back.

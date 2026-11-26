@@ -43,6 +43,7 @@
 
 mod ack;
 mod checkpoint;
+pub(crate) mod dlq_budget;
 mod frames;
 mod hooks;
 mod idle;
@@ -203,6 +204,10 @@ pub(crate) struct Knobs {
     /// µs: how long a whole-queue group's part must have held nothing before
     /// it is dropped from memory ([`unload`]).
     pub idle_unload_us: i64,
+    /// `QUEEN_DLQ_MAX_BYTES_TOTAL` (default 512 MiB, `0` off): past this many
+    /// bytes of dead letters, a new one is filed without its body
+    /// ([`dlq_budget`]).
+    pub dlq_max_bytes: u64,
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -244,6 +249,7 @@ impl Knobs {
             rows_per_cmd: env_u64("QUEEN_CONSUME_ROWS_PER_COMMAND", 4096).max(1) as usize,
             txn_ttl_us: env_u64("QUEEN_CONSUME_TXN_TTL_MS", 30_000) as i64 * 1000,
             idle_unload_us: env_u64("QUEEN_CONSUME_IDLE_UNLOAD_S", 600) as i64 * SEC_US,
+            dlq_max_bytes: env_u64("QUEEN_DLQ_MAX_BYTES_TOTAL", 512 << 20),
         }
     }
 }
@@ -349,6 +355,8 @@ pub struct Engine {
     pub(crate) loading: std::sync::atomic::AtomicUsize,
     /// The idle-part unloader's pacing and counters ([`unload`]).
     pub(crate) unload: unload::Unload,
+    /// The dead-letter budget's count and its drops ([`dlq_budget`]).
+    pub(crate) dlq_budget: dlq_budget::Budget,
 }
 
 impl Drop for Engine {
@@ -369,6 +377,8 @@ impl Engine {
     }
 
     pub(crate) fn with_knobs(store: Arc<HeedStore>, k: Knobs) -> Arc<Engine> {
+        let idle_us = k.idle_unload_us.max(0);
+        let dlq_max = k.dlq_max_bytes;
         Arc::new_cyclic(|me| Engine {
             me: me.clone(),
             store,
@@ -388,7 +398,14 @@ impl Engine {
             own_from: AtomicU64::new(u64::MAX),
             cluster: AtomicU32::new(crate::rsm::effect::BASELINE_KINDS_VERSION),
             reg: RwLock::new(Registry::default()),
-            shards: (0..SHARDS).map(|_| Mutex::new(Shard::default())).collect(),
+            shards: (0..SHARDS)
+                .map(|_| {
+                    Mutex::new(Shard {
+                        idle_us,
+                        ..Shard::default()
+                    })
+                })
+                .collect(),
             appends: (0..SHARDS).map(|_| Mutex::new(Vec::new())).collect(),
             appends_pending: AtomicBool::new(false),
             answers: Mutex::new(Answers::default()),
@@ -405,6 +422,7 @@ impl Engine {
             thread: Mutex::new(None),
             loading: std::sync::atomic::AtomicUsize::new(0),
             unload: unload::Unload::default(),
+            dlq_budget: dlq_budget::Budget::new(dlq_max),
         })
     }
 
@@ -877,6 +895,7 @@ impl Engine {
             let (waiters, held) = {
                 let mut st = lock(&g.st);
                 st.dropped = true;
+                g.sync_whole(&st);
                 (
                     std::mem::take(&mut st.waiters),
                     std::mem::take(&mut st.held),
@@ -891,7 +910,11 @@ impl Engine {
             }
         }
         for s in self.shards.iter() {
-            *lock(s) = Shard::default();
+            // Everything goes but the idle window, a knob of the engine.
+            *lock(s) = Shard {
+                idle_us: self.k.idle_unload_us.max(0),
+                ..Shard::default()
+            };
         }
         for a in self.appends.iter() {
             lock(a).clear();

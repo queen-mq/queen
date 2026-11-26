@@ -72,6 +72,10 @@ sourceOfTruth:
 # 400798d13): log_store.rs gains a test-only hold on replication streams, and read_for_replication's
 # comment says a member back on its snapshot answers the stale heartbeat with success. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-11-26 (store repack 64b742a1d, dead-letter budget 1aad003b0):
+# maintenance.rs bounds a queue's dead-letter byte estimate by what all dead letters hold and
+# deletes the oldest by their own size. No benchmark here files dead letters. Nothing this page
+# states changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one

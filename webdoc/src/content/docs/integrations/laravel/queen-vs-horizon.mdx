@@ -121,6 +121,9 @@ sourceOfTruth:
 # `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
 # server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
 # queen:consume stops for queue:restart under a supervisor (RestartSignal). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/pop.rs files a
+# caught-up record that holds nothing under the end of its idle window. What a pop, an ack, a lease
+# or a transaction answers does not change: nothing this page states changes.
 ---
 
 QueenMQ is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both

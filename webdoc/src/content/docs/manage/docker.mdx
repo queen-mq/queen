@@ -77,6 +77,13 @@ sourceOfTruth:
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/mod.rs gives each
+# shard its idle window. What a pop, an ack, a lease or a transaction answers does not change:
+# nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (store repack 64b742a1d, dead-letter budget 1aad003b0):
+# consume/mod.rs reads QUEEN_DLQ_MAX_BYTES_TOTAL and keeps the dead-letter budget's count
+# (consume/dlq_budget.rs); facade/real.rs starts the repack beside the scrub and exports
+# queen_dlq_bytes and queen_dlq_bodies_not_kept_total. Nothing this page states changes.
 ---
 
 A cluster is three copies of the same broker, each on its own machine, each told where the other two are. Together they keep one log. The leader puts every write in that log and sends it to the others, and a write is answered only when a majority of the nodes (two of three) has it on disk. Any node serves any client: it prepares the work of its own clients and sends the leader only the prepared command.

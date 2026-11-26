@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::rsm::effect::Pid;
 use crate::rsm::planner::PopCommand;
 
 use super::state::{lock, read, Gid, Group, Waiter, SHARDS};
@@ -43,6 +44,14 @@ pub(crate) fn max_parked_pops() -> usize {
 /// How often the parked count is taken again from the groups themselves
 /// ([`Waking::parked`]).
 const PARKED_RECOUNT_US: i64 = 1_000_000;
+
+/// The most ended idle windows one tick takes from a shard's wheel
+/// ([`Engine::run_timers`]). A tick holds the shard's lock while it looks at
+/// them, and windows end together by the hundred thousand: a new leader loads
+/// a whole queue's parts at once, so their windows end in the same instant.
+/// 1,024 is a fraction of a millisecond under the lock (the unloader's old
+/// slice); the rest wait for the next tick.
+pub(crate) const IDLE_PER_TICK: usize = 1024;
 
 /// The serve thread's queue and the condition it waits on.
 #[derive(Default)]
@@ -301,10 +310,14 @@ impl Engine {
         }
     }
 
-    /// The timers due: expired leases and ended holds arm their parts.
-    fn run_timers(&self, now: i64) {
+    /// The timers due: expired leases and ended holds arm their parts. Then the
+    /// idle windows ended: a part still quiet goes ([`super::unload::idle_due`]),
+    /// at most [`IDLE_PER_TICK`] looks a shard, the rest at the next tick.
+    pub(crate) fn run_timers(&self, now: i64) {
         let grace = self.grace();
         let mut woken: Vec<Gid> = Vec::new();
+        let mut dropped = 0u64;
+        let mut due_idle: Vec<(i64, Gid, Pid)> = Vec::new();
         for si in 0..SHARDS {
             let mut sh = lock(&self.shards[si]);
             let sh = &mut *sh;
@@ -340,7 +353,27 @@ impl Engine {
                     woken.push(gid);
                 }
             }
+            if sh.idle.len() == 0 {
+                continue;
+            }
+            due_idle.clear();
+            sh.idle.take_due(now, IDLE_PER_TICK, &mut due_idle);
+            let mut lost: Vec<Gid> = Vec::new();
+            for &(due, gid, pid) in &due_idle {
+                if super::unload::idle_due(sh, due, gid, pid, now) {
+                    dropped += 1;
+                    if !lost.contains(&gid) {
+                        lost.push(gid);
+                    }
+                }
+            }
+            for gid in lost {
+                if let Some(gs) = sh.groups.get_mut(&gid) {
+                    super::unload::give_back(gs);
+                }
+            }
         }
+        self.note_unloaded(dropped, now);
         woken.sort_unstable();
         woken.dedup();
         for gid in woken {
@@ -348,14 +381,13 @@ impl Engine {
         }
     }
 
-    /// The clock work (timers, deadlines, reservation TTLs, the pause, the
-    /// idle parts).
+    /// The clock work (timers — leases, holds, idle windows — deadlines,
+    /// reservation TTLs, the pause).
     pub(crate) fn tick_inner(&self, now: i64) {
         self.run_timers(now);
         self.sweep_deadlines(now);
         self.recount_parked(now);
         self.expire_txns(now);
-        self.unload_idle(now);
         if now >= self.serve_after_us.load(Ordering::Acquire) {
             let held = std::mem::take(&mut *lock(&self.paused));
             for h in held {

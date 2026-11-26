@@ -24,6 +24,7 @@ sourceOfTruth:
   - proxy/src/app.rs
   - proxy/src/cp.rs
   - server/src/rsm/facade/real/phase2/feed.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*; the trace routes read the on-disk trace store and refuse a key over 511 bytes (400 name_too_long). Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/data.rs and handlers/ephemeral.rs name the pop's commit at delivery commitOnDelivery; the parameter example names it, and the OpenAPI document lists it on every pop route, with the old name marked deprecated.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
@@ -125,6 +126,11 @@ sourceOfTruth:
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (store repack 64b742a1d, dead-letter budget 1aad003b0):
+# facade/real.rs starts the repack beside the scrub and exports queen_dlq_bytes and
+# queen_dlq_bodies_not_kept_total; phase2/admin.rs answers 409 no_body to a replay of a dead letter
+# filed without its body. phase2/admin.rs joins the sources for the 409 no_body row of the status
+# table.
 ---
 
 Every QueenMQ node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no
@@ -236,6 +242,7 @@ read it there:
 | `200` from `POST /api/v1/transaction` with `success: false` | Rolled back: nothing was written. `reason` says why. See [transaction](/reference/transaction/). |
 | `200` from the KV, lock and timer routes | A business verdict: `applied: false` (a lost `putIfAbsent`, a version mismatch, a write whose TTL was over when it was committed), `acquired: false` (a lock somebody else holds) or `ok: false` (cancelling a timer that is not pending). |
 | `204` from a pop | No message was available before the long-poll ended. |
+| `409` `no_body` from `POST /api/v1/dlq/:id/replay` | The dead letter was filed without its body (the dead letters held `QUEEN_DLQ_MAX_BYTES_TOTAL`): there is nothing to replay. |
 | `503` `outcome_unknown` | The leader changed while an ack, nack or DLQ move was being made durable. It may or may not have applied. |
 | `503` `retry`, `no_leader`, `timeout` | The call did not complete. Retry after `Retry-After` (1 s); a write may still have applied, so make it safe to repeat. |
 | `503` `standby` | The cluster is a [standby](/manage/standby/) and takes no writes until it is promoted. Nothing was applied. |

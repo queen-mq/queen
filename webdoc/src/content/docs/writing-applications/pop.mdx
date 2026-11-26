@@ -113,6 +113,15 @@ verifiedBy:
 # requests through undici's diagnostics channels instead of a wrapper around globalThis.fetch,
 # which the JS client stopped calling in 2.9.2; its regions are unchanged. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/pop.rs files a
+# caught-up record that holds nothing under the end of its idle window; state.rs keeps those windows
+# in a wheel per shard (Part.idle_at). What a pop, an ack, a lease or a transaction answers does not
+# change: nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (store repack 64b742a1d, dead-letter budget 1aad003b0):
+# consume/ack.rs files a dead letter past the budget without its body, from an ack and from a DLQ
+# head, in the same entry; facade/real.rs starts the repack beside the scrub and exports
+# queen_dlq_bytes and queen_dlq_bodies_not_kept_total; phase2/admin.rs answers 409 no_body to a
+# replay of a dead letter filed without its body. Nothing this page states changes.
 ---
 
 There are two ways to read. `consume()` is a loop: it takes messages, calls your handler, acks them when the handler returns, and goes on. `pop()` is one call: it hands you the messages and leaves the ack to you.

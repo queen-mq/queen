@@ -35,6 +35,7 @@ sourceOfTruth:
   - protocols/queen-kafka/src/config.rs
   - protocols/queen-kafka/src/txn.rs
   - server/src/rsm/facade/real/phase2/feed.rs
+  - server/src/rsm/consume/dlq_budget.rs
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): defaults checked against 2.0.1; traces are on disk and expire in bounded steps; a trace key over 511 bytes is answered 400.
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/data.rs and handlers/ephemeral.rs read the pop's commit at delivery from commitOnDelivery or from autoAck, its deprecated alias. No limit or default changes.
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps its existing limit and offset handling; the listed request limits are unchanged.
@@ -152,6 +153,13 @@ sourceOfTruth:
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/wait.rs drops the
+# due ones, at most 1,024 a shard per tick. The cap this page reads from wait.rs
+# (QUEEN_MAX_PARKED_POPS, 50,000) does not change.
+# sourceOfTruth re-read 2026-11-26 (dead-letter budget): consume/dlq_budget.rs joins the sources; the
+# Dead letters table gains QUEEN_DLQ_MAX_BYTES_TOTAL (512 MiB). maintenance.rs bounds the per-queue
+# byte estimate by what all dead letters hold and deletes the oldest by their own sizes; the caps'
+# defaults do not change.
 ---
 
 Most of QueenMQ's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -247,15 +255,27 @@ default: an option you leave out keeps its value, and `null` restores its defaul
 | Limit | Default | Setting |
 |---|---|---|
 | Dead letters kept in one queue | 100,000 | `QUEEN_DLQ_MAX_ROWS_PER_QUEUE` |
-| Bytes of one queue's dead letters, estimated from its oldest ones | 1 GiB | `QUEEN_DLQ_MAX_BYTES_PER_QUEUE` |
+| Bytes of one queue's dead letters, estimated from its oldest ones and never more than all dead letters hold | 1 GiB | `QUEEN_DLQ_MAX_BYTES_PER_QUEUE` |
 | Age of a dead letter | 14 days | `QUEEN_DLQ_MAX_AGE_S` |
+| Bytes of every queue's dead letters, bodies included | 512 MiB | `QUEEN_DLQ_MAX_BYTES_TOTAL` |
 
-Past any of the three the oldest dead letters go first, at most 1,024 per maintenance pass. `0`
-turns a cap off. Applied in `server/src/rsm/maintenance.rs`.
+Past any of the three per-queue caps the oldest dead letters go first, at most 1,024 per
+maintenance pass, past the byte cap each by its own size until the rest fits. `0` turns a cap off.
+Applied in `server/src/rsm/maintenance.rs`.
+
+The fourth bounds all the queues at once, as dead letters are filed: once they hold it, a new
+dead letter is filed without its body. Its id, transaction id, partition, offset, retry count and
+error stay, and the error ends with `(body not kept: the dead letters held
+QUEEN_DLQ_MAX_BYTES_TOTAL)`. The list shows its `data` as `null`, and a replay of it answers 409
+with `result: "no_body"`. `queen_dlq_bytes` shows what the dead letters hold, and
+`queen_dlq_bodies_not_kept_total` how many were filed without a body. `0` turns the budget off.
+Applied in `server/src/rsm/consume/dlq_budget.rs`.
 
 <Why>a dead letter is a full copy of its message, in memory on every node and reloaded at start.
 Before 2.7.0 only a delete removed one, so a consumer that failed every message filled the nodes'
-memory as fast as it failed.</Why>
+memory as fast as it failed. The per-queue caps act one queue at a time and after the fact: a few
+queues failing large messages fast could still fill every node at once, and a node restarted for it
+loaded the same dead letters again. The budget keeps the bodies out as they are filed.</Why>
 
 ## Dedup
 

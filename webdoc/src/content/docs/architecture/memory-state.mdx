@@ -64,11 +64,21 @@ sourceOfTruth:
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/mod.rs gives each
+# shard its idle window; hooks.rs notes when a group reads the whole queue. What a pop, an ack, a
+# lease or a transaction answers does not change: nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (store repack 64b742a1d, dead-letter budget 1aad003b0):
+# consume/mod.rs reads QUEEN_DLQ_MAX_BYTES_TOTAL and keeps the dead-letter budget's count
+# (consume/dlq_budget.rs); rsm/mod.rs declares rsm/repack.rs, a background repack of the RAM tables
+# (off by default). The page now says dead letters are the exception to messages not being in
+# memory, and names the budget.
 ---
 
 Each node keeps its whole state in memory: queues, partitions, consumer positions, KV, timers, request ids, and the dedup records of recent pushes. It is loaded once, at boot.
 
 Messages are not in memory. They stay in the queue log files and are read from there. So memory grows with the number of partitions and keys, and with the pushes of the dedup window, not with how many messages a queue keeps.
+
+Dead letters are the exception: each one keeps a copy of its message, in memory on every node. All of them together hold at most `QUEEN_DLQ_MAX_BYTES_TOTAL` (512 MiB), and past it a new dead letter is filed without its body ([limits](/reference/limits/#dead-letters)).
 
 <Fig id="memory-disk" caption="What lives in memory, and what lives on disk." />
 

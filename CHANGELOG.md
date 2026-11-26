@@ -3,6 +3,54 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Server: an idle partition leaves the leader's memory on time, however many partitions came
+before it.** The leader keeps a small record for each consumer group's partition and drops it once
+the partition has held nothing for `QUEEN_CONSUME_IDLE_UNLOAD_S` (600 s). Until now a background
+pass found those records by walking every partition id from the oldest live partition to the
+newest one ever created, deleted ones included, one step per consumer group for each id. Ids are
+never reused, so a broker that keeps creating partitions (one per chat, trace or reservation) made
+that pass longer every day: with 196 consumer groups it walked about 1,000 ids a second, and idle
+records stayed in memory for hours past their window (a production leader held 117,000 of them).
+Now a record that goes quiet is filed under the end of its window, in a list each shard keeps in
+10 ms slots, and the clock work drops it at the first tick after that time, unless it got work in
+between. The cost is one entry per record that goes quiet, whatever the number of partitions,
+groups or ids ever used, and an ack files its record without reading the partition: the partition
+is checked once, when the window ends. The clock work takes at most 1,024 due records from a shard
+per tick, so a new leader whose idle windows all end together never holds a shard's lock for long.
+Nothing changes in what a pop, an ack or a lease answers: a dropped record is read back from its
+cursor row with its partition's next message, as before. Over three hours of a production-like
+load (75,000 partitions), the leader held a steady 32,000 records where 2.10.0 climbed to 149,000,
+at the same throughput and latency; Jepsen ran 30 tests with the window at 1 s, all valid.
+
+**Server: a node can give back the memory its in-memory tables leave scattered, without a restart.**
+Every row of the replicated tables is its own allocation, placed wherever the allocator had room when
+the row was written. After hours of partitions created and cleaned up, cursors moved and dedup rows
+expired, the rows still alive keep half-used allocator pages that cannot go back to the system, which
+is why a node uses less memory right after a restart: on a test cluster, a follower went from 0.955 to
+0.704 GB with the same rows. `QUEEN_STORE_REPACK_EVERY_S` (off by default) starts a background pass
+on every node that copies each table's rows into fresh allocations, a stripe at a time, and frees the
+old copies, the way the load at a restart builds the tables; `QUEEN_STORE_REPACK_ROWS_PER_S`
+(100,000) paces it, at most 1,024 rows under one table lock. It changes no row and nothing on disk.
+
+**Server: the dead letters of all queues together have a memory budget.** A dead letter keeps a
+full copy of its message's body, in memory on every node, loaded again at every start. The caps per
+queue (`QUEEN_DLQ_MAX_ROWS_PER_QUEUE`, `QUEEN_DLQ_MAX_BYTES_PER_QUEUE`, `QUEEN_DLQ_MAX_AGE_S`) bound
+one queue each, and maintenance applies them after the fact, so a few queues that fail large
+messages fast could still fill every node's memory at once; a production cluster's 4,357 dead
+letters held 148 MB on every node. `QUEEN_DLQ_MAX_BYTES_TOTAL` (512 MiB; `0` turns it off) bounds
+them all as they are filed: once the dead letters hold it, the leader files a new dead letter
+without its body. Its id, transaction id, partition, offset, retry count and error stay, the error
+ends with `(body not kept: the dead letters held QUEEN_DLQ_MAX_BYTES_TOTAL)`, the list shows its
+`data` as `null`, and a replay of it answers 409 with `result: "no_body"`. The leader decides as it
+plans the ack, so every node stores the same row. `queen_dlq_bytes` shows what the dead letters
+hold on a node, and `queen_dlq_bodies_not_kept_total` how many the leader filed without a body.
+The per-queue byte cap estimates a queue's bytes from its oldest dead letters; now the estimate is
+never more than all dead letters hold, and past the cap the oldest go each by its own size until the
+rest fits. A queue whose first failures kept large bodies and whose next ones were filed without
+them no longer reads as many times its size and loses dead letters it had room for.
+
 ## 2.10.0 - 2026-11-20
 
 **Upgrading from 2.9.x: a rolling restart.** 2.10.0 keeps the data format of 2.9.0 (cluster
