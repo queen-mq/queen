@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "queen-engine"
-version = "2.10.0"
+version = "2.11.0-rc.1"
 dependencies = [
  "aes-gcm",
  "async-trait",
