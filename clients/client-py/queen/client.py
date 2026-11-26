@@ -1,5 +1,5 @@
 """
-Queen Message Queue Client - Version 2
+QueenMQ Client - Version 2
 Clean, fluent API with smart defaults
 """
 
@@ -82,7 +82,7 @@ def _parse_renew_result(result: Any, lease_id: str) -> Dict[str, Any]:
 
 
 class Queen:
-    """Queen Message Queue Client - Version 2"""
+    """QueenMQ Client - Version 2"""
 
     def __init__(
         self,

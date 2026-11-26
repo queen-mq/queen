@@ -1,4 +1,4 @@
-# Multi-stage Dockerfile for Queen Message Queue
+# Multi-stage Dockerfile for QueenMQ
 #
 # Builds the complete Queen stack:
 # - Rust broker (server/): one binary, storage in its own data directory

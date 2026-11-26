@@ -1969,7 +1969,7 @@ Sign in through the control plane that operates it, then return here.</p>{link}"
     let mark = match wordmark_svg() {
         "" => "<span class=\"word\">queen</span>".to_string(),
         svg => format!(
-            "<span class=\"mark\" role=\"img\" aria-label=\"Queen, message queue\">{svg}</span>"
+            "<span class=\"mark\" role=\"img\" aria-label=\"QueenMQ\">{svg}</span>"
         ),
     };
     format!(

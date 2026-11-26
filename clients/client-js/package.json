@@ -2,7 +2,7 @@
   "name": "queen-mq",
   "version": "2.9.2",
   "type": "module",
-  "description": "Partitioned message queue on a replicated broker log — broker client + fluent streaming SDK (windows, joins, gates) in one package",
+  "description": "Client for QueenMQ, a kernel for distributed systems: queues per entity, state, timers and locks that commit together. Plus a fluent streaming SDK (windows, joins, gates).",
   "main": "client-v2/index.js",
   "types": "client-v2/index.d.ts",
   "scripts": {

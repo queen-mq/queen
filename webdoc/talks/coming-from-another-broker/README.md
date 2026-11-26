@@ -24,4 +24,4 @@ The build writes the talk into the site, `webdoc/public/talks/coming-from-anothe
 | `src/core.js` | navigation, theme, and the helpers the demos share |
 | `src/ch0` to `src/ch10` | one chapter each: `.html` the slides, `.js` the demos. `ch0` is the opening, `ch9` the production flows, `ch10` the end |
 
-The wordmark comes from `webdoc/src/assets/queen.svg` and the scene from `webdoc/public/queen-scene-on-*.svg`, read at build time. The demos are simulated in the page: no broker runs.
+The wordmark comes from `webdoc/src/assets/queenmq-wordmark.svg` and the scene from `webdoc/public/queen-scene-on-*.svg`, read at build time. The demos are simulated in the page: no broker runs.

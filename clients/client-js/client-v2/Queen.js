@@ -1,5 +1,5 @@
 /**
- * Queen Message Queue Client - Version 2
+ * QueenMQ Client - Version 2
  * Clean, fluent API with smart defaults
  */
 

@@ -115,7 +115,7 @@ import signal
 import asyncio
 
 class Queen:
-    """Queen Message Queue Client - Version 2"""
+    """QueenMQ Client - Version 2"""
     
     def __init__(
         self,
