@@ -1,9 +1,12 @@
 /**
  * The homepage hero's artwork: QueenMQ in the middle of four services, each a
- * window of the five-minute guide's code, wired to it. One branch per thing the
- * headline promises: the queue (the orders service pushes), the broker (billing
- * reads every message in its own group), locks (the daily report runs under
- * one) and the step that commits them together (the fulfillment worker).
+ * window of the five-minute guide's code. Each window shows one face of what
+ * the headline promises, named in yellow in its title bar: queues (the orders
+ * service pushes), locks (the daily report runs under one), memory and timers
+ * committed together with the next message (the fulfillment worker), and the
+ * broker it also is (an audit reader replays from any point). The services
+ * that write sit on the left and the ones that read on the right, so every
+ * arrow runs left to right, through QueenMQ.
  *
  * The code is the guide's (examples/tutorials/js/00-five-minutes.mjs, the
  * program that runs every step against a real broker). A window shows lines of
@@ -17,8 +20,10 @@ import icon from "../../../assets/redesign/icon/queenmq-icon.svg?raw";
 import { GUIDE_LANGS, guideCode } from "./home-guide";
 
 interface TreeWindow {
-  /** Where it goes: group and lock on the left, push and txn on the right. */
-  id: "group" | "lock" | "push" | "txn";
+  /** Where it goes: push and lock on the left (they write), txn and replay on the right (they read). */
+  id: "push" | "lock" | "txn" | "replay";
+  /** The face of QueenMQ it shows, in the headline's words, in yellow in its title bar. */
+  face: string;
   /** The guide step whose region the lines come from. */
   region: string;
   title: string;
@@ -27,22 +32,22 @@ interface TreeWindow {
 
 const TREE_WINDOWS: TreeWindow[] = [
   {
-    id: "group",
-    region: "consume-group",
-    title: "billing: its own group, every message",
+    id: "push",
+    face: "queues",
+    region: "push",
+    title: "orders service: one partition per customer",
     lines: [
       "await queen.queue('orders')",
-      "  .group('billing')",
-      "  .subscriptionMode('all')",
-      "  .autoAck(false)",
-      "  .consume(async (msg) => {",
-      "    const ok = msg.data.total > 0",
-      "    await queen.ack(msg, ok ? 'completed' : 'failed', { group: 'billing' })",
-      "  })",
+      "  .partition('customer-42')",
+      "  .push([{",
+      "    transactionId: 'order-1001',",
+      "    data: { orderId: 1001, customer: 42, total: 59.9 },",
+      "  }])",
     ],
   },
   {
     id: "lock",
+    face: "locks",
     region: "lock",
     title: "daily report: one worker at a time",
     lines: [
@@ -57,22 +62,10 @@ const TREE_WINDOWS: TreeWindow[] = [
     ],
   },
   {
-    id: "push",
-    region: "push",
-    title: "orders service",
-    lines: [
-      "await queen.queue('orders')",
-      "  .partition('customer-42')",
-      "  .push([{",
-      "    transactionId: 'order-1001',",
-      "    data: { orderId: 1001, customer: 42, total: 59.9 },",
-      "  }])",
-    ],
-  },
-  {
     id: "txn",
+    face: "memory · timers",
     region: "transaction",
-    title: "fulfillment worker: one step, one commit",
+    title: "fulfillment: one step, one commit",
     lines: [
       "await queen.transaction()",
       "  .ack(msg, 'completed', { consumerGroup: 'fulfillment' })",
@@ -82,6 +75,22 @@ const TREE_WINDOWS: TreeWindow[] = [
       "  .timer('reminders').key(`review-${orderId}`).delay('24h')",
       "  .payload({ orderId, customer }).schedule()",
       "  .commit()",
+    ],
+  },
+  {
+    id: "replay",
+    face: "the broker",
+    region: "replay",
+    title: "audit: a new reader, from any point",
+    // the guide's .limit(1) is left out: it only lets the program end
+    lines: [
+      "await queen.queue('orders')",
+      "  .group('audit')",
+      "  .subscriptionFrom('2026-10-22T00:00:00Z')",
+      "  .each()",
+      "  .consume(async (msg) => {",
+      "    console.log('again:', msg.data)",
+      "  })",
     ],
   },
 ];
@@ -122,11 +131,12 @@ function tokens(line: string): { text: string; kind: TokenKind }[] {
  * drawn 1:1, and narrower it scales down (the page shows it from 1280 up).
  *
  * The tile sits in the middle; each side has a column of two windows 150 units
- * from it, the left column at the top, the shorter right one centred on it.
- * A connector runs from the line of code that does the thing (the push, the
- * consume, the guard, the ack) to the tile or back, as a dotted elbow whose
- * bend sits near the window, so the label beside the tile has the straight
- * run to itself. The arrow points the way the data goes.
+ * from it, both columns centred on it. A wire runs from the line of code that
+ * does the thing (the push, the guard) to the tile, or from the tile to the
+ * line that takes it (the ack, the replay), as a dotted elbow whose bend sits
+ * near the window. Its label sits beside the tile, on the side of the wire its
+ * elbow does not take, so the two never cross. The arrow points the way the
+ * data goes.
  */
 
 const W = 1360;
@@ -139,6 +149,7 @@ const COL_GAP = 34; // between the two windows of a column
 const HEAD = 36; // the window's title bar
 const LH = 20; // a line of code
 const CODE_TOP = HEAD + 4 + LH / 2 + 3; // the first line's middle, from the window's top
+const SPREAD = 34; // the wires meet the tile this far above and below its middle
 
 const INK = "#151311";
 const C = {
@@ -147,6 +158,7 @@ const C = {
   head: "#1c1a18",
   dots: "#3a3631",
   title: "#9a948c",
+  face: "#fcc620",
   glow: "#fff4c2",
   label: "rgb(21 19 17 / 0.62)",
   kw: "#fcc620",
@@ -158,6 +170,7 @@ const C = {
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const winH = (w: TreeWindow) => HEAD + 4 + w.lines.length * LH + 18;
+const colH = (a: TreeWindow, b: TreeWindow) => winH(a) + COL_GAP + winH(b);
 const byId = (id: TreeWindow["id"]) => TREE_WINDOWS.find((w) => w.id === id)!;
 
 /** The y of a window's line that holds `needle`, from the picture's top. */
@@ -188,7 +201,10 @@ function windowSvg(w: TreeWindow, x: number, y: number): string {
     `<rect x="${x}" y="${y}" width="${WIN_W}" height="${HEAD}" fill="${C.head}"/>` +
     `<line x1="${x}" y1="${y + HEAD}" x2="${x + WIN_W}" y2="${y + HEAD}" stroke="${C.edge}"/>` +
     dots +
-    `<text x="${x + 74}" y="${y + HEAD / 2}" dominant-baseline="central" class="qt-title" fill="${C.title}">${esc(w.title)}</text>` +
+    // the face in yellow, then what this service does with it
+    `<text x="${x + 74}" y="${y + HEAD / 2}" dominant-baseline="central" class="qt-title">` +
+    `<tspan fill="${C.face}" font-weight="650">${esc(w.face)}</tspan>` +
+    `<tspan fill="${C.title}" dx="10">${esc(w.title)}</tspan></text>` +
     `<g class="qt-code">${code}</g>` +
     // where a long line meets the right edge it fades out rather than stops
     `<rect x="${x + WIN_W - 56}" y="${y + HEAD + 1}" width="55" height="${h - HEAD - 2}" fill="url(#qt-fade)"/>` +
@@ -206,46 +222,51 @@ function connector(x1: number, y1: number, bx: number, x2: number, y2: number): 
   );
 }
 
-function label(x: number, y: number, text: string, anchor: "start" | "end"): string {
+/** A wire's label beside the tile, on the run at `runY`: below it when the elbow climbs to `winY`, above when it drops. */
+function label(x: number, runY: number, winY: number, text: string, anchor: "start" | "end"): string {
+  const y = winY < runY ? runY + 13 : runY - 12;
   return `<text x="${x}" y="${y}" dominant-baseline="central" text-anchor="${anchor}" class="qt-label" fill="${C.label}">${esc(text)}</text>`;
 }
 
 /** The whole picture as one inline SVG, the QueenMQ icon in the middle. */
 export function treeSvg(): string {
-  const [group, lock, push, txn] = (["group", "lock", "push", "txn"] as const).map(byId);
-  const leftH = winH(group) + COL_GAP + winH(lock);
-  const rightH = winH(push) + COL_GAP + winH(txn);
-  const H = PAD_TOP + leftH + PAD_BOTTOM;
+  const [push, lock, txn, replay] = (["push", "lock", "txn", "replay"] as const).map(byId);
+  const leftH = colH(push, lock);
+  const rightH = colH(txn, replay);
+  const bandH = Math.max(leftH, rightH);
+  const H = PAD_TOP + bandH + PAD_BOTTOM;
 
   const cx = W / 2;
-  const cy = PAD_TOP + leftH / 2;
+  const cy = PAD_TOP + bandH / 2;
   const lx = cx - TILE / 2 - GAP - WIN_W; // the left column's x
   const rx = cx + TILE / 2 + GAP; // the right column's x
-  const groupY = PAD_TOP;
-  const lockY = groupY + winH(group) + COL_GAP;
-  const pushY = PAD_TOP + (leftH - rightH) / 2;
-  const txnY = pushY + winH(push) + COL_GAP;
+  const pushY = PAD_TOP + (bandH - leftH) / 2;
+  const lockY = pushY + winH(push) + COL_GAP;
+  const txnY = PAD_TOP + (bandH - rightH) / 2;
+  const replayY = txnY + winH(txn) + COL_GAP;
 
   const tl = cx - TILE / 2 - 6; // where wires meet the tile
   const tr = cx + TILE / 2 + 6;
-  const up = cy - 30;
-  const down = cy + 30;
+  const up = cy - SPREAD;
+  const down = cy + SPREAD;
   const bendL = lx + WIN_W + 34;
   const bendR = rx - 34;
 
+  const pushAt = lineY(push, pushY, ".push(");
+  const guardAt = lineY(lock, lockY, ".guard(");
+  const ackAt = lineY(txn, txnY, ".ack(");
+  const replayAt = lineY(replay, replayY, ".subscriptionFrom(");
   const wires =
-    // orders -> QueenMQ, from the push
-    connector(rx, lineY(push, pushY, ".push("), bendR, tr, up) +
-    label(tr + 14, up - 12, "push", "start") +
-    // QueenMQ -> the worker, into the step's ack
-    connector(tr, down, bendR, rx, lineY(txn, txnY, ".ack(")) +
-    label(tr + 14, down - 12, "pop · commit()", "start") +
-    // QueenMQ -> billing, into its consume
-    connector(tl, up, bendL, lx + WIN_W, lineY(group, groupY, ".consume(")) +
-    label(tl - 14, up - 12, "every group", "end") +
-    // the daily report -> QueenMQ, from the guarded transaction
-    connector(lx + WIN_W, lineY(lock, lockY, ".guard("), bendL, tl, down) +
-    label(tl - 14, down - 12, "guard(lock)", "end");
+    // the writers, into QueenMQ: the push, and the transaction the lock guards
+    connector(lx + WIN_W, pushAt, bendL, tl, up) +
+    label(tl - 14, up, pushAt, "push", "end") +
+    connector(lx + WIN_W, guardAt, bendL, tl, down) +
+    label(tl - 14, down, guardAt, "guard(lock)", "end") +
+    // the readers, out of it: the worker's step, and the audit's replay
+    connector(tr, up, bendR, rx, ackAt) +
+    label(tr + 14, up, ackAt, "pop · commit()", "start") +
+    connector(tr, down, bendR, rx, replayAt) +
+    label(tr + 14, down, replayAt, "replay", "start");
 
   const vb = icon.match(/viewBox="([^"]+)"/)![1].split(/\s+/).map(Number);
   const tile = icon
@@ -256,9 +277,10 @@ export function treeSvg(): string {
   const ty = cy - TILE / 2;
 
   const alt =
-    "QueenMQ in the middle of four services, each a window of the five-minute guide's code: " +
-    "the orders service pushes, billing reads every message in its own group, " +
-    "the daily report runs under a lock, and the fulfillment worker commits each step in one transaction.";
+    "QueenMQ in the middle of four services, each a window of the five-minute guide's code. " +
+    "On the left, the ones that write: the orders service pushes into a queue, and the daily report runs under a lock. " +
+    "On the right, the ones that read: the fulfillment worker writes memory, sets a timer and pushes the next message in one commit, " +
+    "and an audit reader replays every order from a point in time.";
 
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(alt)}">` +
@@ -269,10 +291,10 @@ export function treeSvg(): string {
     `</defs>` +
     `<ellipse cx="${cx}" cy="${cy}" rx="360" ry="${Math.min(250, cy - 4)}" fill="url(#qt-glow)"/>` +
     wires +
-    windowSvg(group, lx, groupY) +
+    windowSvg(push, lx, pushY) +
     windowSvg(lock, lx, lockY) +
-    windowSvg(push, rx, pushY) +
     windowSvg(txn, rx, txnY) +
+    windowSvg(replay, rx, replayY) +
     `<g filter="url(#qt-shadow)"><g transform="translate(${tx},${ty}) scale(${(TILE / vb[2]).toFixed(4)}) translate(${-vb[0]},${-vb[1]})">${tile}</g></g>` +
     `</svg>`
   );
