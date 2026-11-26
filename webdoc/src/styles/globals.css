@@ -52,7 +52,7 @@
 	--nb-selected: #e3e1dd; /* picked */
 
 	/* Actions: ink on the page, the console's one primary button */
-	--nb-brand: #fcc620; /* the logo's yellow, for the logo only */
+	--nb-brand: #fcc620; /* the logo's yellow: the logo, the homepage hero, and "you are here" in the docs */
 	--nb-primary: #1b1a18;
 	--nb-primary-foreground: #f6f5f3;
 	--nb-primary-hover: #4b4741;
@@ -537,6 +537,29 @@ pre.astro-code .highlighted-word {
 /* Hide hamburger on pages without a sidebar dialog. */
 body:not(:has([data-mobile-sidebar])) [data-menu-btn] {
 	display: none;
+}
+
+/* ---- Where you are ----
+ * In the docs the logo's yellow means one thing: where you are. The page you
+ * are on gets a short yellow bar at the left of its sidebar row (a page link,
+ * or a group whose index page it is), in the sidebar and in the phone's
+ * drawer alike; the section you are reading gets the yellow rail in "On this
+ * page" (TOC.astro). The row keeps its grey and its weight, so the yellow is
+ * never the only sign. */
+[data-nb-sidebar-link][aria-current="page"],
+[data-nb-sidebar-group-label]:has(> a[aria-current="page"]) {
+	position: relative;
+}
+[data-nb-sidebar-link][aria-current="page"]::before,
+[data-nb-sidebar-group-label]:has(> a[aria-current="page"])::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	top: 7px;
+	bottom: 7px;
+	width: 3px;
+	border-radius: 2px;
+	background: var(--nb-brand);
 }
 
 /* ---- Benchmark figures ---- */

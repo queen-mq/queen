@@ -1,0 +1,66 @@
+---
+/**
+ * The homepage hero's artwork, from 1280 px up: QueenMQ wired to four
+ * services, each a window of the five-minute guide's code. src/lib/hero-tree.ts
+ * draws it as one SVG and fails the build if a line it shows is not in the
+ * program that runs the guide. It sits on the hero's yellow, over a dot grid
+ * that fades in under the buttons and out at the hero's foot.
+ *
+ * The SVG goes in as a string: in a template, Astro's whitespace compression
+ * would take the indentation out of the code lines.
+ */
+import { treeSvg } from "../lib/hero-tree";
+
+const svg = treeSvg();
+---
+
+<div class="hero-tree hidden xl:block" set:html={svg} />
+
+<style>
+  .hero-tree {
+    position: relative;
+    padding-bottom: 1.5rem;
+  }
+  /* The logo's yellow a step darker, every 24 px, centred on the tile. */
+  .hero-tree::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(circle, #e9b414 1.1px, transparent 1.6px);
+    background-size: 24px 24px;
+    background-position: 50% 0;
+    -webkit-mask-image: linear-gradient(to bottom, transparent, #000 7rem, #000 calc(100% - 4rem), transparent);
+    mask-image: linear-gradient(to bottom, transparent, #000 7rem, #000 calc(100% - 4rem), transparent);
+    pointer-events: none;
+  }
+  /* Drawn 1:1 from 1360 px wide, scaled down below that. */
+  .hero-tree :global(svg) {
+    position: relative;
+    display: block;
+    width: 100%;
+    max-width: 85rem;
+    height: auto;
+    margin: 0 auto;
+  }
+  .hero-tree :global(.qt-code) {
+    font-family: var(--nb-font-mono);
+    font-size: 12px;
+  }
+  .hero-tree :global(.qt-label) {
+    font-family: var(--nb-font-mono);
+    font-size: 11.5px;
+  }
+  .hero-tree :global(.qt-title) {
+    font-family: var(--nb-font-sans);
+    font-size: 13px;
+    font-weight: 550;
+  }
+  .hero-tree :global(.qt-wire) {
+    fill: none;
+    stroke: #151311;
+    stroke-opacity: 0.55;
+    stroke-width: 1.5;
+    stroke-dasharray: 2 5;
+    stroke-linecap: round;
+  }
+</style>

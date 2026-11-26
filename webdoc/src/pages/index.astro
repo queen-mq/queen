@@ -3,6 +3,7 @@ import { Code } from "astro:components";
 import BaseLayout from "../layouts/BaseLayout.astro";
 import Header from "../components/Header.astro";
 import Figure from "../components/Figure.astro";
+import HeroTree from "../components/HeroTree.astro";
 import { config } from "virtual:nimbus/config";
 import {
   HOME_TITLE,
@@ -30,8 +31,9 @@ import edition from "../../public/book/edition.json";
  * markdown twin (index.md.ts) reads too. Elements marked `data-md` are the
  * ones scripts/check-markdown.mjs looks for in dist/index.md.
  *
- * The rhythm: a split hero, then the five-minute guide, then sections that
- * alternate between the page and a card-coloured band: the numbers, proof,
+ * The rhythm: the hero on the logo's yellow, the definition and the proof
+ * under it on the page, then sections that alternate between a card-coloured
+ * band and the page: why a kernel, the five-minute guide, the numbers, proof,
  * where to go next, and the closing line.
  *
  * The guide renders every language's code for every step; the language picker
@@ -58,12 +60,13 @@ const cardStatic = "block rounded-card bg-card p-5";
     <Header transparentTop showSidebar={false} />
 
     <main class="w-full flex-1">
-      {/* Hero: the words alone, no picture, on the column the sections under
-          it use, so its left edge is theirs. It is the talk's title slide: a
-          big line, the promise under it, the definition, the proof as pills,
-          the way in, and the limit in small. */}
-      <section>
-        <div class="mx-auto w-full max-w-5xl px-6 pb-20 pt-14 lg:px-10 lg:pb-28 lg:pt-24">
+      {/* Hero: the logo's yellow in both themes, pulled up under the clear
+          header so the yellow starts at the top of the page. The words in the
+          middle: a big line, the promise under it, the way in. From 1280 px up
+          the tree grows under them: QueenMQ wired to four services, each a
+          window of the guide's tested code. */}
+      <section class="home-hero relative -mt-14 overflow-hidden pt-14">
+        <div class="mx-auto w-full max-w-5xl px-6 pb-20 pt-14 text-center lg:px-10 lg:pb-28 lg:pt-20 xl:pb-10">
           <p class="text-[0.75rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground">{hero.eyebrow}</p>
           <h1 data-md class="mt-5 text-balance text-foreground">
             <span
@@ -85,34 +88,12 @@ const cardStatic = "block rounded-card bg-card p-5";
             )}
           </h1>
           {/* The setup dimmer, the name on a line of its own: the line lands there. */}
-          <p data-md class="mt-6 max-w-[38rem] text-[1.125rem] leading-normal text-muted-foreground lg:text-[1.25rem]">
+          <p data-md class="mx-auto mt-6 max-w-[38rem] text-[1.125rem] leading-normal text-muted-foreground lg:text-[1.25rem]">
             {hero.lead.text.join(" ")}
             <strong class="mt-2 block font-semibold text-foreground">{hero.lead.close}</strong>
           </p>
-          {/* The definition, one line each, set apart by a rule so it reads as
-              one block: the five lines the README carries too. */}
-          <div data-md class="mt-6 max-w-[38rem] space-y-1.5 border-l-2 border-line pl-4 text-[0.9375rem] leading-relaxed text-foreground/85 lg:text-[1rem]">
-            {hero.lines.map((l) => <p>{l}</p>)}
-          </div>
-          {/* The proof as pills: filled with the card tone, a step quieter than the
-              buttons below, each a link to the page that backs it. Two by two
-              from sm up, so four of them make a block rather than 3 + 1. */}
-          <ul class="mt-8 flex flex-wrap gap-2.5 sm:grid sm:grid-cols-[repeat(2,max-content)]">
-            {
-              hero.proof.map((p) => (
-                <li>
-                  <a
-                    href={p.href}
-                    class="block rounded-ctl bg-card px-3 py-1.5 text-[0.875rem] text-foreground no-underline transition-colors hover:bg-selected"
-                  >
-                    {p.label}
-                  </a>
-                </li>
-              ))
-            }
-          </ul>
 
-          <div class="mt-10 flex flex-wrap items-center gap-3">
+          <div class="mt-10 flex flex-wrap items-center justify-center gap-3">
             <a
               href={hero.primary.href}
               class="rounded-ctl bg-primary px-5 py-2.5 text-[0.875rem] font-medium text-primary-foreground no-underline transition-colors hover:bg-primary-hover"
@@ -132,22 +113,55 @@ const cardStatic = "block rounded-card bg-card p-5";
               GitHub →
             </a>
           </div>
-          {/* The talk, on a line of its own under the buttons: the way in for a
-              reader who already runs another broker. */}
-          <a
-            href={hero.talk.href}
-            class="mt-5 inline-block text-[0.9375rem] font-medium text-foreground/85 no-underline transition-colors hover:text-foreground"
-          >
-            {hero.talk.label} <span class="text-muted-foreground">{hero.talk.more}</span> →
-          </a>
-          {/* The map, on the line under it: every part and option on one screen. */}
-          <a
-            href={hero.map.href}
-            class="mt-2 block w-fit text-[0.9375rem] font-medium text-foreground/85 no-underline transition-colors hover:text-foreground"
-          >
-            {hero.map.label} <span class="text-muted-foreground">{hero.map.more}</span> →
-          </a>
-          <p data-md class="mt-8 max-w-[40rem] text-[0.8125rem] leading-relaxed text-muted-foreground">
+        </div>
+        <HeroTree />
+      </section>
+
+      {/* Under the hero, on the page: the definition, one line each, set apart
+          by a rule so it reads as one block (the five lines the README carries
+          too). Beside it the proof and the ways in; the limit in small under
+          both, so "ACID" and its price share the screen. */}
+      <section>
+        <div class="mx-auto w-full max-w-5xl px-6 py-14 lg:px-10 lg:py-20">
+          <div class="grid gap-10 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center lg:gap-16">
+            <div data-md class="max-w-[38rem] space-y-1.5 border-l-2 border-line pl-4 text-[0.9375rem] leading-relaxed text-foreground/85 lg:text-[1rem]">
+              {hero.lines.map((l) => <p>{l}</p>)}
+            </div>
+            <div>
+              {/* The proof as pills: filled with the card tone, each a link to
+                  the page that backs it. Two by two from sm up, so four of them
+                  make a block rather than 3 + 1. */}
+              <ul class="flex flex-wrap gap-2.5 sm:grid sm:grid-cols-[repeat(2,max-content)]">
+                {
+                  hero.proof.map((p) => (
+                    <li>
+                      <a
+                        href={p.href}
+                        class="block rounded-ctl bg-card px-3 py-1.5 text-[0.875rem] text-foreground no-underline transition-colors hover:bg-selected"
+                      >
+                        {p.label}
+                      </a>
+                    </li>
+                  ))
+                }
+              </ul>
+              {/* The talk, for a reader who already runs another broker, and
+                  the map, every part and option on one screen. */}
+              <a
+                href={hero.talk.href}
+                class="mt-6 block w-fit text-[0.9375rem] font-medium text-foreground/85 no-underline transition-colors hover:text-foreground"
+              >
+                {hero.talk.label} <span class="text-muted-foreground">{hero.talk.more}</span> →
+              </a>
+              <a
+                href={hero.map.href}
+                class="mt-2 block w-fit text-[0.9375rem] font-medium text-foreground/85 no-underline transition-colors hover:text-foreground"
+              >
+                {hero.map.label} <span class="text-muted-foreground">{hero.map.more}</span> →
+              </a>
+            </div>
+          </div>
+          <p data-md class="mt-10 max-w-[40rem] text-[0.8125rem] leading-relaxed text-muted-foreground">
             {hero.limit.text}{" "}
             <a
               href={hero.limit.link.href}
@@ -476,6 +490,43 @@ const cardStatic = "block rounded-card bg-card p-5";
 </BaseLayout>
 
 <style>
+  /* The hero is the logo's yellow in both themes, with dark ink on it. The
+     --color-* tokens are set here, not the --nb-* ones they come from: those
+     are read once, at the root. The focus ring reads --nb-ring itself. */
+  .home-hero {
+    background: var(--nb-brand);
+    --color-foreground: #151311;
+    --color-muted-foreground: rgb(21 19 17 / 0.66);
+    --color-card: rgb(21 19 17 / 0.07);
+    --color-muted: rgb(21 19 17 / 0.09);
+    --color-selected: rgb(21 19 17 / 0.14);
+    --color-line: rgb(21 19 17 / 0.28);
+    --color-primary: #151311;
+    --color-primary-foreground: #fcc620;
+    --color-primary-hover: #2b2723;
+    --nb-ring: #151311;
+  }
+  /* At the top of the page the header is clear over the yellow, so its ink
+     is dark too; once the page scrolls it is the theme's bar again. The menu
+     it opens below md is a panel in the theme's colours, so it keeps the
+     theme's ink. */
+  :global(header[data-transparent-top]:not([data-scrolled])) {
+    --color-foreground: #151311;
+    --color-muted-foreground: rgb(21 19 17 / 0.62);
+    --color-muted: rgb(21 19 17 / 0.08);
+    --color-accent: rgb(21 19 17 / 0.08);
+    --color-selected: rgb(21 19 17 / 0.14);
+    --color-border: rgb(21 19 17 / 0.16);
+    --color-line: rgb(21 19 17 / 0.18);
+    --nb-ring: #151311;
+  }
+  :global(header[data-transparent-top] .site-menu) {
+    --color-foreground: var(--nb-foreground);
+    --color-muted-foreground: var(--nb-muted-foreground);
+    --color-selected: var(--nb-selected);
+    --nb-ring: var(--color-ring);
+  }
+
   /* Code on this page sits in a card that already has a frame and a header:
      Shiki's own background, padding and border would be a box in a box. */
   .home-code :global(pre.astro-code) {
