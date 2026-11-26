@@ -222,27 +222,35 @@
     \centering\itshape\small\color{muted}To come: #1}}\par\medskip}
 
 % --- The cover: \queencover{<date line>}
+% The homepage's first screen on paper: the logo's yellow from edge to edge, the
+% site's dark ink on it, and the words alone. The title, the site's headline and
+% its lead under it, and at the foot the word the site's header shows. The muted
+% ink is the site's (ink at 66% over the yellow).
+\definecolor{coverink}{HTML}{151311}
+\colorlet{covermuted}{coverink!66!queenyellow}
 \newcommand{\queencover}[1]{%
   \pagenumbering{Alph}% its own numbering, so its page anchor clashes with nothing
   \hypersetup{pageanchor=false}%
   \begin{titlepage}
   \thispagestyle{empty}
   \begin{tikzpicture}[remember picture,overlay]
-    \fill[ink] (current page.south west) rectangle (current page.north east);
-    \node[anchor=south east,inner sep=0] at ([xshift=2mm,yshift=0mm]current page.south east)
-      {\includegraphics[height=186mm]{scene-on-dark.png}};
-    \node[anchor=north west,inner sep=0,text width=125mm,align=left]
+    \fill[queenyellow] (current page.south west) rectangle (current page.north east);
+    \node[anchor=north west,inner sep=0,text width=142mm,align=left]
       at ([xshift=18mm,yshift=-28mm]current page.north west) {%
-      {\InterSemi\fontsize{9.5}{12}\selectfont\color{queenyellow}\addfontfeature{LetterSpace=22}%
+      {\InterSemi\fontsize{9.5}{12}\selectfont\color{covermuted}\addfontfeature{LetterSpace=22}%
         \spaceskip=0.62em\relax THE LITTLE BOOK OF}\par\vspace{4mm}
-      {\InterBold\fontsize{48}{50}\selectfont\color{paper}QueenMQ}\par\vspace{8mm}
-      {\itshape\fontsize{13.5}{18}\selectfont\color{paper!70!ink}Partitions are for ordering.\\
-        Not for scaling.}};
+      {\InterBold\fontsize{56}{58}\selectfont\color{coverink}QueenMQ}\par\vspace{10mm}
+      {\InterSemi\fontsize{19}{24}\selectfont\color{coverink}A kernel for distributed systems.}\par\vspace{5mm}
+      \parbox[t]{142mm}{\raggedright
+        {\InterRegular\fontsize{11.5}{16}\selectfont\color{covermuted}%
+          What a kernel gives a program (queues, memory, timers, locks),\\
+          QueenMQ gives a distributed system.}\par\vspace{1.5mm}
+        {\InterSemi\fontsize{11.5}{16}\selectfont\color{coverink}And they commit together.}}};
     \node[anchor=south west,inner sep=0,text width=100mm,align=left]
       at ([xshift=18mm,yshift=17mm]current page.south west) {%
-      \includegraphics[width=36mm]{wordmark-on-dark.pdf}\par\vspace{5mm}
-      {\InterRegular\fontsize{8.5}{12.5}\selectfont\color{paper!60!ink}%
-        #1\enspace\textperiodcentered\enspace Queen \buildqueen\enspace\textperiodcentered\enspace queenmq.com}};
+      \includegraphics[width=36mm]{wordmark.pdf}\par\vspace{5mm}
+      {\InterRegular\fontsize{8.5}{12.5}\selectfont\color{covermuted}%
+        #1\enspace\textperiodcentered\enspace QueenMQ \buildqueen\enspace\textperiodcentered\enspace queenmq.com}};
   \end{tikzpicture}
   \end{titlepage}
   \cleardoublepage

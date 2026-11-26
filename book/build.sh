@@ -45,18 +45,10 @@ while read -r step; do
 done < <(grep -rhoE '\\guide\{[a-z-]+\}' "$HERE/chapters" 2>/dev/null | sed 's/\\guide{\(.*\)}/\1/' | sort -u)
 [ "$missing" = 0 ] || exit 1
 
-# 2. The cover art: queenmq.cloud's sunflower and bee. book/assets/queen-scene.svg is,
-#    byte for byte, queen-cloud's webapp/src/trial/queen-scene.svg (the reverted
-#    homepage hero of 4d7b9107f). It names no colour and it animates; rsvg-convert
-#    reads neither CSS variables nor animations, so the dark page's colours are
-#    written in and the drawing is its resting frame: the whole flower, the bee on a
-#    petal. It goes in as a transparent PNG at about 530 dpi, because the seeds are
-#    cut out with SVG masks, which a PDF carries as soft masks that Apple's renderer
-#    (Preview, Quick Look) ignores.
-sed -e 's/var(--scene-ink)/#f2f0ec/g' -e 's/var(--scene-paper)/#0b0a0a/g' \
-    -e 's/var(--scene-yellow)/#fcc620/g' "$HERE/assets/queen-scene.svg" > "$OUT/assets/queen-scene-dark.svg"
-rsvg-convert -h 3800 -o "$OUT/assets/scene-on-dark.png" "$OUT/assets/queen-scene-dark.svg"
-rsvg-convert -f pdf -o "$OUT/assets/wordmark-on-dark.pdf" "$ROOT/assets/logo/queen-on-dark.svg"
+# 2. The cover is the homepage's yellow with the words alone (latex/queen.sty). At its
+#    foot, the word the site's header shows, dark on the yellow: the brand's file,
+#    which assets/redesign/src/make.py writes.
+rsvg-convert -f pdf -o "$OUT/assets/wordmark.pdf" "$ROOT/assets/redesign/logo/queenmq-wordmark.svg"
 
 # Screenshots come from the site's own files (WebP there; LaTeX reads PNG), so the
 # book always shows the dashboard the homepage shows. Light mode, for a white page.
