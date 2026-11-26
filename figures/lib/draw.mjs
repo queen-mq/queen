@@ -10,9 +10,11 @@
 // the book and the site's light theme, and with the dark one for the site's
 // dark theme.
 //
-// The dark palette sits on the site's dark page, the console's Soft (#202020):
-// `paper` is that page (labels mask the lines behind them with it), and boxes
-// are one step lighter (#2b2b2b, the console's cards), never darker.
+// The dark palette sits on the site's dark page, Night (#151311, the logo's
+// dark ground): `paper` is that page (labels mask the lines behind them with
+// it), and boxes are one step lighter (#201e1c, the site's cards), never
+// darker. Lines and grids keep the steps they had above the console's Soft
+// (#202020), the site's dark page until 2026-11-26.
 
 export const W = 1000;
 
@@ -25,8 +27,8 @@ export const PALETTES = {
     info: "#2c5f8a", infoFill: "#e3eef7",
   },
   dark: {
-    ink: "#f3f3f3", muted: "#b4b4b4", faint: "#969696", line: "#565656", grid: "#333333",
-    fill: "#2b2b2b", paper: "#202020",
+    ink: "#f4f2ee", muted: "#b6b2ac", faint: "#99948e", line: "#4b4947", grid: "#282624",
+    fill: "#201e1c", paper: "#151311",
     accent: "#fcc620", accentInk: "#fcc620", accentFill: "#4a3d14",
     ok: "#6cc08b", okFill: "#24402d", danger: "#f08a5d", dangerFill: "#4d2b1f",
     info: "#7fb4e0", infoFill: "#1f3348",

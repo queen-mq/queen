@@ -42,7 +42,7 @@ html = read("head.html").replace("__CSS__", faces + read("style.css"))
 html += "".join(read(c + ".html") for c in chapters)
 html += read("foot.html")
 html += '<script src="deck.js"></script>\n</body>\n</html>\n'
-html = html.replace("__WORDMARK__", (webdoc / "src/assets/queen.svg").read_text().strip())
+html = html.replace("__WORDMARK__", (webdoc / "src/assets/queenmq-wordmark.svg").read_text().strip())
 html = html.replace("__PUBLIC__", "")
 js = read("core.js") + "".join(read(c + ".js") for c in chapters if (src / f"{c}.js").exists())
 

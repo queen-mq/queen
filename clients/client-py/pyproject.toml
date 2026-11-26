@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "queen-mq"
 version = "2.9.0"
-description = "High-performance message queue client + fluent streaming SDK for Python"
+description = "Python client for QueenMQ, a kernel for distributed systems: queues per entity, state, timers and locks that commit together. Plus a fluent streaming SDK."
 readme = "README.md"
 authors = [
     {name = "Smartness", email = "info@smartness.com"}

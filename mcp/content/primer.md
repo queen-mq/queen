@@ -1,7 +1,8 @@
-# Queen MQ 2
+# QueenMQ 2
 
-Queen MQ 2 is a transactional event broker: one binary per node,
-state in a raft-replicated log on local disk, no external database.
+QueenMQ is a kernel for distributed systems: queues, state, timers and locks
+commit together in one raft-replicated log on local disk.
+One binary per node, no external database.
 Apps speak JSON over HTTP on port 6632 (SDKs: JS, Python, Go, Rust, PHP, C++);
 Kafka clients can use the built-in facade.
 In-broker connectors stream PostgreSQL 17+ tables into queues and queues into tables,

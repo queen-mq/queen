@@ -5,8 +5,8 @@ import { LinkButton } from "./ui/link-button";
 import { ThemeToggle } from "./ui/theme-toggle";
 import { SearchTrigger } from "./ui/search";
 import { config } from "virtual:nimbus/config";
-import mark from "../assets/q.svg?raw";
-import wordmark from "../assets/queen.svg?raw";
+import mark from "../assets/queenmq-icon.svg?raw";
+import wordmark from "../assets/queenmq-wordmark.svg?raw";
 import { getSidebarSections } from "@cloudflare/nimbus-docs/runtime";
 import { SITE_NAV, isOutsideDocs } from "@/lib/site-nav";
 
@@ -89,33 +89,36 @@ const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent";
     <div class="flex items-center gap-3 min-w-0">
       <a href="/" class="group flex shrink-0 items-center" aria-label={config.title}>
         {/*
-          The logo, inlined (assets/logo.py writes src/assets/): the petals
-          keep their yellow and the letters take the text colour of the
-          theme. The home page shows the name, and so does a docs page over
-          its sidebar (lg and up), where the column has the room; below that
-          the bar keeps the q alone. The line "message queue" stays out of this bar:
-          the flower is tall, and at a height that fits here the line could
-          not be read.
+          The logo, inlined (assets/redesign/src/web.py writes src/assets/),
+          in the text colour of the theme. The home page shows the word alone,
+          and so does a docs page over its sidebar (lg and up), where the
+          column has the room: the tab above already shows the box. Below that
+          the bar keeps the box alone: a sunflower on its stem, the stem being
+          the page's background showing through the box down to its border,
+          the petals and the seed head in their own colours. So a light page
+          gets a dark box with a light stem, a dark page a white box with a
+          dark stem. The word's SVG is centred on its x-height, so the
+          letters' body sits on the bar's middle and the q tails hang below.
         */}
         {currentSlug === "/" ? (
           <span
-            class="block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[44px] [&>svg]:w-auto"
+            class="block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[28.5px] [&>svg]:w-auto"
             set:html={wordmark}
           />
         ) : sidebarUnder ? (
           <>
             <span
-              class="hidden lg:block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[44px] [&>svg]:w-auto"
+              class="hidden lg:block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[28.5px] [&>svg]:w-auto"
               set:html={wordmark}
             />
             <span
-              class="block lg:hidden shrink-0 text-foreground [&>svg]:block [&>svg]:h-[40px] [&>svg]:w-auto"
+              class="block lg:hidden shrink-0 text-foreground [&>svg]:block [&>svg]:h-[28px] [&>svg]:w-auto"
               set:html={mark}
             />
           </>
         ) : (
           <span
-            class="block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[40px] [&>svg]:w-auto"
+            class="block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[28px] [&>svg]:w-auto"
             set:html={mark}
           />
         )}

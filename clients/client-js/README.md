@@ -1,8 +1,8 @@
-# Queen MQ - JavaScript Client
+# QueenMQ - JavaScript Client
 
 <div align="center">
 
-**Modern, high-performance message queue client for Node.js**
+**Node.js client for QueenMQ, a kernel for distributed systems**
 
 [![npm](https://img.shields.io/npm/v/queen-mq.svg)](https://www.npmjs.com/package/queen-mq)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.md)
@@ -14,9 +14,9 @@
 
 ---
 
-## What is Queen MQ?
+## What is QueenMQ?
 
-Queen MQ is a partitioned message queue broker that keeps its state in its own replicated log, with a powerful feature set:
+QueenMQ is a kernel for distributed systems: what a kernel gives a program (queues, memory, timers, locks), QueenMQ gives a distributed system, and they commit together. It all lives in one replicated log, so it's also the broker, with a powerful feature set:
 
 - **FIFO Partitions** - Unlimited ordered partitions within queues
 - **Consumer Groups** - Kafka-style consumer groups for scalability

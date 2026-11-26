@@ -6,10 +6,11 @@
 \section{What is QueenMQ?}
 
 
-QueenMQ is a distributed message broker, built in Rust, replicated with Raft, and developed at
-Smartness. With it you can write applications that decouple producing from consuming, do request
+QueenMQ is a kernel for distributed systems. What a kernel gives a program (queues, memory,
+timers, locks), QueenMQ gives a distributed system. And they commit together. It is built in
+Rust, replicated with Raft, and developed at Smartness. With it you can write applications that decouple producing from consuming, do request
 and reply, and process streams, using transactional features that let you remove a lot of logic
 from the application and offload it to QueenMQ.
 
-Every feature the broker has is there because we needed it at Smartness, where it powers almost
+Every feature QueenMQ has is there because we needed it at Smartness, where it powers almost
 every product.

@@ -1,8 +1,8 @@
 /**
  * theme-toggle.client.ts — light, dark, system. Writes the choice to
  * localStorage ("ui-mode"); "system" is stored too and follows the OS.
- * Nothing stored is a first visit, which BaseLayout shows dark (the
- * console's Soft). BaseLayout's pre-paint script owns DOM application so
+ * Nothing stored is a first visit, which BaseLayout shows dark (Night,
+ * the logo's dark ground). BaseLayout's pre-paint script owns DOM application so
  * view transitions, OS changes, and cross-tab edits stay in sync.
  */
 

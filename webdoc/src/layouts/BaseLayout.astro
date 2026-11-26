@@ -70,7 +70,7 @@ const briefUrl = Astro.site
           }
         };
 
-        // A first visit is dark (the console's Soft), as in the console.
+        // A first visit is dark (Night, the logo's dark ground).
         // "system" follows the OS and is stored like the other two choices.
         const prefOf = () => readPref() ?? "dark";
         const resolveMode = (pref) => (pref === "system" ? (media.matches ? "dark" : "light") : pref);

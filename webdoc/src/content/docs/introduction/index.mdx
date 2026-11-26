@@ -1,6 +1,6 @@
 ---
-title: "What QueenMQ is: a transactional event broker"
-description: "QueenMQ is a message broker built in Rust and replicated with Raft. One partition per entity, leases instead of static assignment, and one transaction per worker step."
+title: "What QueenMQ is: a kernel for distributed systems"
+description: "What a kernel gives a program (queues, memory, timers, locks), QueenMQ gives a distributed system, and they commit together. One Rust binary, replicated with Raft."
 type: overview
 tier: use
 sidebar:
@@ -13,13 +13,15 @@ sourceOfTruth:
   - server/src/rsm/replicator/raft/cluster.rs
   - clients/client-js/client-v2/builders/TransactionBuilder.js
 digest: >-
-  Queen MQ is a transactional event broker written in Rust: one binary per node, state in a log on
-  the node's local disk, replicated with raft across a cluster of three or five nodes, and no
-  external database (2.0 removed PostgreSQL). Every entity (a customer, an order, a conversation)
+  QueenMQ is a kernel for distributed systems: what a kernel gives a program (queues, memory,
+  timers, locks), it gives a distributed system, and they commit together. All of it lives in one
+  log, so it is also the broker. It is one Rust binary per node, with state in a log on the node's
+  local disk, replicated with raft across a cluster of three or five nodes, and no external
+  database (2.0 removed PostgreSQL). Every entity (a customer, an order, a conversation)
   gets its own ordered partition, created by the first message that names it, with no partition
   count to choose. One call to POST /api/v1/transaction acknowledges input, writes KV state, pushes
   the next events and schedules timers as one log entry: all of it applies or none of it does.
-  Delivery is at-least-once; effects inside Queen are exactly-once through transactions and
+  Delivery is at-least-once; effects inside QueenMQ are exactly-once through transactions and
   transactionId deduplication. Each tenant lives in exactly one raft group, so every transaction is
   one entry with no coordinator. Clients speak HTTP and JSON (SDKs for JavaScript, Python, Go, Rust,
   C++ and PHP), and Kafka clients can connect to a wire-protocol facade built into the broker.
@@ -37,9 +39,9 @@ digest: >-
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): planner/txn.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 ---
 
-QueenMQ is a distributed message broker, built in Rust, replicated with Raft, and developed at Smartness. With it you can write applications that decouple producing from consuming, do request and reply, and process streams, using transactional features that let you remove a lot of logic from the application and offload it to QueenMQ.
+QueenMQ is built in Rust, replicated with Raft, and developed at Smartness. With it you can write applications that decouple producing from consuming, do request and reply, and process streams, using transactional features that let you remove a lot of logic from the application and offload it to QueenMQ.
 
-Every feature the broker has is there because we needed it at Smartness, where it powers almost every product.
+Every feature QueenMQ has is there because we needed it at Smartness, where it powers almost every product.
 
 ## In one picture
 

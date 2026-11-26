@@ -211,21 +211,25 @@ async function render() {
 		labelBackground: pageBg,
 	};
 
+	// Dark boxes sit on the page's own ground and the second tier on the zone
+	// tone, read from the theme so they follow it (Night since 2026-11-26).
+	const darkInk = getThemeColor("--nb-foreground", "#f4f2ee");
+	const darkZone = getThemeColor("--nb-zone", "#1b1917");
 	const darkThemeVars = {
 		fontFamily,
-		primaryColor: "#1f1f1f",
+		primaryColor: pageBg,
 		primaryBorderColor: accent,
-		primaryTextColor: "#f2f2f2",
-		secondaryColor: "#262626",
-		secondaryBorderColor: "#6b7280",
-		secondaryTextColor: "#f2f2f2",
-		tertiaryColor: "#262626",
-		tertiaryBorderColor: "#6b7280",
-		tertiaryTextColor: "#f2f2f2",
+		primaryTextColor: darkInk,
+		secondaryColor: darkZone,
+		secondaryBorderColor: "#75706a",
+		secondaryTextColor: darkInk,
+		tertiaryColor: darkZone,
+		tertiaryBorderColor: "#75706a",
+		tertiaryTextColor: darkInk,
 		lineColor: accent,
-		textColor: "#f2f2f2",
-		mainBkg: "#1f1f1f",
-		background: "#0f0f0f",
+		textColor: darkInk,
+		mainBkg: pageBg,
+		background: pageBg,
 		errorBkgColor: "#3c0501",
 		errorTextColor: "#ffefee",
 		edgeLabelBackground: pageBg,

@@ -1,7 +1,7 @@
-# Queen MQ Rust Client
+# QueenMQ Rust Client
 
-Rust client for [Queen MQ](https://github.com/queen-mq/queen) — a message queue broker that keeps
-its data in its own replicated log.
+Rust client for [QueenMQ](https://github.com/queen-mq/queen), a kernel for distributed systems:
+queues per entity, state, timers and locks that commit together, in its own replicated log.
 
 ```toml
 [dependencies]

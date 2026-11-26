@@ -1,6 +1,6 @@
-# Queen MQ Go Client
+# QueenMQ Go Client
 
-A high-performance Go client for [Queen MQ](https://github.com/queen-mq/queen) - a partitioned message queue broker that keeps its state in its own replicated log.
+A high-performance Go client for [QueenMQ](https://github.com/queen-mq/queen), a kernel for distributed systems: what a kernel gives a program (queues, memory, timers, locks), QueenMQ gives a distributed system, and they commit together, in its own replicated log.
 
 ## Installation
 

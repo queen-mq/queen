@@ -1,4 +1,4 @@
-// Package queen provides a Go client for Queen MQ - a high-performance message queue.
+// Package queen provides a Go client for QueenMQ, a kernel for distributed systems.
 package queen
 
 import (

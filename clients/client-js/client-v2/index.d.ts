@@ -1,5 +1,5 @@
 /**
- * Queen Message Queue Client - Entry Point
+ * QueenMQ Client - Entry Point
  *
  * One npm package for everything:
  *   import { Queen, Stream, tokenBucketGate, slidingWindowGate } from 'queen-mq'

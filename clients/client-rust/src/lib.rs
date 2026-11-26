@@ -1,5 +1,6 @@
-//! Rust client for [Queen MQ](https://queenmq.com) — a message queue broker
-//! that keeps its data in its own replicated log.
+//! Rust client for [QueenMQ](https://queenmq.com), a kernel for distributed
+//! systems: queues per entity, state, timers and locks that commit together,
+//! in its own replicated log.
 //!
 //! A queue is split into **partitions**, one per entity, created on first push.
 //! Each partition is a strictly ordered lane that a consumer group drains
