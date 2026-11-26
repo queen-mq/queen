@@ -33,7 +33,7 @@
 import { onUnmounted, provide, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
-import mark from '@/assets/q.svg?raw'
+import mark from '@/assets/queenmq-icon.svg?raw'
 import { toast } from '@/console/toasts'
 import { markRefreshNow } from '@/composables/useRefresh'
 import { useIdentity } from '@/stores/identity'

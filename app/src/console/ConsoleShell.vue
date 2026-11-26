@@ -5,7 +5,7 @@
 import './console.css'
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import logoRaw from '@/assets/q.svg?raw'
+import logoRaw from '@/assets/queenmq-icon.svg?raw'
 import { useUiStore } from '@/stores/ui'
 import QcIcon from './QcIcon.vue'
 import QcPopover from './QcPopover.vue'
@@ -249,7 +249,9 @@ const initials = computed(() => {
 /* The logo's cell is the band's height, so the mark sits on the band's centre line. */
 .qn-logo { display: flex; align-items: center; justify-content: center; align-self: stretch; height: 52px; flex: 0 0 52px; margin-bottom: 10px; color: var(--text); }
 .qn-logo:hover { text-decoration: none; }
-.qn-logo-mark { display: block; height: 28px; }
+/* The icon's stem is cut out of its box in the colour behind it (--knock). */
+.qn-logo-mark { display: block; height: 28px; --knock: var(--bg); }
+:global(.qn.tone .qn-logo-mark) { --knock: var(--zone); }
 .qn-logo-mark :deep(svg) { height: 28px; width: auto; display: block; }
 .qn-ri {
   position: relative; display: flex; align-items: center; justify-content: center;

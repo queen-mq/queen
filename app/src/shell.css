@@ -414,7 +414,7 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
   align-items: center; justify-content: center; gap: 10px;
   color: var(--text-mid); font-size: 13px; padding: 24px; text-align: center;
 }
-.boot-mark { color: var(--text-hi); }
+.boot-mark { color: var(--text-hi); --knock: var(--ink-0); }
 .boot-mark svg, .boot-mark img { height: 72px; width: auto; display: block; }
 .boot-error h2 { margin: 0; font-size: 16px; color: var(--text-hi); font-weight: 600; }
 .boot-error p { margin: 0; max-width: 460px; line-height: 1.5; }
