@@ -165,7 +165,7 @@ export async function GET() {
 
   // The title, in the drawing's empty top-left corner: the icon, two lines, the address.
   // The icon as the dark theme shows it: the box takes the text colour, and the
-  // q ("knock") is the background showing through it.
+  // sunflower's stem ("knock") is the background showing through it.
   const [, vx, vy, vw, vh] = logo.match(/viewBox="([\d.-]+) ([\d.-]+) ([\d.-]+) ([\d.-]+)"/)!.map(Number);
   // From the first line's cap height to the second line's baseline.
   const ls = 44 / vh;

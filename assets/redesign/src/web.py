@@ -5,14 +5,15 @@
 The header shows the word alone where it fits (her pick, 2026-11-25: the tab above it already shows
 the box) and the box alone where it does not. Both are inlined, so they follow the page's theme:
 - the letters and the box are "currentColor": dark on a light page, light on a dark one;
-- the box's q is the page showing through the box, filled with the page's background
-  (class "knock"; its fill attribute is the light-page colour, for a reader that has no CSS);
-- the petals keep their two yellows.
+- the sunflower's stem is the page showing through the box, filled with the page's background
+  (class "knock"; its fill attribute is the light-page colour, for a reader that has no CSS), so
+  where it reaches the box's border the box opens onto the page;
+- the petals and the seed head keep their colours.
 Every shape is one <path> with its own fill, no groups or transforms: the map's preview image
 (webdoc/src/pages/og/map.png.ts) draws the box from these attributes alone.
 
-The box uses the medium flower (16 + 16 petals), the one drawn for 32 to 64 px: the header shows it
-28 px tall, 56 on a retina screen."""
+The box uses the medium flower (16 + 16 petals, no seeds), the one drawn for 32 to 64 px: the
+header shows it 28 px tall, 56 on a retina screen."""
 import os, re, shutil, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -20,8 +21,7 @@ sys.path.insert(0, HERE)
 
 from letters import X, D1, d1_glyph, set_word, f, GOLD, YEL, LIGHT   # noqa: E402
 from headonly import LETTERS                                          # noqa: E402
-from e_square import e_square                                         # noqa: E402
-from e_icon import E, MED                                             # noqa: E402
+from sunflower import shapes, SIDE, RX, BROWN, MED                    # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 KNOCK = f'class="knock" fill="{LIGHT}" style="fill:var(--color-background,{LIGHT})"'
@@ -53,18 +53,16 @@ def rrect(x, y, w, h, r):
 
 
 def icon_paths(side_out, left_out, top_out, size=MED):
-    """the icon's four shapes, scaled so its box is `side_out` square with its corner at (left_out, top_out)"""
-    svg, _ = e_square(tile="dark", pad=0.0, **E, **size)
-    inner = re.search(r'<g id="icon" transform="translate\(([-\d.]+),0\)">(.*?)</g><g id="letters"', svg, re.S).group(2)
-    x, y, w, rx = (float(v) for v in re.search(
-        r'<rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="[-\d.]+" rx="([-\d.]+)"', inner).groups())
-    grab = lambda gid: re.search(rf'<g id="{gid}" fill="[^"]+"><path d="([^"]+)"/></g>', inner).group(1)
-    s = side_out / w
-    tx, ty = left_out - s * x, top_out - s * y
-    return [(rrect(left_out, top_out, side_out, side_out, s * rx), 'fill="currentColor"'),
-            (xform(grab("petals-back"), s, tx, ty), f'fill="{GOLD}"'),
-            (xform(grab("petals-front"), s, tx, ty), f'fill="{YEL}"'),
-            (xform(grab("q"), s, tx, ty), KNOCK)]
+    """the icon's shapes, back to front, scaled so its box is `side_out` square with its corner at
+    (left_out, top_out); no seeds at this size"""
+    sh = shapes(size)
+    s = side_out / SIDE
+    t = lambda d: xform(d, s, left_out, top_out)
+    return [(rrect(left_out, top_out, side_out, side_out, s * RX), 'fill="currentColor"'),
+            (t(sh["stem"]), KNOCK),
+            (t(sh["back"]), f'fill="{GOLD}"'),
+            (t(sh["front"]), f'fill="{YEL}"'),
+            (t(sh["core"]), f'fill="{BROWN}"')]
 
 
 def svg(view, shapes):

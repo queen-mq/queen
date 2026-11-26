@@ -86,9 +86,9 @@ const nimbusConfig = defineNimbusConfig({
   socialImageAlt: "QueenMQ documentation",
   // Brand assets are generated: the header's logo, the favicons, the touch
   // icon and the tile by assets/redesign/src/web.py (from the icons
-  // assets/redesign/src/make.py draws). The favicon is the icon, the q in
-  // bloom in its box; the SVG turns the box white and the q black when the
-  // tab strip is dark.
+  // assets/redesign/src/make.py draws). The favicon is the icon, a
+  // sunflower on its stem in its box; the SVG turns the box white and the
+  // stem black when the tab strip is dark.
   // No `rel="icon"` entry here: NimbusHead already emits one for whichever of
   // favicon.svg / .ico / .png it finds in public/, and repeating it produced
   // two identical <link> tags on every page.
