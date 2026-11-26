@@ -739,7 +739,7 @@ async fn google_browser_response(
         "invalid_state" => "Your sign-in attempt expired or belongs to another browser. Please try again.",
         "invalid_request" if cancelled => "Google sign-in was cancelled. You can try again or use your email and password.",
         "domain_not_allowed" => "This Google account is not allowed. Try your organization’s account or contact your administrator.",
-        "not_provisioned" => "This Google account does not have access to Queen. Try another account or contact your administrator.",
+        "not_provisioned" => "This Google account does not have access to QueenMQ. Try another account or contact your administrator.",
         "email_unverified" => "Verify your email address with Google before signing in.",
         "not_configured" => "Sign-in is currently unavailable. Contact your administrator.",
         _ => "We couldn’t complete Google sign-in. Please try again in a moment.",
@@ -1973,14 +1973,14 @@ Sign in through the control plane that operates it, then return here.</p>{link}"
     format!(
         "<!doctype html><html lang=\"en\" class=\"soft tone\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-<title>Sign in · Queen</title>\
+<title>Sign in · QueenMQ</title>\
 <link rel=\"icon\" type=\"image/svg+xml\" href=\"{favicon}\">\
 <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\
 <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\
 <link href=\"https://fonts.googleapis.com/css2?family=Google+Sans:wght@500&amp;family=Inter:wght@100..900&amp;display=swap\" rel=\"stylesheet\">\
 <script>{SIGN_IN_THEME}</script><style>{SIGN_IN_CSS}</style></head><body><main class=\"sign\">\
 <div class=\"brand\">{mark}</div>\
-<div class=\"card\"><div class=\"card-header\"><h1>Welcome to Queen</h1><p>Sign in to your account to continue.</p></div>\
+<div class=\"card\"><div class=\"card-header\"><h1>Welcome to QueenMQ</h1><p>Sign in to your account to continue.</p></div>\
 <div class=\"card-body\">{err_html}{panel}</div></div>\
 <p class=\"help\">Need access? Contact your administrator.</p></main><script>{SIGN_IN_SCRIPT}</script></body></html>"
     )
@@ -2892,7 +2892,7 @@ mod tests {
             (
                 "not_provisioned",
                 StatusCode::FORBIDDEN,
-                "does not have access to Queen",
+                "does not have access to QueenMQ.",
             ),
             (
                 "bad_gateway",
@@ -3068,6 +3068,11 @@ mod tests {
         assert!(
             html.contains("Invalid email or password."),
             "and a failed post still says so"
+        );
+        assert!(
+            html.contains("<title>Sign in · QueenMQ</title>")
+                && html.contains("<h1>Welcome to QueenMQ</h1>"),
+            "the tab and the heading name QueenMQ, as the logo does"
         );
         // A portal URL set on a minting host is inert: it has a form that works.
         let with_portal = login_html(
