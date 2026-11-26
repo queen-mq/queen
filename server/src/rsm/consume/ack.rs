@@ -877,7 +877,7 @@ impl Engine {
                 }
                 let mut cur = p.cur.clone();
                 let has_row = p.has_row;
-                let acked = match ack_target(
+                let mut acked = match ack_target(
                     &fr,
                     &mut cur,
                     has_row,
@@ -905,6 +905,9 @@ impl Engine {
                     results.push(stale(t));
                     continue;
                 }
+                // Past the dead-letter budget, a dead letter is filed without
+                // its body (`dlq_budget`).
+                self.budget_dlq(&mut acked.dlq);
                 if acked.changed || !acked.dlq.is_empty() {
                     if let Some(v) = self.commit_cur(sh, g.id, t.pid, cur, acked.dlq, now) {
                         deps.rows.push((t.pid, g.id, v));
@@ -1213,7 +1216,7 @@ impl Engine {
             }
             let dlq_id = crate::util::uuidv7_bytes();
             let mut cur = p.cur.clone();
-            let effect = Effect::DlqInsert {
+            let mut effect = Effect::DlqInsert {
                 dlq_id,
                 tenant: c.tenant.clone(),
                 queue: c.queue.clone(),
@@ -1228,6 +1231,8 @@ impl Engine {
                 failed_at_us: now,
                 headers: c.snapshot.headers.clone(),
             };
+            // Past the dead-letter budget, without its body (`dlq_budget`).
+            self.budget_dlq(std::slice::from_mut(&mut effect));
             // GREATEST guards a stale caller from moving the cursor backward.
             cur.committed = cur.committed.max(c.offset as i64);
             let released = cur.lease.is_some();

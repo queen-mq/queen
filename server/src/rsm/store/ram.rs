@@ -704,6 +704,22 @@ struct TreeRows {
     /// The live rows, in `memcmp` order.
     map: BTreeMap<RamKey, RamVal>,
     dirty: DirtyMap,
+    /// The stored bytes of `map`'s values, kept by every change these methods
+    /// and the loads make: [`RamTable::value_bytes`] of a tree is a read, not
+    /// a walk under its one lock.
+    bytes: u64,
+}
+
+/// `bytes` after a value of `old` bytes became one of `new` bytes (0 for no
+/// value). A count that would go below zero is a bookkeeping bug: debug
+/// builds stop on it, release builds stop at 0.
+#[inline]
+fn swap_len(bytes: &mut u64, old: usize, new: usize) {
+    debug_assert!(
+        *bytes >= old as u64,
+        "byte count {bytes} below a value of {old}"
+    );
+    *bytes = bytes.saturating_sub(old as u64) + new as u64;
 }
 
 /// What one put did to its container.
@@ -833,8 +849,8 @@ impl TreeRows {
     }
 
     fn put(&mut self, key: &[u8], val: &[u8], trailer: &[u8]) -> Put {
-        let TreeRows { map, dirty } = self;
-        match dirty.get_mut(key) {
+        let TreeRows { map, dirty, bytes } = self;
+        let p = match dirty.get_mut(key) {
             Some(d) => {
                 // The dirty set holds the same `Arc` as the map: let go of it
                 // first, so the map's copy can be rewritten in place.
@@ -848,7 +864,15 @@ impl TreeRows {
                 dirty.insert(RamKey::from(key), Some(p.current.clone()));
                 p
             }
+        };
+        // A rewrite in place keeps the length; a new row or a new allocation
+        // changes it.
+        if p.added {
+            swap_len(bytes, 0, p.current.len());
+        } else if let Some(old) = &p.replaced {
+            swap_len(bytes, old.len(), p.current.len());
         }
+        p
     }
 
     fn upsert(
@@ -857,9 +881,15 @@ impl TreeRows {
         scratch: &mut Vec<u8>,
         f: impl FnOnce(Option<&[u8]>, &mut Vec<u8>) -> bool,
     ) -> Upserted {
-        let TreeRows { map, dirty } = self;
+        let TreeRows { map, dirty, bytes } = self;
         match map.get_mut(key) {
-            Some(v) => upsert_existing(v, dirty, key, scratch, f),
+            Some(v) => {
+                let u = upsert_existing(v, dirty, key, scratch, f);
+                if let Some(old) = &u.replaced {
+                    swap_len(bytes, old.len(), v.len());
+                }
+                u
+            }
             None => {
                 scratch.clear();
                 if !f(None, scratch) {
@@ -880,13 +910,18 @@ impl TreeRows {
     /// boot's refill of what the checkpoint left out). The old value, or
     /// `None` when there was no row.
     fn refill(&mut self, key: &[u8], stored: RamVal) -> Option<RamVal> {
-        self.map
-            .get_mut(key)
-            .map(|cur| std::mem::replace(cur, stored))
+        let cur = self.map.get_mut(key)?;
+        swap_len(&mut self.bytes, cur.len(), stored.len());
+        Some(std::mem::replace(cur, stored))
     }
 
     fn put_arc(&mut self, key: &[u8], stored: RamVal) -> (Option<RamVal>, bool) {
         let old = self.map.insert(RamKey::from(key), stored.clone());
+        swap_len(
+            &mut self.bytes,
+            old.as_ref().map_or(0, |o| o.len()),
+            stored.len(),
+        );
         let added = old.is_none();
         let old_dirty = self.dirty.insert(RamKey::from(key), Some(stored));
         drop(old_dirty);
@@ -895,6 +930,7 @@ impl TreeRows {
 
     fn remove(&mut self, key: &[u8]) -> Option<RamVal> {
         let (k, v) = self.map.remove_entry(key)?;
+        swap_len(&mut self.bytes, v.len(), 0);
         // Already dirty: `insert` keeps the set's key and replaces the value.
         self.dirty.insert(k, None);
         Some(v)
@@ -904,6 +940,7 @@ impl TreeRows {
     /// to free outside the lock.
     fn clear(&mut self) -> BTreeMap<RamKey, RamVal> {
         let old = std::mem::take(&mut self.map);
+        self.bytes = 0;
         for k in old.keys() {
             self.dirty.insert(k.clone(), None);
         }
@@ -956,6 +993,7 @@ impl TreeTable {
     fn load(rows: Vec<(RamKey, RamVal)>) -> TreeTable {
         TreeTable {
             rows: RwLock::new(TreeRows {
+                bytes: rows.iter().map(|(_, v)| v.len() as u64).sum(),
                 // The rows come in key order off an LMDB cursor, so the
                 // collect's sort is a single linear pass before the bulk build.
                 map: rows.into_iter().collect(),
@@ -1374,6 +1412,7 @@ impl DenseTable {
                         st.rows += 1;
                     }
                     None => {
+                        ov.bytes += v.len() as u64;
                         ov.map.insert(k, v);
                     }
                 }
@@ -2155,6 +2194,7 @@ impl PrefixTable {
             let mut cur: Option<RamKey> = None;
             for (k, v) in rows {
                 let Some(pl) = names_end(&k, names) else {
+                    ov.bytes += v.len() as u64;
                     ov.map.insert(k, v);
                     continue;
                 };
@@ -3252,6 +3292,49 @@ impl RamTable {
             RamTable::Tree(t) => rd(&t.rows).copy_range(lo, hi, rev, take, out),
             RamTable::Dense(t) => t.copy_range(lo, hi, rev, take, out),
             RamTable::Prefixed(t) => t.copy_range(lo, hi, rev, take, out),
+        }
+    }
+
+    /// The stored bytes of every value (checksums included). A tree keeps
+    /// the count as it changes: O(1). A dense or prefixed table sums its
+    /// stripes under their read locks one at a time: O(rows), for a count now
+    /// and then, not a hot path.
+    pub(crate) fn value_bytes(&self) -> u64 {
+        fn map(m: &BTreeMap<RamKey, RamVal>) -> u64 {
+            m.values().map(|v| v.len() as u64).sum()
+        }
+        fn slot(s: &Slot) -> u64 {
+            match s {
+                Slot::Empty => 0,
+                Slot::One(_, v) => v.len() as u64,
+                Slot::Many(rows) => rows.iter().map(|(_, v)| v.len() as u64).sum(),
+                Slot::Tree(m) => map(m),
+            }
+        }
+        match self {
+            RamTable::Tree(t) => rd(&t.rows).bytes,
+            RamTable::Dense(t) => {
+                let stripes: u64 = t
+                    .stripes
+                    .iter()
+                    .map(|s| {
+                        let st = rd(&s.0);
+                        st.blocks
+                            .values()
+                            .map(|b| b.slots.iter().map(slot).sum::<u64>())
+                            .sum::<u64>()
+                    })
+                    .sum();
+                stripes + rd(&t.overflow).bytes
+            }
+            RamTable::Prefixed(t) => {
+                let stripes: u64 = t
+                    .stripes
+                    .iter()
+                    .map(|s| rd(&s.0).groups.values().map(map).sum::<u64>())
+                    .sum();
+                stripes + rd(&t.overflow).bytes
+            }
         }
     }
 

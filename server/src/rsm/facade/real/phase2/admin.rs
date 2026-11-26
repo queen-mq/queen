@@ -411,6 +411,15 @@ impl RaftFacade {
                 json!({"success":false,"result":"gone","error":"Message not found"}).to_string(),
             ));
         };
+        // Filed without its body by the dead-letter budget: there is nothing
+        // to replay (`consume::dlq_budget`).
+        if crate::rsm::consume::dlq_budget::body_dropped(&row.payload, &row.error) {
+            return Ok(ApiOut::json(
+                409,
+                json!({"success":false,"result":"no_body","code":"no_body","error":"this dead letter was filed without its body: the dead letters held QUEEN_DLQ_MAX_BYTES_TOTAL when it failed"})
+                    .to_string(),
+            ));
+        }
 
         let queue = queue_override.unwrap_or(&source_queue).to_string();
         let partition = part_override.unwrap_or(&source_partition).to_string();

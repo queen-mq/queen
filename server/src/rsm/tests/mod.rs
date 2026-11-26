@@ -62,6 +62,7 @@ mod batcher;
 mod cluster_version;
 mod dedup_txns;
 mod delete_race;
+mod dlq_caps;
 mod edge;
 mod facade;
 mod facade_kv;

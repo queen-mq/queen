@@ -7458,6 +7458,19 @@ impl Rsm for RaftFacade {
             "queen_consume_cold_claims_total {}\n",
             es.cold_claims_total
         ));
+        out.push_str("# HELP queen_dlq_bodies_not_kept_total Dead letters this node filed without their body, the dead letters holding QUEEN_DLQ_MAX_BYTES_TOTAL (only a leader files any)\n# TYPE queen_dlq_bodies_not_kept_total counter\n");
+        out.push_str(&format!(
+            "queen_dlq_bodies_not_kept_total {}\n",
+            self.engine
+                .dlq_budget
+                .not_kept
+                .load(std::sync::atomic::Ordering::Relaxed)
+        ));
+        out.push_str("# HELP queen_dlq_bytes Bytes the dead letters hold in this node's memory (every node holds them all)\n# TYPE queen_dlq_bytes gauge\n");
+        out.push_str(&format!(
+            "queen_dlq_bytes {}\n",
+            self.store.ram_value_bytes(crate::rsm::store::Keyspace::Dlq)
+        ));
         out.push_str("# HELP queen_raft_qlog_index_maps Sealed log files whose index is memory-mapped (small indexes are held in memory), the maps the kernel allows this process (vm.max_map_count, 0 when unknown), and the maps it has refused since the start (those indexes are held in memory too)\n# TYPE queen_raft_qlog_index_maps gauge\n");
         out.push_str(&format!(
             "queen_raft_qlog_index_maps{{kind=\"mapped\"}} {}\nqueen_raft_qlog_index_maps{{kind=\"limit\"}} {}\nqueen_raft_qlog_index_maps{{kind=\"refused\"}} {}\n",

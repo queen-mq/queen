@@ -12,6 +12,7 @@ sourceOfTruth:
   - server/src/handlers/data.rs
   - server/src/rsm/facade/real.rs
   - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
   - server/src/rsm/consume/mod.rs
   - server/src/rsm/consume/ack.rs
   - server/src/handlers/kv.rs
@@ -143,6 +144,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/mod.rs gives each
 # shard its idle window. What a pop, an ack, a lease or a transaction answers does not change:
 # nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (dead-letter budget): phase2/admin.rs joins the sources for the
+# 409 `no_body` a replay of a dead letter filed without its body answers; consume/ack.rs files
+# those past QUEEN_DLQ_MAX_BYTES_TOTAL. No other code this page lists changes.
 ---
 
 When QueenMQ refuses a call it answers a status code and a JSON body with a stable code, and the code
@@ -190,6 +194,7 @@ The `code` of the first shape.
 | `bad_where` | 400 | A `where` that does not parse; the message says where. | Fix the condition. |
 | `route_loop`, `source_not_found`, `bad_source`, `too_many_sources`, `too_many_readers` | 400 | A reading queue that would read itself, a source that does not exist or is a filtered group's, or past the limits. | Fix the configuration. |
 | `has_readers` | 409 | A delete of a queue that reading queues read (`readers` lists them). | Delete them first, or delete with `force=true`. |
+| `no_body` | 409 | A DLQ replay of a dead letter filed without its body: the dead letters held `QUEEN_DLQ_MAX_BYTES_TOTAL` when it failed ([limits](/reference/limits/#dead-letters)). Nothing moved. | Nothing to replay: push the message again from its source, then delete the dead letter. |
 | `source_gone`, `source_mismatch` | 200, `success: false` | A transaction's `link` to a message its source no longer keeps, or whose transaction id is not the one at that offset. | Nothing to forward; check the message named. |
 | `storage_full` | 507 | A node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, 85%). Pushes, KV writes and timer schedules are refused; acks and deletes still work. | Free disk or add space, then retry. |
 | `name_too_long` | 413 | The tenant, queue and partition or group names together exceed the store's key budget, counting every key the command derives from them. | Shorten the name. |

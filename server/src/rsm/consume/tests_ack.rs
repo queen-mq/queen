@@ -914,3 +914,201 @@ fn a_transaction_files_no_dead_letter_its_receiver_could_not_read() {
     }
     assert!(h.dlq_rows().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// The dead-letter budget (`super::dlq_budget`)
+// ---------------------------------------------------------------------------
+
+/// An ack that dead-letters `txn` (`Dlq`), its message's body `n` bytes and
+/// its id known, as the facade resolves a real one.
+fn dead_letter(
+    h: &mut H,
+    pid: Pid,
+    worker: &str,
+    txn: &str,
+    n: usize,
+) -> crate::rsm::entry::AckResult {
+    let mut t = h.ack_target(pid, "q", "g", worker, &[(txn, Dlq)]);
+    for it in &mut t.items {
+        let s = it
+            .snapshot
+            .as_mut()
+            .expect("a dead-lettering ack carries its message");
+        s.message_id = Some([7; 16]);
+        s.payload = vec![b'x'; n];
+    }
+    let c = crate::rsm::planner::AckCommand {
+        request_id: h.rid(),
+        targets: vec![t],
+    };
+    super::tests::one_ack(&h.outcome(crate::rsm::batcher::Command::Ack(c)))
+}
+
+/// Past `QUEEN_DLQ_MAX_BYTES_TOTAL`, the next dead letter is filed WITHOUT its
+/// body: its transaction id, offset, message id and error stay, the error
+/// saying why, and the engine counts it. One that fits keeps its body. Every
+/// node stores what the leader filed: the row is the entry's.
+#[test]
+fn past_the_dead_letter_budget_a_dead_letter_is_filed_without_its_body() {
+    use std::sync::atomic::Ordering;
+    let mut h = H::with(
+        "dlq-budget",
+        super::Knobs {
+            dlq_max_bytes: 1_000,
+            ..super::tests::knobs()
+        },
+    );
+    let pid = lease(&mut h, "q", "p0", &["a", "b", "c"], "w1");
+    assert_eq!(dead_letter(&mut h, pid, "w1", "a", 600).dlq, 1);
+    // The next message: 600 bytes more would pass the budget.
+    h.advance(1000);
+    only(h.pinned("q", "p0", "g", "w2"));
+    h.advance(1000);
+    assert_eq!(dead_letter(&mut h, pid, "w2", "b", 600).dlq, 1);
+    let rows = h.dlq_rows();
+    let a = rows.iter().find(|d| d.txn == "a").expect("a is filed");
+    assert_eq!(a.payload, vec![b'x'; 600], "within the budget: its body");
+    assert!(!super::dlq_budget::body_dropped(&a.payload, &a.error));
+    let b = rows.iter().find(|d| d.txn == "b").expect("b is filed");
+    assert!(b.payload.is_empty(), "past the budget: no body");
+    assert!(
+        super::dlq_budget::body_dropped(&b.payload, &b.error),
+        "the error says why: {}",
+        b.error
+    );
+    assert_eq!((b.offset, b.message_id), (1, Some([7; 16])));
+    assert_eq!(h.e.dlq_budget.not_kept.load(Ordering::Relaxed), 1);
+}
+
+/// A new leader starts from what the store holds: the dead letters filed
+/// under the old one count against the budget at once.
+#[test]
+fn after_a_failover_the_dead_letter_budget_counts_what_the_store_holds() {
+    let k = || super::Knobs {
+        dlq_max_bytes: 1_000,
+        ..super::tests::knobs()
+    };
+    let mut h = H::with("dlq-budget-failover", k());
+    let pid = lease(&mut h, "q", "p0", &["a", "b"], "w1");
+    assert_eq!(dead_letter(&mut h, pid, "w1", "a", 600).dlq, 1);
+    h.failover_with(k());
+    h.advance(1000);
+    only(h.pinned("q", "p0", "g", "w2"));
+    h.advance(1000);
+    assert_eq!(dead_letter(&mut h, pid, "w2", "b", 600).dlq, 1);
+    let rows = h.dlq_rows();
+    let a = rows.iter().find(|d| d.txn == "a").expect("a is filed");
+    assert_eq!(a.payload.len(), 600);
+    let b = rows.iter().find(|d| d.txn == "b").expect("b is filed");
+    assert!(
+        super::dlq_budget::body_dropped(&b.payload, &b.error),
+        "the old leader's dead letter counts: {b:?}"
+    );
+}
+
+/// The dead letter a DLQ head files is budgeted like an ack's.
+#[test]
+fn past_the_dead_letter_budget_the_dlq_head_is_filed_without_its_body() {
+    use std::sync::atomic::Ordering;
+    let mut h = H::with(
+        "dlq-budget-head",
+        super::Knobs {
+            dlq_max_bytes: 100,
+            ..super::tests::knobs()
+        },
+    );
+    let pid = lease(&mut h, "q", "p0", &["poison", "b"], "w1");
+    let c = crate::rsm::planner::DlqHeadCommand {
+        request_id: h.rid(),
+        pid,
+        tenant: super::tests::T.into(),
+        queue: "q".into(),
+        group: "g".into(),
+        worker: "w1".into(),
+        offset: 0,
+        error: "boom".into(),
+        snapshot: crate::rsm::planner::DlqSnapshot {
+            message_id: Some([7; 16]),
+            txn: "poison".into(),
+            payload: vec![b'x'; 200],
+            headers: Vec::new(),
+        },
+    };
+    match h.outcome(crate::rsm::batcher::Command::DlqHead(c)) {
+        Outcome::DlqHead(o) => assert_eq!(o.offset, 0),
+        o => panic!("{o:?}"),
+    }
+    let rows = h.dlq_rows();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        super::dlq_budget::body_dropped(&rows[0].payload, &rows[0].error),
+        "{:?}",
+        rows[0]
+    );
+    assert_eq!(
+        (rows[0].txn.as_str(), rows[0].message_id),
+        ("poison", Some([7; 16]))
+    );
+    assert_eq!(h.e.dlq_budget.not_kept.load(Ordering::Relaxed), 1);
+}
+
+/// And a transaction's dead letter: the bundle files it without its body.
+#[test]
+fn past_the_dead_letter_budget_a_transaction_files_its_dead_letter_without_its_body() {
+    use std::sync::atomic::Ordering;
+    let mut h = H::with(
+        "dlq-budget-txn",
+        super::Knobs {
+            dlq_max_bytes: 100,
+            ..super::tests::knobs()
+        },
+    );
+    let pid = lease_cfg(&mut h, &["a", "b"], 0, true);
+    let id = h.rid();
+    let mut txn = h.txn(id);
+    let mut t = h.ack_target(pid, "q", "g", "w1", &[("a", Dlq)]);
+    let s = t.items[0]
+        .snapshot
+        .as_mut()
+        .expect("a dead-lettering ack carries its message");
+    s.message_id = Some([7; 16]);
+    s.payload = vec![b'x'; 200];
+    txn.acks.push(t);
+    let part =
+        h.e.txn_prepare(&txn, h.now)
+            .expect("prepare")
+            .expect("a part");
+    let dead: Vec<(&[u8], &str)> = part
+        .effects
+        .iter()
+        .filter_map(|e| match e {
+            crate::rsm::effect::Effect::DlqInsert { payload, error, .. } => {
+                Some((payload.as_slice(), error.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dead.len(), 1, "{:?}", part.effects);
+    assert!(
+        super::dlq_budget::body_dropped(dead[0].0, dead[0].1),
+        "{dead:?}"
+    );
+    assert_eq!(h.e.dlq_budget.not_kept.load(Ordering::Relaxed), 1);
+}
+
+/// With the budget off (`0`), every body is kept, however large.
+#[test]
+fn a_dead_letter_budget_of_zero_keeps_every_body() {
+    let mut h = H::with(
+        "dlq-budget-off",
+        super::Knobs {
+            dlq_max_bytes: 0,
+            ..super::tests::knobs()
+        },
+    );
+    let pid = lease(&mut h, "q", "p0", &["a"], "w1");
+    assert_eq!(dead_letter(&mut h, pid, "w1", "a", 64 << 10).dlq, 1);
+    let rows = h.dlq_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].payload.len(), 64 << 10);
+}

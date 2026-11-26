@@ -157,7 +157,7 @@ impl Engine {
                     sh.pids.get(&t.pid).map_or(0, |pi| pi.txns_start)
                 };
                 let s = shadow!(g, t.pid);
-                let acked = ack_target(
+                let mut acked = ack_target(
                     &fr,
                     &mut s.0,
                     s.1,
@@ -177,6 +177,8 @@ impl Engine {
                 if files_unread(&acked) {
                     return Ok(Err(unread_refusal()));
                 }
+                // Past the dead-letter budget, without its body (`dlq_budget`).
+                self.budget_dlq(&mut acked.dlq);
                 s.3.extend(acked.dlq);
                 if let Some(at) = retry_hold(&cfg.queue, now).filter(|_| acked.released) {
                     holds.insert((t.pid, g.id), at);

@@ -68,6 +68,11 @@ impl Model {
         }
     }
 
+    /// The stored bytes of every value, as [`RamTable::value_bytes`] counts.
+    fn bytes(&self) -> u64 {
+        self.map.values().map(|v| v.len() as u64).sum()
+    }
+
     fn range(&self, lo: Bound<&[u8]>, hi: Bound<&[u8]>, rev: bool, take: usize) -> Rows {
         let inside = |k: &[u8]| {
             (match lo {
@@ -432,6 +437,7 @@ fn run_on_pool(l: Layout, pool: Vec<Vec<u8>>, seed: u64, ops: usize) {
             _ => {
                 assert_eq!(t.len(), m.map.len(), "op {op}: len");
                 assert_eq!(t.dirty_len(), m.dirty.len(), "op {op}: dirty len");
+                assert_eq!(t.value_bytes(), m.bytes(), "op {op}: value bytes");
             }
         }
     }
@@ -441,6 +447,7 @@ fn run_on_pool(l: Layout, pool: Vec<Vec<u8>>, seed: u64, ops: usize) {
     assert!(passes > 0, "no repack pass ended between the operations");
     assert_eq!(t.len(), m.map.len(), "after the repack: len");
     assert_eq!(t.dirty_len(), m.dirty.len(), "after the repack: dirty len");
+    assert_eq!(t.value_bytes(), m.bytes(), "after the repack: value bytes");
     // The whole table, both ways.
     assert_eq!(
         table_range(&t, Bound::Unbounded, Bound::Unbounded, false, usize::MAX),
@@ -464,6 +471,7 @@ fn run_on_pool(l: Layout, pool: Vec<Vec<u8>>, seed: u64, ops: usize) {
     let loaded = RamTable::load_with_layout(l, rows);
     assert_eq!(loaded.dirty_len(), 0);
     assert_eq!(loaded.len(), m.map.len());
+    assert_eq!(loaded.value_bytes(), m.bytes(), "after a load: value bytes");
     for _ in 0..2_000 {
         let lo = bound(&mut r, &pool);
         let hi = bound(&mut r, &pool);
@@ -1183,6 +1191,81 @@ fn repack_layouts() -> Vec<(Layout, Vec<Vec<u8>>)> {
 /// (its address changes while the old one is still held) and leaves a longer
 /// one where it is; the rows, their order and the dirty set are unchanged, and
 /// the pass counts every row once.
+/// The byte count of a table (the dead-letter budget reads the tree's) follows
+/// every kind of change: a new row, a rewrite in place, a longer and a shorter
+/// value, an upsert, a boot's refill, a stored `Arc`, a remove, a clear, a
+/// load. Checked against the rows a full scan returns.
+#[test]
+fn the_value_bytes_of_a_table_follow_every_change() {
+    let scanned = |t: &RamTable| -> u64 {
+        table_range(t, Bound::Unbounded, Bound::Unbounded, false, usize::MAX)
+            .iter()
+            .map(|(_, v)| v.len() as u64)
+            .sum()
+    };
+    // The dead-letter budget reads this count once a second: a tree's is a
+    // read, not a walk.
+    assert_eq!(super::ram::layout(Keyspace::Dlq), Layout::Tree);
+    for (l, pool) in repack_layouts() {
+        let t = RamTable::with_layout(l);
+        // Spread over the pool: dense keys and the overflow's, every shape.
+        let mut keys: Vec<&[u8]> = pool
+            .iter()
+            .step_by((pool.len() / 40).max(1))
+            .map(Vec::as_slice)
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert!(keys.len() >= 20, "{l:?}: {} keys", keys.len());
+        let mut scratch = Vec::new();
+        for (i, k) in keys.iter().enumerate() {
+            drop(t.put(k, &vec![b'a'; 1 + i % 7], &[]));
+        }
+        assert_eq!(t.value_bytes(), scanned(&t), "{l:?}: new rows");
+        // In place (nothing else holds the value: the dirty set let go of it
+        // first), then longer, then shorter.
+        drop(t.put(keys[0], b"z", &[]));
+        drop(t.put(keys[1], &[b'b'; 300], b"trl"));
+        drop(t.put(keys[2], b"", &[]));
+        assert_eq!(t.value_bytes(), scanned(&t), "{l:?}: rewrites");
+        // An upsert that grows a row, one that keeps it, and one of a new key.
+        drop(t.upsert(keys[3], &mut scratch, |_, out| {
+            out.extend_from_slice(&[b'u'; 90]);
+            true
+        }));
+        drop(t.upsert(keys[4], &mut scratch, |_, _| false));
+        drop(t.remove(keys[5]));
+        drop(t.upsert(keys[5], &mut scratch, |old, out| {
+            assert!(old.is_none());
+            out.extend_from_slice(b"fresh");
+            true
+        }));
+        assert_eq!(t.value_bytes(), scanned(&t), "{l:?}: upserts");
+        // A boot's refill (a no-op where the container takes none) and a
+        // stored `Arc`, of an existing key and of a new one.
+        drop(t.refill(keys[6], std::sync::Arc::from(&[b'r'; 64][..])));
+        drop(t.put_arc(keys[7], std::sync::Arc::from(&[b'p'; 33][..])));
+        drop(t.remove(keys[8]));
+        drop(t.put_arc(keys[8], std::sync::Arc::from(&b"pp"[..])));
+        assert_eq!(t.value_bytes(), scanned(&t), "{l:?}: refill and put_arc");
+        for k in &keys[9..20] {
+            drop(t.remove(k));
+        }
+        assert_eq!(t.value_bytes(), scanned(&t), "{l:?}: removes");
+        // A load of the same rows counts the same; a clear counts nothing.
+        let rows: Vec<(RamKey, super::ram::RamVal)> =
+            table_range(&t, Bound::Unbounded, Bound::Unbounded, false, usize::MAX)
+                .into_iter()
+                .map(|(k, v)| (RamKey::from(&k[..]), std::sync::Arc::from(&v[..])))
+                .collect();
+        let loaded = RamTable::load_with_layout(l, rows);
+        assert_eq!(loaded.value_bytes(), t.value_bytes(), "{l:?}: load");
+        t.clear();
+        assert_eq!(t.value_bytes(), 0, "{l:?}: clear");
+        assert!(scanned(&t) == 0);
+    }
+}
+
 #[test]
 fn a_repack_moves_small_values_and_keeps_large_ones() {
     use super::ram::REPACK_VALUE_MAX;
@@ -1337,7 +1420,6 @@ fn a_repack_pass_leaves_the_store_and_its_checkpoint_as_they_were() {
         (Keyspace::Kv, key_pool(&[])),
     ];
     let mut live: Vec<BTreeMap<Vec<u8>, Vec<u8>>> = vec![BTreeMap::new(); spaces.len()];
-    let mut durable = live.clone();
     let mut r = Rng::new(4242);
     let mut cur = RepackCursor::default();
     let mut passes = 0u32;
@@ -1360,9 +1442,9 @@ fn a_repack_pass_leaves_the_store_and_its_checkpoint_as_they_were() {
                 cur = RepackCursor::default();
                 passes += 1;
             }
+            // Durable points between the repack steps.
             if round % 900 == 899 {
                 w.durable_commit().unwrap();
-                durable = live.clone();
             }
         }
         while !s.repack_step(&mut cur, 64).unwrap() {}
@@ -1373,13 +1455,14 @@ fn a_repack_pass_leaves_the_store_and_its_checkpoint_as_they_were() {
             assert!(got == want, "{}: live after the repack", ks.name());
         }
         w.durable_commit().unwrap();
-        durable = live.clone();
         let snap = s.metrics().snapshot();
         let count = |name: &str| snap.iter().find(|(n, _)| *n == name).map(|(_, v)| *v);
         assert!(count("repacked_rows").unwrap_or(0) > 0, "no row repacked");
         assert!(count("repack_passes").unwrap_or(0) >= u64::from(passes.min(1)));
     }
     assert!(passes > 1, "the passes between the writes did not end");
+    // The last durable point holds every write.
+    let durable = live;
     t.s().scrub().expect("the scrub after the repack");
     t.reopen();
     t.s()

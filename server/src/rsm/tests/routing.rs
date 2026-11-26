@@ -1515,6 +1515,135 @@ async fn a_dead_letter_keeps_its_headers_and_its_replay_too() {
     );
 }
 
+/// Past the dead-letter budget (`consume::dlq_budget`) a dead letter is filed
+/// without its body: the list shows it with no body and says why, a replay of
+/// it is refused, and the dead letters filed within the budget replay as
+/// before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn past_the_dead_letter_budget_a_dead_letter_is_kept_without_its_body() {
+    let (facade, _dir) = open("dlqbudget").await;
+    facade.engine_for_test().dlq_budget.set_max_for_test(1_000);
+    configure(
+        &facade,
+        json!({"queue":"jobs","options":{"deadLetterQueue":true,"retryLimit":0}}),
+    )
+    .await;
+    let big = "x".repeat(4_000);
+    push(
+        &facade,
+        json!([{"queue":"jobs","partition":"p","transactionId":"small","payload":{"n":1}},
+               {"queue":"jobs","partition":"p","transactionId":"big","payload":{"pad":big}}]),
+    )
+    .await;
+    let p = pop(
+        &facade,
+        "jobs",
+        None,
+        PopOptions {
+            max_parts: 8,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let m = messages(&p);
+    assert_eq!(m.len(), 2, "{p}");
+    let acks: Vec<Value> = m
+        .iter()
+        .map(|x| {
+            json!({"transactionId":x["transactionId"],"partitionId":x["partitionId"],
+                "leaseId":x["leaseId"],"status":"dlq","error":"poison"})
+        })
+        .collect();
+    facade
+        .ack(
+            ctx(),
+            AckReq {
+                queue: None,
+                group: "__QUEUE_MODE__".into(),
+                raw: json!({"acknowledgments":acks,"consumerGroup":"__QUEUE_MODE__"})
+                    .to_string()
+                    .into_bytes(),
+            },
+        )
+        .await
+        .expect("ack");
+    let mut dead = Vec::new();
+    for _ in 0..50 {
+        let (_, d) = api(
+            &facade,
+            "GET",
+            "/api/v1/dlq",
+            Some("queue=jobs"),
+            Value::Null,
+        )
+        .await;
+        dead = d["messages"].as_array().cloned().unwrap_or_default();
+        if dead.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let row = |txn: &str| {
+        dead.iter()
+            .find(|r| r["transactionId"] == txn)
+            .unwrap_or_else(|| panic!("no dead letter {txn}: {dead:?}"))
+            .clone()
+    };
+    let (small, big_row) = (row("small"), row("big"));
+    assert_eq!(small["data"], json!({"n":1}), "{small}");
+    assert_eq!(small["errorMessage"], "poison", "{small}");
+    assert_eq!(big_row["data"], Value::Null, "{big_row}");
+    assert_eq!(big_row["payload"], Value::Null, "{big_row}");
+    assert_eq!(
+        big_row["errorMessage"],
+        format!("poison{}", crate::rsm::consume::dlq_budget::BODY_NOT_KEPT),
+        "{big_row}"
+    );
+    assert!(big_row["messageId"].is_string(), "{big_row}");
+
+    let metrics = facade.prometheus();
+    assert!(
+        metrics.contains("\nqueen_dlq_bodies_not_kept_total 1\n"),
+        "{metrics}"
+    );
+    let held: u64 = metrics
+        .lines()
+        .find_map(|l| l.strip_prefix("queen_dlq_bytes "))
+        .and_then(|v| v.parse().ok())
+        .expect("queen_dlq_bytes");
+    assert!(held > 0 && held < 4_000, "the big body is not held: {held}");
+
+    let replay = |id: Value| {
+        let id = id.as_str().expect("dlq id").to_string();
+        let facade = &facade;
+        async move {
+            api(
+                facade,
+                "POST",
+                &format!("/api/v1/dlq/{id}/replay"),
+                None,
+                Value::Null,
+            )
+            .await
+        }
+    };
+    let (status, out) = replay(big_row["id"].clone()).await;
+    assert_eq!(status, 409, "{out}");
+    assert_eq!(out["result"], "no_body", "{out}");
+    assert_eq!(out["code"], "no_body", "{out}");
+    let (status, out) = replay(small["id"].clone()).await;
+    assert_eq!(status, 200, "{out}");
+    let back = drain(&facade, "jobs").await;
+    assert_eq!(back.len(), 1, "{back:?}");
+    // A replay's transaction id names the dead letter it came from.
+    assert_eq!(
+        back[0]["transactionId"],
+        format!("dlq:{}", small["id"].as_str().unwrap())
+    );
+    assert_eq!(back[0]["data"]["n"], 1);
+}
+
 // ------------------------------------------- lag and figures of a source
 
 /// Whether a hidden queue's name shows anywhere in `v`: its separator, in a

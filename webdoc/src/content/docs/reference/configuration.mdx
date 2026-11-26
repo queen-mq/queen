@@ -139,6 +139,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/mod.rs gives each
 # shard its idle window. The QUEEN_CONSUME_IDLE_UNLOAD_S row now holds on time, however many
 # partitions came before; no setting this page lists changes.
+# sourceOfTruth re-read 2026-11-26 (dead-letter budget): consume/mod.rs reads
+# QUEEN_DLQ_MAX_BYTES_TOTAL, now a row of the consumption engine table; facade/real.rs exports
+# queen_dlq_bodies_not_kept_total and queen_dlq_bytes. No other setting changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no
@@ -213,6 +216,7 @@ on by default turns off only with `0`, `false`, `off` or `no`.
 | `QUEEN_CONSUME_TXN_TTL_MS` | `30000` | The longest a transaction holds the cursors it acks or positions. |
 | `QUEEN_CONSUME_ROWS_PER_COMMAND` | `4096` | Cursor rows one checkpoint command carries. |
 | `QUEEN_CONSUME_IDLE_UNLOAD_S` | `600` | A whole-queue group's partition that holds nothing (no lease, nothing to deliver, every change committed) for this long leaves the leader's memory; the next message on it loads it back from its cursor row. `0` keeps every one. |
+| `QUEEN_DLQ_MAX_BYTES_TOTAL` | `536870912` (512 MiB) | What the dead letters of every queue together may hold in each node's memory, their bodies included. Past it the leader files a new dead letter without its body: its id, transaction id, partition, offset, retry count and error stay, the error says why, and a replay of it answers 409 `no_body`. `0` turns the budget off. The per-queue caps are in [limits](/reference/limits/#dead-letters). |
 | `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` | `500` | The clock difference between nodes that lease exclusivity allows for. A new leader serves no pops or acks for one checkpoint interval plus this. |
 | `QUEEN_RAFT_POP_REPLY_MARGIN_MS` | `50` | A pop this close to its deadline is answered empty and never claimed for. |
 | `QUEEN_FETCH_TOPIC_WAKE_MS` | `5` | A `POST /api/v1/fetch` long poll, and so a Kafka Fetch, that has read nothing answers empty once it has waited this long and another partition of a queue it reads was written on the node, so a Kafka client can fetch again the partitions it left out. `0` keeps it waiting for its own partitions. |

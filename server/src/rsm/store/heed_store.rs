@@ -783,6 +783,15 @@ impl HeedStore {
         self.ram[ks.slot()].as_ref()
     }
 
+    /// The stored bytes of a RAM keyspace's values right now, checksums
+    /// included (0 for an LMDB-direct one). A tree keyspace (the dead letters
+    /// among them) keeps the count as it changes, so this is a read; a dense
+    /// or prefixed one is walked under its read locks, O(rows), for a count
+    /// now and then.
+    pub fn ram_value_bytes(&self, ks: Keyspace) -> u64 {
+        self.ram(ks).map_or(0, RamTable::value_bytes)
+    }
+
     // -----------------------------------------------------------------------
     // Value integrity (format 1, see `integrity`)
     // -----------------------------------------------------------------------
@@ -1964,6 +1973,10 @@ impl super::Reads for HeedRead<'_> {
         self.store.max_key
     }
 
+    fn ram_value_bytes(&self, ks: Keyspace) -> Option<u64> {
+        self.store.ram(ks).map(RamTable::value_bytes)
+    }
+
     fn get_raw(&self, ks: Keyspace, key: &[u8]) -> Result<Option<&[u8]>> {
         self.store.check_key(ks, key)?;
         self.store.check_poison()?;
@@ -2309,6 +2322,10 @@ impl<'s> HeedWrite<'s> {
 impl super::Reads for HeedWrite<'_> {
     fn max_key_len(&self) -> usize {
         self.store.max_key
+    }
+
+    fn ram_value_bytes(&self, ks: Keyspace) -> Option<u64> {
+        self.store.ram(ks).map(RamTable::value_bytes)
     }
 
     fn get_raw(&self, ks: Keyspace, key: &[u8]) -> Result<Option<&[u8]>> {
@@ -2696,6 +2713,10 @@ impl ShardWrite<'_> {
 impl super::Reads for ShardWrite<'_> {
     fn max_key_len(&self) -> usize {
         self.store.max_key
+    }
+
+    fn ram_value_bytes(&self, ks: Keyspace) -> Option<u64> {
+        self.store.ram(ks).map(RamTable::value_bytes)
     }
 
     fn get_raw(&self, ks: Keyspace, key: &[u8]) -> Result<Option<&[u8]>> {

@@ -1065,6 +1065,14 @@ pub trait Reads {
     /// read transaction does not hold.
     fn max_key_len(&self) -> usize;
 
+    /// The stored bytes of a RAM keyspace's values now
+    /// ([`HeedStore::ram_value_bytes`]), on the handle for the same reason;
+    /// `None` when this handle cannot tell. A bound for an estimate (the
+    /// dead letters' caps), never a hot path.
+    fn ram_value_bytes(&self, _ks: Keyspace) -> Option<u64> {
+        None
+    }
+
     /// Ascending range scan. Starts at the first key ≥ `from`, stops at the
     /// first key that does not start with `prefix`, after `limit` rows, or
     /// when `cb` returns false. Returns the number of rows passed to `cb`.

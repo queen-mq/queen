@@ -48,6 +48,8 @@ pub(super) fn knobs() -> Knobs {
             .ok()
             .and_then(|v| v.trim().parse::<i64>().ok())
             .unwrap_or(0),
+        // The production default ([`super::dlq_budget`]).
+        dlq_max_bytes: 512 << 20,
     }
 }
 

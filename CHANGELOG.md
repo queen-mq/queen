@@ -34,6 +34,23 @@ on every node that copies each table's rows into fresh allocations, a stripe at 
 old copies, the way the load at a restart builds the tables; `QUEEN_STORE_REPACK_ROWS_PER_S`
 (100,000) paces it, at most 1,024 rows under one table lock. It changes no row and nothing on disk.
 
+**Server: the dead letters of all queues together have a memory budget.** A dead letter keeps a
+full copy of its message's body, in memory on every node, loaded again at every start. The caps per
+queue (`QUEEN_DLQ_MAX_ROWS_PER_QUEUE`, `QUEEN_DLQ_MAX_BYTES_PER_QUEUE`, `QUEEN_DLQ_MAX_AGE_S`) bound
+one queue each, and maintenance applies them after the fact, so a few queues that fail large
+messages fast could still fill every node's memory at once; a production cluster's 4,357 dead
+letters held 148 MB on every node. `QUEEN_DLQ_MAX_BYTES_TOTAL` (512 MiB; `0` turns it off) bounds
+them all as they are filed: once the dead letters hold it, the leader files a new dead letter
+without its body. Its id, transaction id, partition, offset, retry count and error stay, the error
+ends with `(body not kept: the dead letters held QUEEN_DLQ_MAX_BYTES_TOTAL)`, the list shows its
+`data` as `null`, and a replay of it answers 409 with `result: "no_body"`. The leader decides as it
+plans the ack, so every node stores the same row. `queen_dlq_bytes` shows what the dead letters
+hold on a node, and `queen_dlq_bodies_not_kept_total` how many the leader filed without a body.
+The per-queue byte cap estimates a queue's bytes from its oldest dead letters; now the estimate is
+never more than all dead letters hold, and past the cap the oldest go each by its own size until the
+rest fits. A queue whose first failures kept large bodies and whose next ones were filed without
+them no longer reads as many times its size and loses dead letters it had room for.
+
 ## 2.10.0 - 2026-11-20
 
 **Upgrading from 2.9.x: a rolling restart.** 2.10.0 keeps the data format of 2.9.0 (cluster
