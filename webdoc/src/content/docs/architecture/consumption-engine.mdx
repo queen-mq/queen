@@ -68,6 +68,10 @@ sourceOfTruth:
 # shard its idle window; hooks.rs notes when a group reads the whole queue. The page's "idle for 10
 # minutes leaves memory" now holds on time, however many partitions came before; nothing else it
 # states changes.
+# sourceOfTruth re-read 2026-11-26 (store repack 64b742a1d, dead-letter budget 1aad003b0):
+# consume/mod.rs reads QUEEN_DLQ_MAX_BYTES_TOTAL and keeps the dead-letter budget's count
+# (consume/dlq_budget.rs); rsm/mod.rs declares rsm/repack.rs, a background repack of the RAM tables
+# (off by default). Nothing this page states changes.
 ---
 
 Pops, acks and leases do not go through the planner. The leader keeps each consumer group's positions and leases in memory, and gives out the oldest ready partition first.

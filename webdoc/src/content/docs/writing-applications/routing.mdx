@@ -22,6 +22,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): planner/txn.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (0707549d5): phase2/stats.rs changed in a test only (it waits for the counter commit). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (filtered-group delete): deleting a queue takes its filtered groups' hidden queues and then the queue, and deleting a filtered group takes its hidden queue, each as a command of its own (phase2.rs next_command); until now only the first of them ran, behind a `deleted: true`. What this page says of deleting a group now holds.
+# sourceOfTruth re-read 2026-11-26 (store repack 64b742a1d, dead-letter budget 1aad003b0):
+# maintenance.rs bounds a queue's dead-letter byte estimate by what all dead letters hold and
+# deletes the oldest by their own size. The page now says a dead letter past the dead letters'
+# memory budget is filed without the message.
 ---
 
 A queue can read other queues. A consumer group can read only some of a queue. A transaction can forward the message it holds into another queue. In each case the message is written once, at its source; the queue that reads it holds a **link**, about 20 bytes, written in the same commit as the message itself.
@@ -132,7 +136,7 @@ The source keeps the message. For the source's retention, every reading queue an
 | `completedRetentionSeconds` | the source waits for the readers too: it keeps a message until they have consumed their link |
 | retention off | everything is kept |
 
-How far back a source's readers hold its completed retention is the gauge `queen_holder_floor_age_seconds{queue}`: the age of the oldest message they still keep unconsumed. A link whose message is gone is skipped when it is read (the `queen_link_expired_at_source_total` counter). A dead letter is a copy: filed from a reading queue, it holds the message itself and its headers, because a dead letter outlives its source.
+How far back a source's readers hold its completed retention is the gauge `queen_holder_floor_age_seconds{queue}`: the age of the oldest message they still keep unconsumed. A link whose message is gone is skipped when it is read (the `queen_link_expired_at_source_total` counter). A dead letter is a copy: filed from a reading queue, it holds the message itself and its headers, because a dead letter outlives its source. Past the dead letters' memory budget it is filed without the message ([limits](/reference/limits/#dead-letters)).
 
 ## Lag, backlog and unread
 

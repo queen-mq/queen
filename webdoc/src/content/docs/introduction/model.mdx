@@ -79,6 +79,11 @@ digest: >-
 # caught-up record that holds nothing under the end of its idle window; txn.rs files the records a
 # committed transaction leaves holding nothing. What a pop, an ack, a lease or a transaction answers
 # does not change: nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (store repack 64b742a1d, dead-letter budget 1aad003b0):
+# consume/txn.rs does the same for a transaction's acks; facade/real.rs starts the repack beside the
+# scrub and exports queen_dlq_bytes and queen_dlq_bodies_not_kept_total; maintenance.rs bounds a
+# queue's dead-letter byte estimate by what all dead letters hold and deletes the oldest by their
+# own size. Nothing this page states changes.
 ---
 
 The model of QueenMQ is easy to understand. It rests on four ideas: partitions, leases, transactions and a simple interface.

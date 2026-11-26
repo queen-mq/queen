@@ -57,6 +57,12 @@ sourceOfTruth:
 # while its store closed wrote to the unmapped lock file: the test binaries' SIGSEGV), and
 # Store::read opens no LMDB transaction while every keyspace is in RAM; store/mod.rs rewords pin 2
 # and NestedRead. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (store repack 64b742a1d, dead-letter budget 1aad003b0):
+# store/heed_store.rs and store/mod.rs gain the repack step (rows copied into fresh allocations;
+# nothing on disk changes) and the byte count of a RAM keyspace (Reads::ram_value_bytes);
+# maintenance.rs bounds a queue's dead-letter byte estimate by what all dead letters hold and
+# deletes the oldest by their own size. The checkpoint this page describes does not change. Nothing
+# this page states changes.
 ---
 
 The state in memory is saved to an LMDB file, `store/data.mdb`, four times a second. This is a checkpoint, and no client waits for it: it only decides how much of the log a restart has to replay.

@@ -25,6 +25,10 @@ sourceOfTruth:
 # reserved; facade/real.rs gains a test-only accessor; queen-kafka core.rs and txn.rs keep a
 # commit refused `reserved` or `unavailable` open and answer CONCURRENT_TRANSACTIONS.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (store repack 64b742a1d, dead-letter budget 1aad003b0):
+# facade/real.rs starts the repack beside the scrub and exports queen_dlq_bytes and
+# queen_dlq_bodies_not_kept_total. The budget drops only the body: a dead letter filed past it keeps
+# its headers. Nothing this page states changes.
 ---
 
 A message can carry headers: a map of strings, stored beside its payload.
