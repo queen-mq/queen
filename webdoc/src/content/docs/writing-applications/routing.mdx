@@ -26,6 +26,10 @@ sourceOfTruth:
 # maintenance.rs bounds a queue's dead-letter byte estimate by what all dead letters hold and
 # deletes the oldest by their own size. The page now says a dead letter past the dead letters'
 # memory budget is filed without the message.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus): phase2/reads.rs counts each
+# queue's partitions and each group's positions in the group lag walk, a hidden queue's for its
+# group and never as a queue's; phase2.rs hands them to the collector. The Lag, backlog and unread
+# table gains a filtered group's partitions.
 ---
 
 A queue can read other queues. A consumer group can read only some of a queue. A transaction can forward the message it holds into another queue. In each case the message is written once, at its source; the queue that reads it holds a **link**, about 20 bytes, written in the same commit as the message itself.
@@ -145,6 +149,7 @@ A filtered group is a group of its queue, so its figures are its queue's, counte
 | Figure | Where it shows | What it counts |
 | --- | --- | --- |
 | A filtered group's lag | `GET /api/v1/consumer-groups`, `GET /api/v1/consumer-groups/lagging`, and `queen_consumer_group_lag_messages`, `queen_consumer_group_lag_seconds` and `queen_consumer_group_partitions_behind` under its queue's name | the messages its `where` took that it has not consumed, on the partitions it took them from |
+| A filtered group's partitions | `members` in `GET /api/v1/consumer-groups`, and `queen_consumer_group_partitions` under its queue's name | the partitions it has read from; they are part of the group, so `queen_queue_partitions` never counts them |
 | A filtered group's depth | `GET /api/v1/resources/queues/:queue/depth?group=:group` | the same, partition by partition, with `"filtered": true` and its `where` |
 | A queue's `pending` | the queue list, the overview, `GET /api/v1/resources/queues/:queue`, `/depth` without a group, the backlog chart | partition by partition, the most that one of its groups, its own or filtered, has not consumed, plus every unread message; a message counts once, however many groups took it |
 | A queue's `unread` | `messages.unread` on the queue list and the overview, `totals.unread` and each partition's `unread` on the queue's page, `unread` on `/depth` | the messages on partitions that no group of the queue reads and no reader's `where` can take |

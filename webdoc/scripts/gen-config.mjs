@@ -449,7 +449,7 @@ const EXTRA_VARS = [
   {
     name: "QUEEN_METRICS_GROUP_LAG_MAX_CURSORS",
     type: "integer",
-    def: "200000 (0 turns the consumer group lag gauges off)",
+    def: "200000 (0 turns the consumer group lag and partition gauges off)",
     aliases: [],
     source: "server/src/rsm/dashboard/collector.rs",
   },

@@ -1855,7 +1855,7 @@ impl RaftFacade {
         &self,
         budget: usize,
     ) -> (
-        Option<Vec<crate::rsm::dashboard::collector::GroupLag>>,
+        Option<crate::rsm::dashboard::collector::GroupLagRead>,
         usize,
     ) {
         phase2::group_lags_of(

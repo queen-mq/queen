@@ -679,10 +679,11 @@ pub(crate) async fn handle_prometheus(
 }
 
 /// The consumer group families of [`handle_prometheus`]: two about the read
-/// itself, then three per group and queue (none when the read was cut short).
+/// itself, then one per queue and four per group and queue (none when the
+/// read was cut short).
 fn render_group_lag(body: &mut String, g: &crate::rsm::dashboard::collector::GroupLagSample) {
     body.push_str(
-        "# HELP queen_consumer_group_lag_complete 1 when the last metrics bucket (METRICS_FLUSH_MS) read every consumer group's cursors; 0 when QUEEN_METRICS_GROUP_LAG_MAX_CURSORS stopped the read and the per-group families are left out (exported by the raft leader only)\n# TYPE queen_consumer_group_lag_complete gauge\n",
+        "# HELP queen_consumer_group_lag_complete 1 when the last metrics bucket (METRICS_FLUSH_MS) read every consumer group's cursors; 0 when QUEEN_METRICS_GROUP_LAG_MAX_CURSORS stopped the read and the per-queue and per-group families are left out (exported by the raft leader only)\n# TYPE queen_consumer_group_lag_complete gauge\n",
     );
     body.push_str(&format!(
         "queen_consumer_group_lag_complete {}\n",
@@ -692,6 +693,18 @@ fn render_group_lag(body: &mut String, g: &crate::rsm::dashboard::collector::Gro
         "# HELP queen_consumer_group_lag_cursors Cursors (one per consumer group and partition) read for the per-group families at the last metrics bucket (exported by the raft leader only)\n# TYPE queen_consumer_group_lag_cursors gauge\n",
     );
     body.push_str(&format!("queen_consumer_group_lag_cursors {}\n", g.cursors));
+    if !g.queues.is_empty() {
+        body.push_str(
+            "# HELP queen_queue_partitions Partitions of a queue, as the queue list counts them, at the last metrics bucket (exported by the raft leader only)\n# TYPE queen_queue_partitions gauge\n",
+        );
+        for q in &g.queues {
+            let labels = queue_labels(&q.tenant, &q.queue);
+            body.push_str(&format!(
+                "queen_queue_partitions{{{labels}}} {}\n",
+                q.partitions
+            ));
+        }
+    }
     if g.groups.is_empty() {
         return;
     }
@@ -722,6 +735,15 @@ fn render_group_lag(body: &mut String, g: &crate::rsm::dashboard::collector::Gro
         body.push_str(&format!(
             "queen_consumer_group_lag_seconds{{{at}}} {}\n",
             l.lag_seconds
+        ));
+    }
+    body.push_str(
+        "# HELP queen_consumer_group_partitions Partitions of a queue where a consumer group has a cursor (its members in GET /api/v1/consumer-groups), at the last metrics bucket (exported by the raft leader only)\n# TYPE queen_consumer_group_partitions gauge\n",
+    );
+    for (l, at) in g.groups.iter().zip(&labels) {
+        body.push_str(&format!(
+            "queen_consumer_group_partitions{{{at}}} {}\n",
+            l.partitions
         ));
     }
     body.push_str(
@@ -1991,19 +2013,27 @@ fn quota_grant_from_json(v: &serde_json::Value) -> crate::rsm::effect::QuotaGran
 mod tests {
     use std::sync::Arc;
 
-    /// The consumer group families (queen-mq/queen#146): the tenant label only
-    /// for a tenant other than the default one, label values escaped, and no
-    /// per-group series when the read was cut short.
+    /// The consumer group families (queen-mq/queen#146) and each queue's
+    /// partitions: the tenant label only for a tenant other than the default
+    /// one, label values escaped, and no per-queue or per-group series when
+    /// the read was cut short.
     #[test]
     fn the_group_lag_families_name_tenant_queue_and_group() {
-        use crate::rsm::dashboard::collector::{GroupLag, GroupLagSample};
-        let lag = |tenant: &str, queue: &str, group: &str, pending, secs, behind| GroupLag {
+        use crate::rsm::dashboard::collector::{GroupLag, GroupLagSample, QueuePartitions};
+        let lag =
+            |tenant: &str, queue: &str, group: &str, pending, secs, behind, partitions| GroupLag {
+                tenant: tenant.into(),
+                queue: queue.into(),
+                group: group.into(),
+                pending,
+                lag_seconds: secs,
+                partitions_behind: behind,
+                partitions,
+            };
+        let parts = |tenant: &str, queue: &str, partitions| QueuePartitions {
             tenant: tenant.into(),
             queue: queue.into(),
-            group: group.into(),
-            pending,
-            lag_seconds: secs,
-            partitions_behind: behind,
+            partitions,
         };
         let mut body = String::new();
         super::render_group_lag(
@@ -2017,8 +2047,13 @@ mod tests {
                         12,
                         75,
                         2,
+                        3,
                     ),
-                    lag("acme", "q\"x", "g", 0, 0, 0),
+                    lag("acme", "q\"x", "g", 0, 0, 0, 0),
+                ],
+                queues: vec![
+                    parts(crate::config::DEFAULT_TENANT, "orders", 4),
+                    parts("acme", "q\"x", 0),
                 ],
                 cursors: 7,
                 complete: true,
@@ -2030,8 +2065,14 @@ mod tests {
             "queen_consumer_group_lag_messages{queue=\"orders\",group=\"billing\"} 12",
             "queen_consumer_group_lag_seconds{queue=\"orders\",group=\"billing\"} 75",
             "queen_consumer_group_partitions_behind{queue=\"orders\",group=\"billing\"} 2",
+            "queen_consumer_group_partitions{queue=\"orders\",group=\"billing\"} 3",
             "queen_consumer_group_lag_messages{tenant=\"acme\",queue=\"q\\\"x\",group=\"g\"} 0",
+            "queen_consumer_group_partitions{tenant=\"acme\",queue=\"q\\\"x\",group=\"g\"} 0",
+            "queen_queue_partitions{queue=\"orders\"} 4",
+            "queen_queue_partitions{tenant=\"acme\",queue=\"q\\\"x\"} 0",
             "# TYPE queen_consumer_group_lag_seconds gauge",
+            "# TYPE queen_consumer_group_partitions gauge",
+            "# TYPE queen_queue_partitions gauge",
         ] {
             assert!(
                 body.lines().any(|l| l == line),
@@ -2043,6 +2084,7 @@ mod tests {
             &mut cut,
             &GroupLagSample {
                 groups: vec![],
+                queues: vec![],
                 cursors: 200_001,
                 complete: false,
             },
@@ -2051,7 +2093,13 @@ mod tests {
             cut.contains("queen_consumer_group_lag_complete 0\n"),
             "{cut}"
         );
-        assert!(!cut.contains("queen_consumer_group_lag_messages"), "{cut}");
+        for family in [
+            "queen_consumer_group_lag_messages",
+            "queen_consumer_group_partitions",
+            "queen_queue_partitions",
+        ] {
+            assert!(!cut.contains(family), "{family} in\n{cut}");
+        }
     }
 
     /// The routes about THE NODE ASKED are answered by it: a follower that

@@ -55,23 +55,49 @@ pub struct GroupLag {
     pub lag_seconds: i64,
     /// Partitions where it has messages left to consume.
     pub partitions_behind: u64,
+    /// Partitions where it has a cursor: the list's `members`, the "of N" of
+    /// a queue page's consumer groups. A partition it has never read is
+    /// behind without a cursor, so `partitions_behind` can be the larger.
+    pub partitions: u64,
+}
+
+/// One queue's partitions, counted as the queue list counts them (a
+/// filtered group's hidden queue is part of its group, not a queue), in the
+/// walk that reads the group lag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueuePartitions {
+    pub tenant: String,
+    pub queue: String,
+    pub partitions: u64,
+}
+
+/// What one walk of the group lag reads.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GroupLagRead {
+    /// Every group on every queue.
+    pub groups: Vec<GroupLag>,
+    /// Every queue, with its partitions.
+    pub queues: Vec<QueuePartitions>,
 }
 
 /// One facade's group lag reading at `now_us`, walking at most `budget`
-/// cursors: `(groups, cursors walked)`, the groups `None` past the budget;
+/// cursors: `(read, cursors walked)`, the read `None` past the budget;
 /// `None` altogether when this node does not read it (it does not lead the
 /// group, or the facade is gone).
 pub type GroupLagSampler =
-    Arc<dyn Fn(i64, usize) -> Option<(Option<Vec<GroupLag>>, usize)> + Send + Sync>;
+    Arc<dyn Fn(i64, usize) -> Option<(Option<GroupLagRead>, usize)> + Send + Sync>;
 
 /// The last flush's group lag, as `/metrics/prometheus` exports it.
 #[derive(Clone, Debug, Default)]
 pub struct GroupLagSample {
     /// Every group on every queue, by tenant, queue and group.
     pub groups: Vec<GroupLag>,
+    /// Every queue's partitions, by tenant and queue.
+    pub queues: Vec<QueuePartitions>,
     /// Cursors walked to read them.
     pub cursors: usize,
-    /// False when the cursor budget stopped the walk: `groups` is then empty.
+    /// False when the cursor budget stopped the walk: `groups` and `queues`
+    /// are then empty.
     pub complete: bool,
 }
 
@@ -87,8 +113,8 @@ pub fn register_group_lag_sampler(f: GroupLagSampler) {
         .push(f);
 }
 
-/// The most cursors one flush walks for the group lag gauges,
-/// `QUEEN_METRICS_GROUP_LAG_MAX_CURSORS` (default 200,000; 0 turns the gauges off).
+/// The most cursors one flush walks for the group lag and partition gauges,
+/// `QUEEN_METRICS_GROUP_LAG_MAX_CURSORS` (default 200,000; 0 turns them off).
 fn group_lag_budget() -> usize {
     std::env::var("QUEEN_METRICS_GROUP_LAG_MAX_CURSORS")
         .ok()
@@ -110,7 +136,7 @@ fn sample_group_lag(now_us: i64) {
         let mut out: Option<GroupLagSample> = None;
         let mut left = budget;
         for f in &samplers {
-            let Some((groups, walked)) = f(now_us, left) else {
+            let Some((read, walked)) = f(now_us, left) else {
                 continue;
             };
             let s = out.get_or_insert_with(|| GroupLagSample {
@@ -119,12 +145,16 @@ fn sample_group_lag(now_us: i64) {
             });
             s.cursors += walked;
             left = left.saturating_sub(walked);
-            match groups {
-                Some(g) if s.complete => s.groups.extend(g),
+            match read {
+                Some(r) if s.complete => {
+                    s.groups.extend(r.groups);
+                    s.queues.extend(r.queues);
+                }
                 Some(_) => {}
                 None => {
                     s.complete = false;
                     s.groups.clear();
+                    s.queues.clear();
                 }
             }
         }

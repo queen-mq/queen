@@ -1944,8 +1944,9 @@ async fn the_queue_detail_shows_each_partitions_share() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn group_lag_metrics_name_the_source_queue() {
     let (facade, _dir) = lag_scenario("lag-prom").await;
-    let (rows, _) = facade.group_lags_for_test(usize::MAX);
-    let rows = rows.expect("within the budget");
+    let (read, _) = facade.group_lags_for_test(usize::MAX);
+    let read = read.expect("within the budget");
+    let rows = &read.groups;
     assert!(
         !rows.iter().any(|l| l.queue.contains('\u{1}')),
         "{:?}",
@@ -1960,6 +1961,33 @@ async fn group_lag_metrics_name_the_source_queue() {
     };
     assert_eq!((of("ga").pending, of("ga").partitions_behind), (0, 0));
     assert_eq!((of("gb").pending, of("gb").partitions_behind), (2, 1));
+
+    // A filtered group's hidden queue is part of the group: it is no queue
+    // of its own, and its cursors are the group's partitions, as the groups
+    // list counts its members.
+    assert!(
+        !read.queues.iter().any(|q| q.queue.contains('\u{1}')),
+        "{:?}",
+        read.queues
+    );
+    let source = read
+        .queues
+        .iter()
+        .find(|q| q.queue == "lagsrc")
+        .unwrap_or_else(|| panic!("lagsrc in {:?}", read.queues));
+    assert_eq!(source.partitions, 4, "{:?}", read.queues);
+    let (_, list) = api(&facade, "GET", "/api/v1/consumer-groups", None, Value::Null).await;
+    let members = |g: &str| {
+        list.as_array()
+            .and_then(|a| {
+                a.iter()
+                    .find(|r| r["name"] == g && r["queueName"] == "lagsrc")
+            })
+            .and_then(|r| r["members"].as_u64())
+            .unwrap_or(0)
+    };
+    assert_eq!((of("ga").partitions, members("ga")), (2, 2), "{list}");
+    assert_eq!((of("gb").partitions, members("gb")), (0, 0), "{list}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]

@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use super::json_out::{push_object, Field};
 use super::{query_map, read_error, ApiOut, ApiReq, Effect, RaftFacade, ReqCtx, RsmError};
 use crate::frames::{unpack_frames_ref, uuid_bytes_to_string, uuid_string_to_bytes};
-use crate::rsm::dashboard::collector::GroupLag;
+use crate::rsm::dashboard::collector::{GroupLag, GroupLagRead, QueuePartitions};
 use crate::rsm::effect::{Pid, TraceEvent};
 use crate::rsm::facade::{ChangedAnswer, ChangedAsk, ChangedPartition, PartitionsChanged};
 use crate::rsm::planner::bucket_of;
@@ -2693,17 +2693,22 @@ fn cursor_lags<R: Reads + ?Sized>(
 /// partition the group has never read (an entity's first message while its
 /// consumers are down) is lag, and the messages from before the group
 /// subscribed are not. `GET /api/v1/consumer-groups` counts only the
-/// partitions with a cursor.
+/// partitions with a cursor, and so does each group's `partitions`.
+///
+/// The same walk counts each queue's partitions as the queue list does:
+/// a filtered group's hidden queue is part of its group, so its partitions
+/// count for no queue.
 pub(crate) fn group_lags<R: Reads + ?Sized>(
     r: &R,
     qlog: Option<&QLogReader>,
     reader: &crate::rsm::segments::Reader,
     now: i64,
     budget: usize,
-) -> crate::rsm::store::Result<(Option<Vec<GroupLag>>, usize)> {
+) -> crate::rsm::store::Result<(Option<GroupLagRead>, usize)> {
     use crate::rsm::effect::SubscriptionMode;
     let mut agg: std::collections::BTreeMap<(String, String, String), GroupLag> =
         std::collections::BTreeMap::new();
+    let mut queues: Vec<QueuePartitions> = Vec::new();
     let mut walked = 0usize;
     for (tenant, queue) in super::stats::all_queues(r)? {
         // A filtered group's cursors are on its hidden queue; its lag is the
@@ -2726,8 +2731,10 @@ pub(crate) fn group_lags<R: Reads + ?Sized>(
             pids.push(pid);
             true
         })?;
+        let mut partitions = 0u64;
         for pid in pids {
             let Some(p) = r.partition(pid)? else { continue };
+            partitions += 1;
             let mut cursors: std::collections::BTreeMap<String, i64> =
                 std::collections::BTreeMap::new();
             r.scan_cursors(pid, usize::MAX, &mut |g, c| {
@@ -2753,7 +2760,7 @@ pub(crate) fn group_lags<R: Reads + ?Sized>(
             // The stamp of the first live message at or after offset `k`.
             let stamp_at =
                 |k: i64| oldest_unconsumed_us(qlog, reader, &tenant, pid, &p, &sealed, k - 1);
-            let mut add = |group: &str, pending: u64, oldest_us: Option<i64>| {
+            let mut add = |group: &str, cursor: bool, pending: u64, oldest_us: Option<i64>| {
                 let a = agg
                     .entry((tenant.clone(), shown.clone(), group.to_string()))
                     .or_insert_with(|| GroupLag {
@@ -2763,7 +2770,11 @@ pub(crate) fn group_lags<R: Reads + ?Sized>(
                         pending: 0,
                         lag_seconds: 0,
                         partitions_behind: 0,
+                        partitions: 0,
                     });
+                if cursor {
+                    a.partitions += 1;
+                }
                 if pending == 0 {
                     return;
                 }
@@ -2781,15 +2792,28 @@ pub(crate) fn group_lags<R: Reads + ?Sized>(
                 } else {
                     None
                 };
-                add(group, pending, oldest);
+                add(group, true, pending, oldest);
             }
             for (group, seed) in unread {
                 let (pending, oldest) = unread_from_seed(&p, *seed, &stamp_at);
-                add(group, pending, oldest);
+                add(group, false, pending, oldest);
             }
         }
+        if !crate::rsm::route::is_hidden(&queue) {
+            queues.push(QueuePartitions {
+                tenant,
+                queue,
+                partitions,
+            });
+        }
     }
-    Ok((Some(agg.into_values().collect()), walked))
+    Ok((
+        Some(GroupLagRead {
+            groups: agg.into_values().collect(),
+            queues,
+        }),
+        walked,
+    ))
 }
 
 /// What a group's first read of `p` would take, starting at `seed` (`None`:

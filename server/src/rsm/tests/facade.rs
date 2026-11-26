@@ -2540,8 +2540,9 @@ async fn the_group_lag_sample_counts_every_partition_by_its_subscription() {
             .expect("push 6");
     }
 
-    let (sample, walked) = facade.group_lags_for_test(1_000);
-    let sample = sample.expect("within the budget");
+    let (read, walked) = facade.group_lags_for_test(1_000);
+    let read = read.expect("within the budget");
+    let sample = &read.groups;
     let of = |g: &str| {
         sample
             .iter()
@@ -2591,6 +2592,45 @@ async fn the_group_lag_sample_counts_every_partition_by_its_subscription() {
         Some(0),
         "the list counts only where g1 read: {listed}"
     );
+    // A group's partitions are the list's members: g1 has a cursor where it
+    // read and none on the other partition; g2 has read nothing.
+    assert_eq!(g1.partitions, 1, "{sample:?}");
+    assert_eq!(listed["members"].as_u64(), Some(g1.partitions), "{listed}");
+    let g2_members = rows
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .find(|r| r["name"] == "g2" && r["queueName"] == "lag-q")
+        })
+        .and_then(|r| r["members"].as_u64())
+        .unwrap_or(0);
+    assert_eq!((g2.partitions, g2_members), (0, 0), "{}", list.body);
+
+    // The queue's partitions, as the queue list counts them.
+    let queues = facade
+        .api(
+            ctx(),
+            ApiReq {
+                method: "GET".into(),
+                path: "/api/v1/resources/queues".into(),
+                query: None,
+                body: Vec::new(),
+            },
+        )
+        .await
+        .expect("queues");
+    let listed_parts = parse(&queues.body)["queues"]
+        .as_array()
+        .and_then(|a| a.iter().find(|q| q["name"] == "lag-q"))
+        .and_then(|q| q["partitions"].as_u64())
+        .unwrap_or_else(|| panic!("lag-q in {}", queues.body));
+    let counted = read
+        .queues
+        .iter()
+        .find(|q| q.tenant == crate::config::DEFAULT_TENANT && q.queue == "lag-q")
+        .map(|q| q.partitions)
+        .unwrap_or_else(|| panic!("lag-q in {:?}", read.queues));
+    assert_eq!((counted, listed_parts), (2, 2), "{:?}", read.queues);
 
     // Past the budget: no figures at all, and how far the walk got.
     let (cut, at) = facade.group_lags_for_test(1);

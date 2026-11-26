@@ -2281,9 +2281,9 @@ pub(crate) fn tenant_backlogs<R: TypedReads + ?Sized>(
     Ok(stats::backlogs(r, now, stats::exact_budget(), None)?.0)
 }
 
-/// Every consumer group's lag on every queue of `store`, at most `budget`
-/// cursors walked (`reads::group_lags`): what the collector samples for
-/// `/metrics/prometheus`.
+/// Every consumer group's lag on every queue of `store`, and every queue's
+/// partitions, at most `budget` cursors walked (`reads::group_lags`): what
+/// the collector samples for `/metrics/prometheus`.
 pub(crate) fn group_lags_of(
     store: &std::sync::Arc<crate::rsm::store::heed_store::HeedStore>,
     qlog: Option<&crate::rsm::qlog::set::QLogReader>,
@@ -2292,7 +2292,7 @@ pub(crate) fn group_lags_of(
     budget: usize,
 ) -> Result<
     (
-        Option<Vec<crate::rsm::dashboard::collector::GroupLag>>,
+        Option<crate::rsm::dashboard::collector::GroupLagRead>,
         usize,
     ),
     StoreError,

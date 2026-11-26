@@ -118,6 +118,12 @@ sourceOfTruth:
 # Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-26 (dead-letter budget): facade/real.rs exports
 # queen_dlq_bodies_not_kept_total and queen_dlq_bytes; both are in the generated table.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus): phase2/reads.rs counts each
+# queue's partitions and each group's positions in the group lag walk, dashboard/collector.rs keeps
+# them in the sample, handlers/raft.rs exports queen_queue_partitions and
+# queen_consumer_group_partitions, and facade/real.rs changes only a test helper. The Consumer group
+# lag section lists both and its budget paragraph says the per-queue series go too; the generated
+# table lists them.
 ---
 
 Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`. Each node
@@ -197,28 +203,36 @@ sum(rate(queen_raft_traffic_bytes_total[1m])) / sum(rate(queen_network_bytes_tot
 ## Consumer group lag
 
 Three gauges say how far each consumer group is behind on each queue, so an alert can fire when a
-group stops or cannot keep up. The raft leader writes them at every metrics bucket
-(`METRICS_FLUSH_MS`, 60 s by default) and the other nodes export none, so a query over every node
-sees one series per group, wherever the leader is.
+group stops or cannot keep up. Two more count partitions: each queue's, and those where each group
+holds a position. The raft leader writes them at every metrics bucket (`METRICS_FLUSH_MS`, 60 s by
+default) and the other nodes export none, so a query over every node sees one series per group or
+queue, wherever the leader is.
 
 | Family | Labels | What it says |
 |---|---|---|
 | `queen_consumer_group_lag_messages` | `queue`, `group` | The messages the group has not consumed on the queue, over all its partitions |
 | `queen_consumer_group_lag_seconds` | `queue`, `group` | How old the oldest of those messages is, in seconds; 0 when the group is caught up |
 | `queen_consumer_group_partitions_behind` | `queue`, `group` | The partitions where the group has messages left |
+| `queen_consumer_group_partitions` | `queue`, `group` | The partitions where the group holds a position: its `members` in the consumer groups list |
+| `queen_queue_partitions` | `queue` | The queue's partitions, as the queue list counts them |
 
 A group counts on every partition of the queue from the instant its subscription starts
 (everything for `all`, its first pop for `new`, the instant for `subscriptionFrom`), also on a
 partition it has never read: the first message of a new entity while every consumer is down is
 lag, and a message from before the group subscribed is not. The consumer groups list
-(`GET /api/v1/consumer-groups`) counts only the partitions the group has read from. Queue mode is
+(`GET /api/v1/consumer-groups`) counts only the partitions the group has read from, and so does
+`queen_consumer_group_partitions`: on a partition the group has never read it is behind without a
+position, so `queen_consumer_group_partitions_behind` can be the larger of the two. Queue mode is
 the group `__QUEUE_MODE__`, and like every per-queue family a `tenant` label appears for every
-tenant except the default one.
+tenant except the default one. A filtered group's positions count under its queue's name, and its
+partitions are part of the group: no `queen_queue_partitions` series counts them
+([routing](/writing-applications/routing/#lag-backlog-and-unread)).
 
 Reading them is one pass over every group's position on every partition. Past
 `QUEEN_METRICS_GROUP_LAG_MAX_CURSORS` positions (200,000 by default; 0 turns the gauges off) the
 leader skips the bucket rather than export a part: `queen_consumer_group_lag_complete` is 0 and
-the per-group series are absent. `queen_consumer_group_lag_cursors` is how many positions it read.
+the per-queue and per-group series are absent. `queen_consumer_group_lag_cursors` is how many
+positions it read.
 
 ```text
 # a group more than five minutes behind, on any queue
@@ -226,6 +240,10 @@ max by (tenant, queue, group) (queen_consumer_group_lag_seconds) > 300
 
 # one group's backlog, over its queues
 sum by (group) (queen_consumer_group_lag_messages{group="billing"})
+
+# every partition of every queue, and every position the groups hold
+sum(queen_queue_partitions)
+sum(queen_consumer_group_partitions)
 ```
 
 The repository ships a Grafana board and Prometheus alert rules on these series:

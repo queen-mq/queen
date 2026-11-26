@@ -56,6 +56,17 @@ never more than all dead letters hold, and past the cap the oldest go each by it
 rest fits. A queue whose first failures kept large bodies and whose next ones were filed without
 them no longer reads as many times its size and loses dead letters it had room for.
 
+**Server: Prometheus counts each queue's partitions, and each consumer group's.** Two gauges join
+the consumer group lag families: `queen_queue_partitions{queue}`, the partitions of a queue as the
+queue list counts them, and `queen_consumer_group_partitions{queue,group}`, the partitions where a
+group holds a position, its `members` in `GET /api/v1/consumer-groups`. Their sums are every
+partition of every queue and every position the groups hold, so a graph shows how a cluster grows
+without anyone opening the console. The raft leader reads them in the pass that already reads the
+group lag at every metrics bucket, so they cost no extra read, and like the lag families they are
+left out when `QUEEN_METRICS_GROUP_LAG_MAX_CURSORS` stops that pass. A filtered group's partitions
+are part of its group: they count among its positions, under its queue's name, and in no queue's
+partitions.
+
 ## 2.10.0 - 2026-11-20
 
 **Upgrading from 2.9.x: a rolling restart.** 2.10.0 keeps the data format of 2.9.0 (cluster
