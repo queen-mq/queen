@@ -1967,7 +1967,7 @@ Sign in through the control plane that operates it, then return here.</p>{link}"
     };
     let favicon = favicon_data_uri();
     let mark = match wordmark_svg() {
-        "" => "<span class=\"word\">queen</span>".to_string(),
+        "" => "<span class=\"word\">queenmq</span>".to_string(),
         svg => format!("<span class=\"mark\" role=\"img\" aria-label=\"QueenMQ\">{svg}</span>"),
     };
     format!(
@@ -2054,9 +2054,8 @@ var error=document.querySelector('[role=alert]');if(error)error.focus();
 /// autofilled field keeps the field's surface, where a browser would paint its
 /// own blue over the two fields this page has.
 ///
-/// The brand is not the sidebar's badge: there is room here for the wordmark
-/// with its line, centred over the card, at about the smallest height that
-/// still lets the line be read.
+/// The brand is the logo the README shows, the box and then the word,
+/// centred over the card.
 const SIGN_IN_CSS: &str = "\
 :root{--bg:#0d0c0b;--bg2:#151413;--bg3:#1e1c1a;--line:#2a2725;--line2:#1c1a18;\
 --text:#eeebe6;--text2:#b9b3ab;--text3:#908a82;--red:#f0614f;--redbg:rgba(240,97,79,.13);\
@@ -2078,7 +2077,7 @@ text-rendering:optimizeLegibility;letter-spacing:-.005em;background:var(--bg);co
 :focus-visible{outline:2px solid var(--text);outline-offset:2px}\
 .sign{width:100%;max-width:400px}\
 .brand{display:flex;justify-content:center;margin-bottom:28px}\
-.mark svg{display:block;height:88px;max-width:100%;width:auto}\
+.mark svg{display:block;height:44px;max-width:100%;width:auto}\
 .word{font-size:15px;font-weight:600;line-height:1;letter-spacing:-.015em}\
 .card{border:1px solid var(--line);border-radius:var(--r-card);background:var(--card)}\
 .card-header{padding:28px 28px 0;text-align:center}\
@@ -2126,16 +2125,19 @@ color:var(--red);font-size:12.5px;line-height:1.45}\
 @media(max-width:480px){body{padding:24px 16px}.card-header{padding:24px 20px 0}.card-body{padding:22px 20px 24px}input{font-size:16px}}\
 @media(prefers-reduced-motion:reduce){input,.submit,.oauth{transition:none}}";
 
-/// The brand: the wordmark with its line, as SVG markup
-/// (`app/public/queen-wordmark.svg`, written by `assets/logo.py` with the
-/// app's other brand files), pulled out of the embedded webapp, so replacing it
-/// (+ `npm run build`) updates this page too.
+/// The brand: the README's logo, the box and the word "queenmq", as SVG
+/// markup (`app/public/queen-wordmark.svg`, written by
+/// `assets/redesign/src/web.py` with the console's other brand files), pulled
+/// out of the embedded webapp, so replacing it (+ `npm run build`) updates this
+/// page too.
 ///
 /// It is inlined rather than linked for two reasons. webapp.rs's gate is
 /// deliberately absolute — not one byte without a live session — so a plain
 /// `<img src="/queen-wordmark.svg">` here would 302 back to this very page. And
-/// its letters are `currentColor`: inline, they take the page's text colour, so
-/// one file serves both schemes.
+/// its box and letters are `currentColor` and the sunflower's stem is filled
+/// with this page's `--bg`: inline, the box is dark with the page showing
+/// through it on a light page and light on a dark one, so one file serves
+/// every look.
 ///
 /// Empty when the webapp is not built. The page then spells the name in plain
 /// type rather than showing nothing; `the_login_brand_is_embedded` fails the
@@ -2150,8 +2152,8 @@ fn wordmark_svg() -> &'static str {
     })
 }
 
-/// The tab icon: the webapp's own favicon, the small logo as vector
-/// (`assets/logo/q-auto.svg`). Its letter follows the viewer's
+/// The tab icon: the webapp's own favicon, the logo's box as vector
+/// (`assets/redesign/favicon/favicon.svg`). Its box follows the viewer's
 /// colour scheme, so it reads on a light or a dark tab strip without a second
 /// file.
 fn favicon_data_uri() -> &'static str {
@@ -3112,10 +3114,15 @@ mod tests {
             "the wordmark is SVG markup, with no prolog for the page to print"
         );
         assert!(wordmark.ends_with("</svg>"), "and nothing after it either");
-        // One file for both schemes: its letters take the page's text colour.
+        // One file for every look: its box and letters take the page's text
+        // colour, and the stem shows the page's own ground through the box.
         assert!(
             wordmark.contains("fill=\"currentColor\""),
             "the letters follow the scheme"
+        );
+        assert!(
+            wordmark.contains("var(--bg,") && SIGN_IN_CSS.contains(":root{--bg:"),
+            "the stem is filled with the ground this page declares"
         );
         assert!(
             !wordmark.contains("<script"),

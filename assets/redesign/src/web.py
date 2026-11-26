@@ -1,6 +1,12 @@
-"""The site's copies of the logo (webdoc/): the header's two inline SVGs and the browser icons.
+"""The site's copies of the logo (webdoc/): the header's two inline SVGs and the browser icons; and
+the console's (app/): the logo its sign-in page shows and the browser icons.
 
     python3 assets/redesign/src/web.py          (after make.py, which draws the icons it copies)
+
+The sign-in page (proxy/src/oauth.rs inlines app/public/queen-wordmark.svg) shows the logo as the
+README does, the box and then the word, drawn by the same lockup() as make.py's queenmq-logo.svg,
+with the same rule as the site's: the box and the letters in "currentColor", the stem the page's
+own ground (`--bg`, the page's background token), so one file serves its dark, soft and light looks.
 
 The header shows the word alone where it fits (her pick, 2026-11-25: the tab above it already shows
 the box) and the box alone where it does not. Both are inlined, so they follow the page's theme:
@@ -21,10 +27,13 @@ sys.path.insert(0, HERE)
 
 from letters import X, D1, d1_glyph, set_word, f, GOLD, YEL, LIGHT   # noqa: E402
 from headonly import LETTERS                                          # noqa: E402
-from sunflower import shapes, SIDE, RX, BROWN, MED                    # noqa: E402
+from sunflower import shapes, lockup, SIDE, RX, BROWN, MED            # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 KNOCK = f'class="knock" fill="{LIGHT}" style="fill:var(--color-background,{LIGHT})"'
+# The README logo's box and margin (make.py's BOX_H and pad), and the page token the sign-in
+# page's stem shows (proxy/src/oauth.rs, SIGN_IN_CSS).
+BOX_H, PAD, SIGN_IN_GROUND = 170.0, 0.06, "--bg"
 
 
 def xform(d, s, tx, ty):
@@ -84,14 +93,36 @@ def icon():
     return svg((0.0, 0.0, 224.0, 224.0), icon_paths(224.0, 0.0, 0.0))
 
 
+def sign_in_logo():
+    """the README's logo for the sign-in page: the medium flower (the page shows the box about
+    40 px tall), sized by the page's CSS, its box and letters "currentColor", its stem the page"""
+    out, _ = lockup(box_h=BOX_H, pad=PAD, ground=None, size=MED)
+    for pattern, repl in (
+            (r' width="\d+" height="\d+">', ' aria-hidden="true" focusable="false">'),
+            (r'(<rect id="box" [^>]*)fill="[^"]*"', r'\1fill="currentColor"'),
+            (r'<path id="stem" fill="([^"]*)"',
+             rf'<path id="stem" class="knock" fill="\1" style="fill:var({SIGN_IN_GROUND},\1)"'),
+            (r'<g id="letters" fill="[^"]*"', '<g id="letters" fill="currentColor"')):
+        out, n = re.subn(pattern, repl, out, count=1)
+        assert n == 1, f"the lockup no longer has {pattern!r}"
+    return out + "\n"
+
+
 def main():
     site = lambda *p: os.path.join(ROOT, "webdoc", *p)
+    app = lambda *p: os.path.join(ROOT, "app", *p)
     brand = lambda *p: os.path.join(ROOT, "assets", "redesign", *p)
     open(site("src", "assets", "queenmq-wordmark.svg"), "w").write(wordmark())
     open(site("src", "assets", "queenmq-icon.svg"), "w").write(icon())
     for src, dst in (("favicon.svg", "favicon.svg"), ("favicon.ico", "favicon.ico"), ("favicon-32.png", "favicon-32.png"),
                      ("apple-touch-icon.png", "apple-touch-icon.png"), ("icon-512.png", "queen-tile.png")):
         shutil.copyfile(brand("favicon", src), site("public", dst))
+    open(app("public", "queen-wordmark.svg"), "w").write(sign_in_logo())
+    # The console's tab icons, and the placeholder the server commits for a build without the
+    # console (server/webapp/dist), which the sign-in page reads its tab icon from.
+    for name in ("favicon.svg", "favicon-32.png"):
+        for dst in (app("public", name), os.path.join(ROOT, "server", "webapp", "dist", name)):
+            shutil.copyfile(brand("favicon", name), dst)
 
 
 if __name__ == "__main__":

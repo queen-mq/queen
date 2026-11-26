@@ -24,8 +24,8 @@ alone for small sizes, one colour, and the badge.
   assets/logo/q-badge{,-on-dark}.svg, -512.png    the badge: a disc with the small logo cut out of it
   assets/logo/overview.png                        everything on one sheet, for looking at
 
-and the copies the dashboard (app/), its sign-in page and the Laravel supervisor
-dashboard use. The docs (webdoc/) carry the new logo: assets/redesign/src/web.py.
+and the copy the Laravel supervisor dashboard uses. The docs (webdoc/) and the console (app/: its
+rail, its sign-in page and its tab icons) carry the new logo: assets/redesign/src/web.py.
 
 Run:  python3 assets/logo.py     (needs rsvg-convert and Pillow)
 """
@@ -301,13 +301,12 @@ def main():
 
 
 def place_inline():
-    """The copies the dashboard (app/) and the Laravel supervisor dashboard use. The docs (webdoc/)
-    carry the new logo since 2026-11-25: assets/redesign/src/web.py writes theirs.
+    """The copies the Laravel supervisor dashboard and app/src/assets/queen.svg use. The docs
+    (webdoc/) carry the new logo since 2026-11-25 and the console's rail, sign-in page and tab icons
+    since 2026-11-26: assets/redesign/src/web.py writes theirs.
     Inlined ones are lettered "currentColor", so they take the text colour of the page's theme."""
     view, shapes = lockup("q")
-    for name in ("app",):
-        write(inline(view, *shapes(YELLOW, "currentColor", "")), name, "src", "assets", "q.svg", root=ROOT)
-    # The Laravel header embeds the same small logo, without an XML namespace:
+    # The Laravel header embeds the small logo, without an XML namespace:
     # it is HTML, with no external image request or asset publishing required.
     mark = inline(view, *shapes(YELLOW, "currentColor", "")).replace(
         ' xmlns="http://www.w3.org/2000/svg"', ' class="brand-mark"', 1)
@@ -316,19 +315,12 @@ def place_inline():
     view, shapes = lockup("queen")
     for name in ("app",):
         write(inline(view, *shapes(YELLOW, "currentColor", "")), name, "src", "assets", "queen.svg", root=ROOT)
-    # the logo with its line, for the dashboard's sign-in page
-    view, shapes = lockup("queen-tagline")
-    write(inline(view, *shapes(YELLOW, "currentColor", "currentColor")), "app", "public", "queen-wordmark.svg",
-          root=ROOT)
 
 
 def place():
-    """Place the inline logos and the browser icons (the dashboard's; the docs' come from
+    """Place the inline logos (the console's and the docs' browser icons come from
     assets/redesign/src/web.py)."""
     place_inline()
-    site = lambda *path: os.path.join(ROOT, *path)
-    shutil.copyfile(os.path.join(OUT, "q-auto.svg"), site("app", "public", "favicon.svg"))
-    shutil.copyfile(os.path.join(OUT, "q-32.png"), site("app", "public", "favicon-32.png"))
 
 
 def overview():
