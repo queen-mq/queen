@@ -8,8 +8,10 @@
  *   2. `@theme` block exposes them to Tailwind so utilities like
  *      `bg-card`, `text-foreground`, `border-border` work
  *   3. Dark mode uses the `[data-mode="dark"]` attribute
- *   4. The look is the console's (app/src/console/console.css): Soft for
- *      dark, Light for light, both with Tone areas
+ *   4. The look comes from the console's (app/src/console/console.css):
+ *      Light for light, with Tone areas. Dark is Night (2026-11-26): the
+ *      logo's own dark ground #151311, warm like the light page, darker
+ *      than the console's Soft grey, with the same Tone steps above it
  *
  * Naming convention:
  *   - Surfaces paired with foregrounds: `card` / `card-foreground`
@@ -125,44 +127,48 @@
 	}
 }
 
-/* ---- Dark: the console's Soft + Tone (.qn.soft, .qn.tone) ---- */
+/* ---- Dark: Night + Tone ----
+ * The ground is the logo's dark (#151311). Every surface keeps the step it
+ * had above the console's Soft (#202020): zone +6, card +11, accent +12,
+ * field and muted +22, selected and line +26, strong border +42 per channel.
+ * The text keeps its lightness, a touch warm, like the light theme's. */
 [data-mode="dark"] {
 	color-scheme: dark;
 
-	--nb-background: #202020;
-	--nb-foreground: #f3f3f3;
+	--nb-background: #151311;
+	--nb-foreground: #f4f2ee;
 
-	--nb-card: #2b2b2b;
+	--nb-card: #201e1c;
 	--nb-card-foreground: var(--nb-foreground);
 
-	--nb-zone: #262626;
-	--nb-field: #363636;
+	--nb-zone: #1b1917;
+	--nb-field: #2b2927;
 
-	--nb-muted: #363636;
-	--nb-muted-foreground: #9e9e9e;
+	--nb-muted: #2b2927;
+	--nb-muted-foreground: #a19d97;
 
-	--nb-accent: #2c2c2c;
+	--nb-accent: #211f1d;
 	--nb-accent-foreground: var(--nb-foreground);
-	--nb-selected: #3a3a3a;
+	--nb-selected: #2f2d2b;
 
 	--nb-brand: #fcc620;
-	--nb-primary: #f3f3f3;
-	--nb-primary-foreground: #202020;
-	--nb-primary-hover: #bdbdbd;
-	--nb-primary-text: #f3f3f3;
+	--nb-primary: #f4f2ee;
+	--nb-primary-foreground: #151311;
+	--nb-primary-hover: #c0bbb4;
+	--nb-primary-text: #f4f2ee;
 
 	--nb-border: transparent;
-	--nb-border-strong: #4a4a4a;
-	--nb-line: #3a3a3a;
-	--nb-ring: #f3f3f3;
+	--nb-border-strong: #3f3d3b;
+	--nb-line: #2f2d2b;
+	--nb-ring: #f4f2ee;
 
-	--nb-info: #bdbdbd;
-	--nb-info-foreground: #bdbdbd;
-	--nb-info-muted: rgba(243, 243, 243, 0.07);
+	--nb-info: #c0bbb4;
+	--nb-info-foreground: #c0bbb4;
+	--nb-info-muted: rgba(244, 242, 238, 0.07);
 
-	--nb-success: #9e9e9e;
-	--nb-success-foreground: #9e9e9e;
-	--nb-success-muted: rgba(243, 243, 243, 0.06);
+	--nb-success: #a19d97;
+	--nb-success-foreground: #a19d97;
+	--nb-success-muted: rgba(244, 242, 238, 0.06);
 	--nb-pass: #5cc48a;
 
 	--nb-warning: #eaa646;

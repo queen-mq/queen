@@ -17,7 +17,7 @@ export const prerender = true;
 
 const CARD = { w: 1200, h: 630 };
 /** The dark theme's colours: src/styles/globals.css and the map's own tokens in QueenMap.astro. */
-const C = { bg: "#202020", fg: "#f3f3f3", muted: "#9e9e9e", yellow: "#fcc620", dot: "#6f6a63", soft: "#aaa49c" };
+const C = { bg: "#151311", fg: "#f4f2ee", muted: "#a19d97", yellow: "#fcc620", dot: "#6f6a63", soft: "#aaa49c" };
 /** Where Inter's "central" baseline sits above its alphabetic one, in ems: SVG's dominant-baseline="central". */
 const CENTRAL = 0.3633;
 
