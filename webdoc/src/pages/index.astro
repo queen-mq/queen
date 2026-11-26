@@ -117,51 +117,46 @@ const cardStatic = "block rounded-card bg-card p-5";
         <HeroTree />
       </section>
 
-      {/* Under the hero, on the page: the definition, one line each, set apart
-          by a rule so it reads as one block (the five lines the README carries
-          too). Beside it the proof and the ways in; the limit in small under
-          both, so "ACID" and its price share the screen. */}
+      {/* Under the hero, on the page, three rows. The proof: four facts, each a
+          figure and what it counts, each a link to the page that backs it. The
+          definition: the five lines the README carries too, numbered, one per
+          row and wide enough to stay one line each, with the limit under them,
+          so "ACID" and its price share the screen. The ways in: the talk for a
+          reader who already runs another broker, the map for one who is new. */}
       <section>
-        <div class="mx-auto w-full max-w-5xl px-6 py-14 lg:px-10 lg:py-20">
-          <div class="grid gap-10 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center lg:gap-16">
-            <div data-md class="max-w-[38rem] space-y-1.5 border-l-2 border-line pl-4 text-[0.9375rem] leading-relaxed text-foreground/85 lg:text-[1rem]">
-              {hero.lines.map((l) => <p>{l}</p>)}
-            </div>
-            <div>
-              {/* The proof as pills: filled with the card tone, each a link to
-                  the page that backs it. Two by two from sm up, so four of them
-                  make a block rather than 3 + 1. */}
-              <ul class="flex flex-wrap gap-2.5 sm:grid sm:grid-cols-[repeat(2,max-content)]">
-                {
-                  hero.proof.map((p) => (
-                    <li>
-                      <a
-                        href={p.href}
-                        class="block rounded-ctl bg-card px-3 py-1.5 text-[0.875rem] text-foreground no-underline transition-colors hover:bg-selected"
-                      >
-                        {p.label}
-                      </a>
-                    </li>
-                  ))
-                }
-              </ul>
-              {/* The talk, for a reader who already runs another broker, and
-                  the map, every part and option on one screen. */}
-              <a
-                href={hero.talk.href}
-                class="mt-6 block w-fit text-[0.9375rem] font-medium text-foreground/85 no-underline transition-colors hover:text-foreground"
-              >
-                {hero.talk.label} <span class="text-muted-foreground">{hero.talk.more}</span> →
-              </a>
-              <a
-                href={hero.map.href}
-                class="mt-2 block w-fit text-[0.9375rem] font-medium text-foreground/85 no-underline transition-colors hover:text-foreground"
-              >
-                {hero.map.label} <span class="text-muted-foreground">{hero.map.more}</span> →
-              </a>
-            </div>
-          </div>
-          <p data-md class="mt-10 max-w-[40rem] text-[0.8125rem] leading-relaxed text-muted-foreground">
+        <div class="mx-auto w-full max-w-5xl px-6 py-16 lg:px-10 lg:py-24">
+          <ul class="grid grid-cols-2 gap-y-8 lg:grid-cols-4">
+            {
+              hero.proof.map((p) => (
+                <li class="border-l border-line pl-4 sm:pl-5">
+                  <a href={p.href} class="group block no-underline">
+                    <span class="block text-[1.25rem] font-semibold leading-tight tracking-[-0.02em] text-foreground sm:text-[1.5rem] lg:text-[1.625rem]">
+                      {p.figure}
+                    </span>
+                    <span class="mt-1 block text-[0.875rem] text-muted-foreground transition-colors group-hover:text-foreground">
+                      {p.caption}&nbsp;→
+                    </span>
+                  </a>
+                </li>
+              ))
+            }
+          </ul>
+
+          <ol class="mt-16 border-t border-line lg:mt-20">
+            {
+              hero.lines.map((l, i) => (
+                <li class="flex items-baseline gap-5 border-b border-line py-4 lg:gap-8 lg:py-5">
+                  <span class="w-6 shrink-0 font-mono text-[0.75rem] text-muted-foreground">
+                    {String(i + 1).padStart(2, "0")}
+                  </span>
+                  <p data-md class="text-[1.0625rem] leading-snug text-foreground lg:text-[1.25rem]">
+                    {l}
+                  </p>
+                </li>
+              ))
+            }
+          </ol>
+          <p data-md class="mt-5 pl-11 text-[0.8125rem] leading-relaxed text-muted-foreground lg:pl-14">
             {hero.limit.text}{" "}
             <a
               href={hero.limit.link.href}
@@ -170,6 +165,17 @@ const cardStatic = "block rounded-card bg-card p-5";
               {hero.limit.link.label} →
             </a>
           </p>
+
+          <div class="mt-14 grid gap-3 sm:grid-cols-2">
+            {
+              [hero.talk, hero.map].map((w) => (
+                <a href={w.href} class={card}>
+                  <span class="block text-[0.9375rem] font-semibold text-foreground">{w.label}</span>
+                  <span class="mt-1 block text-[0.9375rem] text-muted-foreground">{w.more}&nbsp;→</span>
+                </a>
+              ))
+            }
+          </div>
         </div>
       </section>
 

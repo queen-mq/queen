@@ -57,7 +57,7 @@ export function homepageBody(): string {
   lines.push(`*${hero.eyebrow}*`, "");
   lines.push(`${hero.lead.text.join(" ")} **${hero.lead.close}**`, "");
   lines.push(hero.lines.join("  \n"), "");
-  lines.push(hero.proof.map((p) => link(p)).join(" · "), "");
+  lines.push(hero.proof.map((p) => link({ label: `${p.figure} ${p.caption}`, href: p.href })).join(" · "), "");
   lines.push(
     `${link(hero.primary)} · ${link(hero.secondary)} · [GitHub](https://github.com/queen-mq/queen)`,
     "",

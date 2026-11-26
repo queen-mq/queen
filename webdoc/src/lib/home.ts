@@ -66,12 +66,16 @@ export const hero = {
     "So it's also the broker: any number of readers, replay from any point.",
     "One Rust binary, replicated with Raft, Apache-2.0. Nothing else to run.",
   ],
-  /** The proof, one short claim per pill, each a link to the page that backs it. */
+  /**
+   * The proof under the hero: four facts, each a figure and what it counts,
+   * each a link to the page that backs it. The markdown twin reads each as one
+   * claim, the figure and the caption together.
+   */
   proof: [
-    { label: "568 Jepsen tests passed", href: "/benchmarks/jepsen/" },
-    { label: "3M msg/s on three nodes", href: "/benchmarks/queen-vs-kafka/" },
-    { label: "In production at Smartness", href: "/introduction/about/" },
-    { label: "Rust, one binary, Apache-2.0", href: "https://github.com/queen-mq/queen" },
+    { figure: "568", caption: "Jepsen tests passed", href: "/benchmarks/jepsen/" },
+    { figure: "3M msg/s", caption: "on three nodes", href: "/benchmarks/queen-vs-kafka/" },
+    { figure: "In production", caption: "at Smartness", href: "/introduction/about/" },
+    { figure: "One binary", caption: "in Rust, Apache-2.0", href: "https://github.com/queen-mq/queen" },
   ],
   primary: { label: "Run it in five minutes", href: "#guide" },
   secondary: { label: "See the model", href: "/introduction/model/" },
