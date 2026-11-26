@@ -24,6 +24,16 @@ cursor row with its partition's next message, as before. Over three hours of a p
 load (75,000 partitions), the leader held a steady 32,000 records where 2.10.0 climbed to 149,000,
 at the same throughput and latency; Jepsen ran 30 tests with the window at 1 s, all valid.
 
+**Server: a node can give back the memory its in-memory tables leave scattered, without a restart.**
+Every row of the replicated tables is its own allocation, placed wherever the allocator had room when
+the row was written. After hours of partitions created and cleaned up, cursors moved and dedup rows
+expired, the rows still alive keep half-used allocator pages that cannot go back to the system, which
+is why a node uses less memory right after a restart: on a test cluster, a follower went from 0.955 to
+0.704 GB with the same rows. `QUEEN_STORE_REPACK_EVERY_S` (off by default) starts a background pass
+on every node that copies each table's rows into fresh allocations, a stripe at a time, and frees the
+old copies, the way the load at a restart builds the tables; `QUEEN_STORE_REPACK_ROWS_PER_S`
+(100,000) paces it, at most 1,024 rows under one table lock. It changes no row and nothing on disk.
+
 ## 2.10.0 - 2026-11-20
 
 **Upgrading from 2.9.x: a rolling restart.** 2.10.0 keeps the data format of 2.9.0 (cluster

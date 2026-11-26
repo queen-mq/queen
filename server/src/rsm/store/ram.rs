@@ -2736,6 +2736,305 @@ impl PrefixTable {
 }
 
 // ---------------------------------------------------------------------------
+// Repack
+// ---------------------------------------------------------------------------
+//
+// Every row is its own allocation, made wherever the allocator had room when
+// the row was last written, and the rows of every table share the allocator's
+// pages with whatever else the process allocates. A page goes back to the
+// kernel only once every object on it is free, so after hours of partitions
+// created and cleaned up, cursors moved and dedup rows expired, a few live
+// rows keep whole pages. The load at open builds each table in one sorted
+// pass, its rows side by side, which is why a node uses less memory after a
+// restart (2026-11-25: a follower's anon 0.955 -> 0.704 GB, same rows). A
+// repack does the load's work on a live table: it copies a stripe's rows into
+// fresh allocations, rebuilds its containers the way the load builds them, and
+// frees the old copies, so the pages they held can empty out.
+//
+// It changes no row and no dirty set. The dirty set may keep the OLD copy of a
+// row the repack moved: same bytes, and the next write of the row lets go of
+// it first, as a put does ([`TreeRows::put`]), or the next checkpoint cut
+// takes it. A scan that was handed a large value by reference keeps its copy
+// until it lets go. The old copies are freed after the lock is let go.
+
+/// A value longer than this keeps its allocation when its row is repacked: it
+/// sits in a page of its own size class or in a mapping of its own, which the
+/// allocator gives back whole once the value goes, so moving it would cost a
+/// copy and free nothing.
+pub(crate) const REPACK_VALUE_MAX: usize = 16 << 10;
+
+/// The rows one lock hold of a repack copies at most (a prefix stripe's one
+/// queue may be more: its rows are rebuilt together).
+pub(crate) const REPACK_CHUNK: usize = 1024;
+
+/// What a repack copied: rows, and value bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Repacked {
+    pub(crate) rows: u64,
+    pub(crate) bytes: u64,
+}
+
+/// Where a repack is in ONE table ([`RamTable::repack_step`]).
+#[derive(Default)]
+pub(crate) struct RepackPos {
+    /// The stripe of a dense or prefix table (the stripe count is its
+    /// overflow); unused in a tree table.
+    unit: usize,
+    /// The block rows of the dense stripe being repacked, taken when it
+    /// starts, the last one first.
+    blocks: Option<Vec<u64>>,
+    /// The prefixes of the prefix stripe being repacked, likewise.
+    prefixes: Option<Vec<RamKey>>,
+    /// A tree's (or an overflow's) last repacked key: the next chunk starts
+    /// after it.
+    after: Option<RamKey>,
+}
+
+/// The old copies one lock hold replaced, freed once the lock is let go.
+#[derive(Default)]
+struct Garbage {
+    vals: Vec<RamVal>,
+    maps: Vec<BTreeMap<RamKey, RamVal>>,
+    slots: Vec<Box<[Slot; SLOTS]>>,
+}
+
+/// `k` in an allocation of its own (an inline key has none).
+fn fresh_key(k: &RamKey) -> RamKey {
+    match k {
+        RamKey::Inline(..) => k.clone(),
+        RamKey::Heap(a) => RamKey::Heap(Arc::from(&a[..])),
+    }
+}
+
+/// `v`'s stored bytes in an allocation of their own; a value past
+/// [`REPACK_VALUE_MAX`] stays where it is.
+fn fresh_val(v: &RamVal, n: &mut Repacked) -> RamVal {
+    n.rows += 1;
+    if v.len() > REPACK_VALUE_MAX {
+        return v.clone();
+    }
+    n.bytes += v.len() as u64;
+    make_val(v, &[])
+}
+
+fn fresh_row(k: &RamKey, v: &RamVal, n: &mut Repacked) -> (RamKey, RamVal) {
+    (fresh_key(k), fresh_val(v, n))
+}
+
+/// One pid's rows, copied, in the same shape.
+fn fresh_slot(s: &Slot, n: &mut Repacked) -> Slot {
+    match s {
+        Slot::Empty => Slot::Empty,
+        Slot::One(k, v) => {
+            let (k, v) = fresh_row(k, v, n);
+            Slot::One(k, v)
+        }
+        Slot::Many(rows) => Slot::Many(rows.iter().map(|(k, v)| fresh_row(k, v, n)).collect()),
+        // In key order: the collect is a bulk build.
+        Slot::Tree(m) => Slot::Tree(m.iter().map(|(k, v)| fresh_row(k, v, n)).collect()),
+    }
+}
+
+impl TreeRows {
+    /// One lock hold of a repack, from after `after`. A map of at most
+    /// [`REPACK_CHUNK`] rows is rebuilt whole the first time — fresh keys,
+    /// values and nodes, in one bulk build; a bigger one gets fresh values,
+    /// `budget` of them in key order (its keys and nodes stay: they are written
+    /// once, when the row comes). Returns the rows copied and whether the map
+    /// is done.
+    fn repack_chunk(
+        &mut self,
+        after: &mut Option<RamKey>,
+        budget: usize,
+        n: &mut Repacked,
+        g: &mut Garbage,
+    ) -> (usize, bool) {
+        let budget = budget.max(1);
+        if after.is_none() && self.map.len() <= REPACK_CHUNK {
+            let fresh: BTreeMap<RamKey, RamVal> =
+                self.map.iter().map(|(k, v)| fresh_row(k, v, n)).collect();
+            let rows = fresh.len();
+            g.maps.push(std::mem::replace(&mut self.map, fresh));
+            return (rows, true);
+        }
+        let from = after.clone();
+        let lo = from
+            .as_ref()
+            .map_or(Bound::Unbounded, |k| Bound::Excluded(k.bytes()));
+        let mut rows = 0;
+        let mut last = None;
+        for (k, v) in self
+            .map
+            .range_mut::<[u8], _>((lo, Bound::Unbounded))
+            .take(budget)
+        {
+            let fresh = fresh_val(v, n);
+            g.vals.push(std::mem::replace(v, fresh));
+            last = Some(k.clone());
+            rows += 1;
+        }
+        if last.is_some() {
+            *after = last;
+        }
+        (rows, rows < budget)
+    }
+}
+
+impl TreeTable {
+    fn repack_step(&self, pos: &mut RepackPos, budget: usize, n: &mut Repacked) -> bool {
+        let budget = budget.max(1);
+        let mut spent = 0;
+        while spent < budget {
+            let mut g = Garbage::default();
+            let (rows, done) = wr(&self.rows).repack_chunk(
+                &mut pos.after,
+                (budget - spent).min(REPACK_CHUNK),
+                n,
+                &mut g,
+            );
+            drop(g);
+            if done {
+                return true;
+            }
+            spent += rows.max(1);
+        }
+        false
+    }
+}
+
+/// An overflow's repack step (dense and prefix tables): a tree's.
+fn repack_overflow(
+    ov: &RwLock<TreeRows>,
+    pos: &mut RepackPos,
+    budget: usize,
+    n: &mut Repacked,
+) -> (usize, bool) {
+    let mut g = Garbage::default();
+    let r = wr(ov).repack_chunk(&mut pos.after, budget.min(REPACK_CHUNK), n, &mut g);
+    drop(g);
+    r
+}
+
+impl DenseTable {
+    /// The stripes one at a time — each block's slots rebuilt from fresh
+    /// copies of its rows, at most [`REPACK_CHUNK`] rows a lock hold, then the
+    /// stripe's block map moved into a fresh one — then the overflow.
+    fn repack_step(&self, pos: &mut RepackPos, budget: usize, n: &mut Repacked) -> bool {
+        let budget = budget.max(1);
+        let mut spent = 0;
+        while spent < budget {
+            if pos.unit >= self.stripes.len() {
+                let (rows, done) = repack_overflow(&self.overflow, pos, budget - spent, n);
+                if done {
+                    return true;
+                }
+                spent += rows.max(1);
+                continue;
+            }
+            let lock = &self.stripes[pos.unit].0;
+            if pos.blocks.is_none() {
+                let mut rows: Vec<u64> = rd(lock).blocks.keys().copied().collect();
+                rows.sort_unstable_by(|a, b| b.cmp(a));
+                pos.blocks = Some(rows);
+            }
+            let mut g = Garbage::default();
+            let mut finished = false;
+            {
+                let mut st = wr(lock);
+                let todo = pos.blocks.as_mut().expect("taken above");
+                let cap = ((budget - spent).min(REPACK_CHUNK)) as u64;
+                let before = n.rows;
+                while n.rows - before < cap {
+                    let Some(row) = todo.pop() else {
+                        // Every block done: the block map itself, its blocks
+                        // moved into a fresh table.
+                        let old = std::mem::take(&mut st.blocks);
+                        let mut fresh =
+                            HashMap::with_capacity_and_hasher(old.len(), FxBuild::default());
+                        fresh.extend(old);
+                        st.blocks = fresh;
+                        finished = true;
+                        break;
+                    };
+                    // A block a write removed since the stripe started is gone;
+                    // one it added waits for the next pass.
+                    if let Some(b) = st.blocks.get_mut(&row) {
+                        let slots: Box<[Slot; SLOTS]> =
+                            Box::new(std::array::from_fn(|i| fresh_slot(&b.slots[i], n)));
+                        g.slots.push(std::mem::replace(&mut b.slots, slots));
+                    }
+                }
+                spent += ((n.rows - before) as usize).max(1);
+            }
+            drop(g);
+            if finished {
+                pos.unit += 1;
+                pos.blocks = None;
+            }
+        }
+        false
+    }
+}
+
+impl PrefixTable {
+    /// The stripes one at a time — each prefix's rows rebuilt from fresh
+    /// copies in one bulk build, prefixes until [`REPACK_CHUNK`] rows a lock
+    /// hold, then the stripe's prefix map moved into a fresh one — then the
+    /// overflow.
+    fn repack_step(&self, pos: &mut RepackPos, budget: usize, n: &mut Repacked) -> bool {
+        let budget = budget.max(1);
+        let mut spent = 0;
+        while spent < budget {
+            if pos.unit >= self.stripes.len() {
+                let (rows, done) = repack_overflow(&self.overflow, pos, budget - spent, n);
+                if done {
+                    return true;
+                }
+                spent += rows.max(1);
+                continue;
+            }
+            let lock = &self.stripes[pos.unit].0;
+            if pos.prefixes.is_none() {
+                let mut ps: Vec<RamKey> = rd(lock).groups.keys().cloned().collect();
+                ps.sort_unstable_by(|a, b| b.cmp(a));
+                pos.prefixes = Some(ps);
+            }
+            let mut g = Garbage::default();
+            let mut finished = false;
+            {
+                let mut st = wr(lock);
+                let todo = pos.prefixes.as_mut().expect("taken above");
+                let cap = ((budget - spent).min(REPACK_CHUNK)) as u64;
+                let before = n.rows;
+                while n.rows - before < cap {
+                    let Some(p) = todo.pop() else {
+                        let old = std::mem::take(&mut st.groups);
+                        let mut fresh =
+                            HashMap::with_capacity_and_hasher(old.len(), FxBuild::default());
+                        fresh.extend(old);
+                        st.groups = fresh;
+                        finished = true;
+                        break;
+                    };
+                    if let Some(rows) = st.groups.get_mut(p.bytes()) {
+                        let fresh: BTreeMap<RamKey, RamVal> =
+                            rows.iter().map(|(k, v)| fresh_row(k, v, n)).collect();
+                        g.maps.push(std::mem::replace(rows, fresh));
+                    }
+                }
+                spent += ((n.rows - before) as usize).max(1);
+            }
+            drop(g);
+            if finished {
+                pos.unit += 1;
+                pos.prefixes = None;
+            }
+        }
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The table
 // ---------------------------------------------------------------------------
 
@@ -2953,6 +3252,19 @@ impl RamTable {
             RamTable::Tree(t) => rd(&t.rows).copy_range(lo, hi, rev, take, out),
             RamTable::Dense(t) => t.copy_range(lo, hi, rev, take, out),
             RamTable::Prefixed(t) => t.copy_range(lo, hi, rev, take, out),
+        }
+    }
+
+    /// One step of a repack of this table (the Repack section above): about
+    /// `budget` rows copied into fresh allocations, at most [`REPACK_CHUNK`]
+    /// under one lock hold, from where `pos` stopped. True when the table is
+    /// done; the next table starts with a fresh `pos`. Rows, values and the
+    /// dirty set are unchanged.
+    pub(crate) fn repack_step(&self, pos: &mut RepackPos, budget: usize, n: &mut Repacked) -> bool {
+        match self {
+            RamTable::Tree(t) => t.repack_step(pos, budget, n),
+            RamTable::Dense(t) => t.repack_step(pos, budget, n),
+            RamTable::Prefixed(t) => t.repack_step(pos, budget, n),
         }
     }
 

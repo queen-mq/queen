@@ -17,8 +17,8 @@ use std::ops::Bound;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::ram::{DirtyMap, Layout, RamKey, RamTable, ScanBuf, StripeBy};
-use super::{HeedStore, Keyspace, Reads, Store, StoreOpts, Writes};
+use super::ram::{DirtyMap, Layout, RamKey, RamTable, RepackPos, Repacked, ScanBuf, StripeBy};
+use super::{HeedStore, Keyspace, Reads, RepackCursor, Store, StoreOpts, Writes};
 
 /// xorshift64*: deterministic, no dependency.
 struct Rng(u64);
@@ -294,6 +294,13 @@ fn run_on_pool(l: Layout, pool: Vec<Vec<u8>>, seed: u64, ops: usize) {
     let t = RamTable::with_layout(l);
     let mut m = Model::default();
     let mut r = Rng::new(seed);
+    // Repack steps between the operations, on a random stream of their own so
+    // the operations are the same with or without them: a repack must change
+    // nothing the model can see, at any point of a pass.
+    let mut rr = Rng::new(seed ^ 0x5EED_4E7A_C0DE);
+    let mut pos = RepackPos::default();
+    let mut repacked = Repacked::default();
+    let mut passes = 0u32;
     let takes = [
         1usize,
         2,
@@ -310,6 +317,10 @@ fn run_on_pool(l: Layout, pool: Vec<Vec<u8>>, seed: u64, ops: usize) {
         usize::MAX,
     ];
     for op in 0..ops {
+        if rr.chance(60) && t.repack_step(&mut pos, 1 + rr.below(48), &mut repacked) {
+            pos = RepackPos::default();
+            passes += 1;
+        }
         match r.below(100) {
             0..=39 => {
                 let k = &pool[r.below(pool.len())];
@@ -424,6 +435,12 @@ fn run_on_pool(l: Layout, pool: Vec<Vec<u8>>, seed: u64, ops: usize) {
             }
         }
     }
+    // A whole pass more, then the model: rows, order, dirty set.
+    let mut pos = RepackPos::default();
+    while !t.repack_step(&mut pos, 7, &mut repacked) {}
+    assert!(passes > 0, "no repack pass ended between the operations");
+    assert_eq!(t.len(), m.map.len(), "after the repack: len");
+    assert_eq!(t.dirty_len(), m.dirty.len(), "after the repack: dirty len");
     // The whole table, both ways.
     assert_eq!(
         table_range(&t, Bound::Unbounded, Bound::Unbounded, false, usize::MAX),
@@ -433,6 +450,10 @@ fn run_on_pool(l: Layout, pool: Vec<Vec<u8>>, seed: u64, ops: usize) {
         table_range(&t, Bound::Unbounded, Bound::Unbounded, true, usize::MAX),
         m.range(Bound::Unbounded, Bound::Unbounded, true, usize::MAX)
     );
+    // The dirty set the repacks left: every key, with its last write.
+    let mut maps = Vec::new();
+    t.take_dirty(&mut maps);
+    assert_eq!(dirty_of(maps), m.dirty, "after the repack: dirty set");
 
     // A bulk load of the same rows is the same table, with nothing dirty.
     let rows: Vec<(RamKey, super::ram::RamVal)> = m
@@ -1118,4 +1139,257 @@ fn the_fast_typed_reads_answer_what_the_owned_reads_answer() {
         Ok(())
     })
     .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The repack: fresh allocations, the same rows, beside writers, in a store
+// ---------------------------------------------------------------------------
+
+fn repack_layouts() -> Vec<(Layout, Vec<Vec<u8>>)> {
+    vec![
+        (Layout::Tree, key_pool(&[])),
+        (
+            Layout::Dense {
+                lead: &[],
+                empty_fast_path: false,
+            },
+            key_pool(&[]),
+        ),
+        (
+            Layout::Dense {
+                lead: &[0],
+                empty_fast_path: true,
+            },
+            key_pool(&[0]),
+        ),
+        (
+            Layout::Prefixed {
+                names: 2,
+                stripe_by: StripeBy::SuffixHash,
+            },
+            name_pool(),
+        ),
+        (
+            Layout::Prefixed {
+                names: 3,
+                stripe_by: StripeBy::SuffixPid,
+            },
+            name_pool(),
+        ),
+    ]
+}
+
+/// A pass moves every value up to `REPACK_VALUE_MAX` into a fresh allocation
+/// (its address changes while the old one is still held) and leaves a longer
+/// one where it is; the rows, their order and the dirty set are unchanged, and
+/// the pass counts every row once.
+#[test]
+fn a_repack_moves_small_values_and_keeps_large_ones() {
+    use super::ram::REPACK_VALUE_MAX;
+    use std::sync::Arc;
+    let big = vec![0xB1u8; REPACK_VALUE_MAX + 1];
+    for (l, pool) in repack_layouts() {
+        let t = RamTable::with_layout(l);
+        let mut m = Model::default();
+        for (i, k) in pool.iter().enumerate() {
+            let v = if i % 7 == 3 {
+                big.clone()
+            } else {
+                format!("value-{i}").into_bytes()
+            };
+            drop(t.put(k, &v, &[]));
+            m.put(k, &v);
+        }
+        // A checkpoint cut, then some rows written again: some rows dirty,
+        // some clean.
+        let mut maps = Vec::new();
+        t.take_dirty(&mut maps);
+        drop(maps);
+        m.dirty.clear();
+        for k in pool.iter().step_by(3) {
+            let v = format!("again-{}", k.len()).into_bytes();
+            drop(t.put(k, &v, &[]));
+            m.put(k, &v);
+        }
+        let before: Vec<(Vec<u8>, Arc<[u8]>)> = pool
+            .iter()
+            .filter_map(|k| t.get(k).map(|v| (k.clone(), v)))
+            .collect();
+        let mut pos = RepackPos::default();
+        let mut n = Repacked::default();
+        while !t.repack_step(&mut pos, 5, &mut n) {}
+        for (k, was) in &before {
+            let now = t.get(k).expect("still there");
+            assert_eq!(&*now, &**was, "{l:?}: the bytes of {k:?}");
+            if now.len() > REPACK_VALUE_MAX {
+                assert!(
+                    Arc::ptr_eq(&now, was),
+                    "{l:?}: a large value keeps its allocation"
+                );
+            } else {
+                assert!(!Arc::ptr_eq(&now, was), "{l:?}: {k:?} was not moved");
+            }
+        }
+        assert_eq!(n.rows as usize, m.map.len(), "{l:?}: every row once");
+        let small: u64 = m
+            .map
+            .values()
+            .filter(|v| v.len() <= REPACK_VALUE_MAX)
+            .map(|v| v.len() as u64)
+            .sum();
+        assert_eq!(n.bytes, small, "{l:?}: the bytes it copied");
+        let all = (Bound::Unbounded, Bound::Unbounded);
+        assert_eq!(
+            table_range(&t, all.0, all.1, false, usize::MAX),
+            m.range(all.0, all.1, false, usize::MAX),
+            "{l:?}: the rows"
+        );
+        let mut maps = Vec::new();
+        t.take_dirty(&mut maps);
+        assert_eq!(dirty_of(maps), m.dirty, "{l:?}: the dirty set");
+    }
+}
+
+/// Writers and a repack at once: four threads put and remove keys of their
+/// own while a fifth repacks the table pass after pass. Every key ends at its
+/// writer's last write, and the dirty set holds exactly that.
+#[test]
+fn a_repack_beside_writers_loses_no_write() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    for (l, pool) in repack_layouts() {
+        let t = Arc::new(RamTable::with_layout(l));
+        let stop = Arc::new(AtomicBool::new(false));
+        let repacker = {
+            let (t, stop) = (t.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut pos = RepackPos::default();
+                let mut n = Repacked::default();
+                let mut passes = 0u32;
+                while !stop.load(Ordering::Relaxed) {
+                    if t.repack_step(&mut pos, 64, &mut n) {
+                        pos = RepackPos::default();
+                        passes += 1;
+                    }
+                }
+                passes
+            })
+        };
+        let writers: Vec<_> = (0..4usize)
+            .map(|w| {
+                let t = t.clone();
+                let keys: Vec<Vec<u8>> = pool
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| i % 4 == w)
+                    .map(|(_, k)| k.clone())
+                    .collect();
+                std::thread::spawn(move || {
+                    let mut r = Rng::new(700 + w as u64);
+                    let mut last: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::new();
+                    for _ in 0..20_000 {
+                        let k = &keys[r.below(keys.len())];
+                        if r.chance(250) {
+                            drop(t.remove(k));
+                            last.insert(k.clone(), None);
+                        } else {
+                            let v = value(&mut r, k);
+                            drop(t.put(k, &v, &[]));
+                            last.insert(k.clone(), Some(v));
+                        }
+                    }
+                    last
+                })
+            })
+            .collect();
+        let mut want: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::new();
+        for h in writers {
+            want.extend(h.join().expect("writer"));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let passes = repacker.join().expect("repacker");
+        assert!(passes > 0, "{l:?}: no repack pass ran beside the writers");
+        for (k, v) in &want {
+            assert_eq!(t.get(k).map(|x| x.to_vec()), *v, "{l:?}: {k:?}");
+        }
+        assert_eq!(
+            t.len(),
+            want.values().filter(|v| v.is_some()).count(),
+            "{l:?}: len"
+        );
+        let mut maps = Vec::new();
+        t.take_dirty(&mut maps);
+        assert_eq!(dirty_of(maps), want, "{l:?}: the dirty set");
+    }
+}
+
+/// Through the store: passes of `repack_step` between writes and durable
+/// points leave every keyspace reading what was written, the checkpoint
+/// holding what was durable (a reopen), and the scrub finding nothing; the
+/// counters say a pass ran.
+#[test]
+fn a_repack_pass_leaves_the_store_and_its_checkpoint_as_they_were() {
+    let mut t = Tmp::new();
+    let spaces = [
+        (Keyspace::Cursors, key_pool(&[])),
+        (Keyspace::Counters, key_pool(&[0])),
+        (Keyspace::PartitionsByKey, name_pool()),
+        (Keyspace::Kv, key_pool(&[])),
+    ];
+    let mut live: Vec<BTreeMap<Vec<u8>, Vec<u8>>> = vec![BTreeMap::new(); spaces.len()];
+    let mut durable = live.clone();
+    let mut r = Rng::new(4242);
+    let mut cur = RepackCursor::default();
+    let mut passes = 0u32;
+    {
+        let s = t.s();
+        let mut w = s.write().unwrap();
+        for round in 0..6_000 {
+            let i = r.below(spaces.len());
+            let (ks, pool) = &spaces[i];
+            let k = &pool[r.below(pool.len())];
+            if r.chance(200) {
+                w.del_raw(*ks, k).unwrap();
+                live[i].remove(k);
+            } else {
+                let v = value(&mut r, k);
+                w.put_raw(*ks, k, &v).unwrap();
+                live[i].insert(k.clone(), v);
+            }
+            if round % 50 == 0 && s.repack_step(&mut cur, 1 + r.below(200)).unwrap() {
+                cur = RepackCursor::default();
+                passes += 1;
+            }
+            if round % 900 == 899 {
+                w.durable_commit().unwrap();
+                durable = live.clone();
+            }
+        }
+        while !s.repack_step(&mut cur, 64).unwrap() {}
+        passes += 1;
+        for (i, (ks, _)) in spaces.iter().enumerate() {
+            let got = run(&w, *ks, &[], &[], usize::MAX, false, None).1;
+            let want: Rows = live[i].clone().into_iter().collect();
+            assert!(got == want, "{}: live after the repack", ks.name());
+        }
+        w.durable_commit().unwrap();
+        durable = live.clone();
+        let snap = s.metrics().snapshot();
+        let count = |name: &str| snap.iter().find(|(n, _)| *n == name).map(|(_, v)| *v);
+        assert!(count("repacked_rows").unwrap_or(0) > 0, "no row repacked");
+        assert!(count("repack_passes").unwrap_or(0) >= u64::from(passes.min(1)));
+    }
+    assert!(passes > 1, "the passes between the writes did not end");
+    t.s().scrub().expect("the scrub after the repack");
+    t.reopen();
+    t.s()
+        .read(|rd| {
+            for (i, (ks, _)) in spaces.iter().enumerate() {
+                let got = run(rd, *ks, &[], &[], usize::MAX, false, None).1;
+                let want: Rows = durable[i].clone().into_iter().collect();
+                assert!(got == want, "{}: reopened", ks.name());
+            }
+            Ok(())
+        })
+        .unwrap();
 }

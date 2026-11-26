@@ -139,7 +139,9 @@ use super::integrity::{
     FORMAT_KEY,
 };
 pub(crate) use super::ram::RamKey;
-use super::ram::{range_is_walkable, Arena, DirtyMap, PooledBuf, RamTable, RamVal, ScanBuf};
+use super::ram::{
+    range_is_walkable, Arena, DirtyMap, PooledBuf, RamTable, RamVal, RepackPos, Repacked, ScanBuf,
+};
 use super::sigbus::{self, MapWatch};
 use super::{
     CheckpointCut, EntryGate, Keyspace, MapUsage, Result, Scope, Store, StoreError, StoreMetrics,
@@ -310,6 +312,18 @@ static CKPT_TXNS_WITHOUT_HASHES: std::sync::LazyLock<bool> = std::sync::LazyLock
         "whole"
     )
 });
+
+/// Where a repack pass is ([`HeedStore::repack_step`]): the keyspace, the
+/// place in its table, and what the pass has copied so far.
+#[derive(Default)]
+pub struct RepackCursor {
+    /// Index into [`Keyspace::ALL`].
+    ks: usize,
+    pos: RepackPos,
+    /// Rows and value bytes copied by this pass.
+    pub rows: u64,
+    pub bytes: u64,
+}
 
 pub struct HeedStore {
     env: Env<WithoutTls>,
@@ -999,6 +1013,43 @@ impl HeedStore {
             return Err(self.corrupt_found(first.clone()));
         }
         Ok(report)
+    }
+
+    /// One bounded step of a repack pass ([`crate::rsm::repack`]): about
+    /// `budget` rows of the RAM tables copied into fresh allocations and their
+    /// containers rebuilt the way the load at open builds them, resuming where
+    /// `cur` stopped ([`RamTable::repack_step`]). Returns whether the pass has
+    /// walked every RAM keyspace (`cur` then restarts). It changes no row, no
+    /// dirty set and nothing in the file: a reader and the next checkpoint see
+    /// the same bytes.
+    ///
+    /// No clock here (I2): the caller paces the steps and times them.
+    pub fn repack_step(&self, cur: &mut RepackCursor, budget: usize) -> Result<bool> {
+        self.check_poison()?;
+        let budget = budget.max(1) as u64;
+        let mut n = Repacked::default();
+        while cur.ks < Keyspace::ALL.len() {
+            if let Some(t) = self.ram(Keyspace::ALL[cur.ks]) {
+                if n.rows >= budget {
+                    break;
+                }
+                let left = usize::try_from(budget - n.rows).unwrap_or(usize::MAX);
+                if !t.repack_step(&mut cur.pos, left, &mut n) {
+                    break;
+                }
+            }
+            cur.ks += 1;
+            cur.pos = RepackPos::default();
+        }
+        StoreMetrics::inc(&self.metrics.repacked_rows, n.rows);
+        StoreMetrics::inc(&self.metrics.repacked_bytes, n.bytes);
+        cur.rows += n.rows;
+        cur.bytes += n.bytes;
+        let done = cur.ks >= Keyspace::ALL.len();
+        if done {
+            StoreMetrics::inc(&self.metrics.repack_passes, 1);
+        }
+        Ok(done)
     }
 
     /// One bounded step of the background scrub: at most `budget` rows, the

@@ -1031,6 +1031,8 @@ impl RaftFacade {
         );
         // On every node: the damage it looks for is this node's own.
         crate::rsm::scrub::spawn(&store, crate::rsm::scrub::Config::from_env());
+        // On every node, when asked: the memory it gives back is this node's.
+        crate::rsm::repack::spawn(&store, crate::rsm::repack::Config::from_env());
 
         // What makes this cluster a standby the first time one of its nodes
         // leads: a seed taken here (read now, before anything writes to the
