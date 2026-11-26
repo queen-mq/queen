@@ -14,8 +14,9 @@
 //! at a time, without the restart. Nothing a reader or a checkpoint sees
 //! changes.
 //!
-//! - `QUEEN_STORE_REPACK_EVERY_S` (default 0: off): a pass starts this long
-//!   after the previous one started, the first this long after the open.
+//! - `QUEEN_STORE_REPACK_EVERY_S` (default 600: a pass every 10 minutes; 0
+//!   turns the repack off): a pass starts this long after the previous one
+//!   started, the first this long after the open.
 //! - `QUEEN_STORE_REPACK_ROWS_PER_S` (default 100000): the pace inside a pass,
 //!   a tenth of it every 100 ms, in calls of at most [`CALL_ROWS`] rows (a
 //!   table's lock is held for about that many copies at most).
@@ -35,7 +36,8 @@ use crate::rsm::store::{HeedStore, RepackCursor};
 /// How often a pass runs and how fast ([`Config::from_env`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
-    /// Between the starts of two passes; zero turns the repack off.
+    /// Between the starts of two passes (10 minutes); zero turns the repack
+    /// off.
     pub every: Duration,
     /// Rows copied per second while a pass runs.
     pub rows_per_s: u64,
@@ -44,7 +46,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            every: Duration::ZERO,
+            every: Duration::from_secs(600),
             rows_per_s: 100_000,
         }
     }
@@ -181,9 +183,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_repack_is_off_unless_asked() {
+    fn a_pass_runs_every_ten_minutes_unless_told_otherwise() {
         assert_eq!(Config::from_vars(|_| None), Config::default());
-        assert!(Config::default().every.is_zero());
+        assert_eq!(Config::default().every, Duration::from_secs(600));
+        // Zero turns it off.
+        let off = Config::from_vars(|k| (k == "QUEEN_STORE_REPACK_EVERY_S").then(|| "0".into()));
+        assert!(off.every.is_zero());
         let c = Config::from_vars(|k| match k {
             "QUEEN_STORE_REPACK_EVERY_S" => Some("3600".into()),
             "QUEEN_STORE_REPACK_ROWS_PER_S" => Some(" 50000 ".into()),

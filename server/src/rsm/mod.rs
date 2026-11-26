@@ -106,8 +106,9 @@ pub mod state;
 pub mod store;
 
 /// The store's node-local background repack, paced by `QUEEN_STORE_REPACK_*`
-/// (off by default): the RAM tables' rows copied into fresh allocations, so
-/// memory left in half-used allocator pages can go back to the kernel.
+/// (a pass every 10 minutes by default): the RAM tables' rows copied into
+/// fresh allocations, so memory left in half-used allocator pages can go back
+/// to the kernel.
 pub mod repack;
 
 /// The store's node-local background scrub, paced by `QUEEN_STORE_SCRUB_*`.

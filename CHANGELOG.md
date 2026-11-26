@@ -29,10 +29,15 @@ Every row of the replicated tables is its own allocation, placed wherever the al
 the row was written. After hours of partitions created and cleaned up, cursors moved and dedup rows
 expired, the rows still alive keep half-used allocator pages that cannot go back to the system, which
 is why a node uses less memory right after a restart: on a test cluster, a follower went from 0.955 to
-0.704 GB with the same rows. `QUEEN_STORE_REPACK_EVERY_S` (off by default) starts a background pass
-on every node that copies each table's rows into fresh allocations, a stripe at a time, and frees the
-old copies, the way the load at a restart builds the tables; `QUEEN_STORE_REPACK_ROWS_PER_S`
-(100,000) paces it, at most 1,024 rows under one table lock. It changes no row and nothing on disk.
+0.704 GB with the same rows. Now every node runs a background pass every 10 minutes
+(`QUEEN_STORE_REPACK_EVERY_S`, 600; `0` turns it off) that copies each table's rows into fresh
+allocations, a stripe at a time, and frees the old copies, the way the load at a restart builds the
+tables; `QUEEN_STORE_REPACK_ROWS_PER_S` (100,000) paces it, at most 1,024 rows under one table lock.
+It changes no row and nothing on disk. On a three-node test cluster under three hours of churn, the
+follower that repacked held about 15% less memory than the one that did not, with the same rows, and a
+restart gave back 0.17-0.19 GB on the second but only 0.05-0.07 GB on the first. With a pass every
+minute, push up to 4 million messages a second, transactions up to 1.5 million and 10,000 new
+partitions a second ran at the same throughput, CPU and latency.
 
 **Server: the dead letters of all queues together have a memory budget.** A dead letter keeps a
 full copy of its message's body, in memory on every node, loaded again at every start. The caps per
