@@ -1266,6 +1266,126 @@ fn the_value_bytes_of_a_table_follow_every_change() {
     }
 }
 
+/// Each container part of a layout's `big` test: a dense pid holding 5,000
+/// rows (its slot a tree), a prefix stripe's one group of 5,000 (every pid in
+/// stripe 0), a no-name prefix table of 20,000 rows (1,250 a stripe, as
+/// `request_ids`), a tree of 5,000; each beside a few small rows.
+fn layouts_with_a_big_part() -> Vec<(Layout, Vec<Vec<u8>>)> {
+    use super::keys;
+    let mut dense: Vec<Vec<u8>> = (0u32..5_000)
+        .map(|i| [&5u64.to_be_bytes()[..], &i.to_be_bytes()[..]].concat())
+        .collect();
+    dense.extend((0u64..40).map(|p| [&(p * 3 + 100).to_be_bytes()[..], b"g"].concat()));
+    let mut grouped: Vec<Vec<u8>> = (0u64..5_000)
+        .map(|i| keys::pending("t", "q", "g", i * 16))
+        .collect();
+    grouped.extend((0u64..40).map(|p| keys::pending("t", "q2", "g", p)));
+    let unnamed: Vec<Vec<u8>> = (0u64..20_000)
+        .map(|i| {
+            (i.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                .to_be_bytes()
+                .to_vec()
+        })
+        .collect();
+    let tree: Vec<Vec<u8>> = (0u32..5_000)
+        .map(|i| format!("kv/{i:08}").into_bytes())
+        .collect();
+    vec![
+        (
+            Layout::Dense {
+                lead: &[],
+                empty_fast_path: false,
+            },
+            dense,
+        ),
+        (
+            Layout::Prefixed {
+                names: 3,
+                stripe_by: StripeBy::SuffixPid,
+            },
+            grouped,
+        ),
+        (
+            Layout::Prefixed {
+                names: 0,
+                stripe_by: StripeBy::SuffixHash,
+            },
+            unnamed,
+        ),
+        (Layout::Tree, tree),
+    ]
+}
+
+/// No lock hold of a repack copies more than [`REPACK_CHUNK`] rows, however
+/// big one part of a container is: a part past it keeps its keys and nodes
+/// and gets fresh values, a chunk a hold, resumed after the writes made in
+/// between; the pass moves every value nobody rewrote, and leaves the table,
+/// its byte count and its dirty set the model's. With a budget of one row a
+/// call makes one lock hold, so a call's rows are a hold's.
+#[test]
+fn no_repack_lock_hold_copies_more_than_a_chunk() {
+    use super::ram::REPACK_CHUNK;
+    for (l, keys) in layouts_with_a_big_part() {
+        let t = RamTable::with_layout(l);
+        let mut m = Model::default();
+        for (i, k) in keys.iter().enumerate() {
+            let v = vec![(i % 251) as u8; 24];
+            drop(t.put(k, &v, &[]));
+            m.put(k, &v);
+        }
+        let old: Vec<super::ram::RamVal> = keys.iter().map(|k| t.get(k).expect("put")).collect();
+        let mut rewritten = std::collections::HashSet::new();
+        let mut r = Rng::new(0x5EED);
+        let (mut pos, mut n, mut calls, mut most) =
+            (RepackPos::default(), Repacked::default(), 0u64, 0u64);
+        loop {
+            let before = n.rows;
+            let done = t.repack_step(&mut pos, 1, &mut n);
+            most = most.max(n.rows - before);
+            calls += 1;
+            if calls % 25 == 0 {
+                let i = r.below(keys.len());
+                if r.below(2) == 0 {
+                    drop(t.remove(&keys[i]));
+                    m.remove(&keys[i]);
+                } else {
+                    drop(t.put(&keys[i], b"rewritten", &[]));
+                    m.put(&keys[i], b"rewritten");
+                }
+                rewritten.insert(i);
+            }
+            if done {
+                break;
+            }
+            assert!(calls < 1_000_000, "{l:?}: the pass never ends");
+        }
+        assert!(
+            most <= REPACK_CHUNK as u64,
+            "{l:?}: one lock hold copied {most} rows"
+        );
+        for (i, k) in keys.iter().enumerate() {
+            if rewritten.contains(&i) {
+                continue;
+            }
+            let now = t.get(k).expect("a row nobody removed");
+            assert!(
+                !std::sync::Arc::ptr_eq(&now, &old[i]),
+                "{l:?}: row {i} kept its allocation"
+            );
+        }
+        drop(old);
+        assert_eq!(
+            table_range(&t, Bound::Unbounded, Bound::Unbounded, false, usize::MAX),
+            m.range(Bound::Unbounded, Bound::Unbounded, false, usize::MAX),
+            "{l:?}"
+        );
+        assert_eq!(t.value_bytes(), m.bytes(), "{l:?}");
+        let mut maps = Vec::new();
+        t.take_dirty(&mut maps);
+        assert_eq!(dirty_of(maps), m.dirty, "{l:?}: dirty set");
+    }
+}
+
 #[test]
 fn a_repack_moves_small_values_and_keeps_large_ones() {
     use super::ram::REPACK_VALUE_MAX;
