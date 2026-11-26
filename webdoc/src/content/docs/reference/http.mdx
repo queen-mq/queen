@@ -131,6 +131,11 @@ sourceOfTruth:
 # queen_dlq_bodies_not_kept_total; phase2/admin.rs answers 409 no_body to a replay of a dead letter
 # filed without its body. phase2/admin.rs joins the sources for the 409 no_body row of the status
 # table.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): handlers/raft.rs exports
+# queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
+# families; phase2/reads.rs counts each queue's partitions and each group's positions in the group
+# lag walk (group_lags); facade/real.rs changes only a test helper (group_lags_for_test). Nothing
+# this page states changes.
 ---
 
 Every QueenMQ node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no

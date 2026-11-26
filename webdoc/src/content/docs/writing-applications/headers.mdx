@@ -29,6 +29,8 @@ sourceOfTruth:
 # facade/real.rs starts the repack beside the scrub and exports queen_dlq_bytes and
 # queen_dlq_bodies_not_kept_total. The budget drops only the body: a dead letter filed past it keeps
 # its headers. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): facade/real.rs changes only a
+# test helper (group_lags_for_test). Nothing this page states changes.
 ---
 
 A message can carry headers: a map of strings, stored beside its payload.

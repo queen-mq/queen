@@ -160,6 +160,11 @@ sourceOfTruth:
 # Dead letters table gains QUEEN_DLQ_MAX_BYTES_TOTAL (512 MiB). maintenance.rs bounds the per-queue
 # byte estimate by what all dead letters hold and deletes the oldest by their own sizes; the caps'
 # defaults do not change.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): handlers/raft.rs exports
+# queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
+# families; phase2/reads.rs counts each queue's partitions and each group's positions in the group
+# lag walk (group_lags); phase2.rs hands them to the collector with the group lag (group_lags_of);
+# facade/real.rs changes only a test helper (group_lags_for_test). Nothing this page states changes.
 ---
 
 Most of QueenMQ's limits exist to keep one request from costing everyone else: a body cap, a ceiling

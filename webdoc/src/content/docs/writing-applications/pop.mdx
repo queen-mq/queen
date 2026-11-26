@@ -122,6 +122,10 @@ verifiedBy:
 # head, in the same entry; facade/real.rs starts the repack beside the scrub and exports
 # queen_dlq_bytes and queen_dlq_bodies_not_kept_total; phase2/admin.rs answers 409 no_body to a
 # replay of a dead letter filed without its body. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): handlers/raft.rs exports
+# queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
+# families; facade/real.rs changes only a test helper (group_lags_for_test). Nothing this page
+# states changes.
 ---
 
 There are two ways to read. `consume()` is a loop: it takes messages, calls your handler, acks them when the handler returns, and goes on. `pop()` is one call: it hands you the messages and leaves the ack to you.

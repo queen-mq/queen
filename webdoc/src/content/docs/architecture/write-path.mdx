@@ -75,6 +75,10 @@ sourceOfTruth:
 # reads QUEEN_DLQ_MAX_BYTES_TOTAL and keeps the dead-letter budget's count (consume/dlq_budget.rs);
 # facade/real.rs starts the repack beside the scrub and exports queen_dlq_bytes and
 # queen_dlq_bodies_not_kept_total. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): handlers/raft.rs exports
+# queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
+# families; facade/real.rs changes only a test helper (group_lags_for_test). Nothing this page
+# states changes.
 ---
 
 A write goes through four steps.

@@ -124,6 +124,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-25 (idle records on a wheel, 1a22bbf37): consume/pop.rs files a
 # caught-up record that holds nothing under the end of its idle window. What a pop, an ack, a lease
 # or a transaction answers does not change: nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): phase2/reads.rs counts each
+# queue's partitions and each group's positions in the group lag walk (group_lags). Nothing this
+# page states changes.
 ---
 
 QueenMQ is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both

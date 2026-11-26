@@ -99,6 +99,10 @@ digest: >-
 # sourceOfTruth re-read 2026-11-26 (store repack 64b742a1d, dead-letter budget 1aad003b0):
 # facade/real.rs starts the repack beside the scrub and exports queen_dlq_bytes and
 # queen_dlq_bodies_not_kept_total. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): handlers/raft.rs exports
+# queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
+# families; facade/real.rs changes only a test helper (group_lags_for_test). Nothing this page
+# states changes.
 ---
 
 This section is the contract written down: what every route takes and answers, what each status

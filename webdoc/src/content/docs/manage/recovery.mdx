@@ -100,6 +100,10 @@ digest: >-
 # facade/real.rs starts the repack beside the scrub and exports queen_dlq_bytes and
 # queen_dlq_bodies_not_kept_total. The repack writes nothing to disk and changes no backup. Nothing
 # this page states changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): handlers/raft.rs exports
+# queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
+# families; facade/real.rs changes only a test helper (group_lags_for_test). Nothing this page
+# states changes.
 ---
 
 Most failures need nothing from you. A node that crashes catches up from the leader when it starts again. A leader that gets SIGTERM hands its job to a peer before it stops. A node that was away too long gets a snapshot from the leader, exits with code 75, and loads it when it starts again. This section is for the rest: a lost disk, a lost majority, a full disk, a bad day.

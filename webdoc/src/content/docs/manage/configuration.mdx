@@ -94,6 +94,8 @@ sourceOfTruth:
 # (consume/dlq_budget.rs); facade/real.rs starts the repack beside the scrub and exports
 # queen_dlq_bytes and queen_dlq_bodies_not_kept_total. Both settings are in the configuration
 # reference. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): facade/real.rs changes only a
+# test helper (group_lags_for_test). Nothing this page states changes.
 ---
 
 Every setting is an environment variable, and most installations need very few of them. When a node starts, it prints the settings it is really using, in lines that start with `config:`. Read them after every change. A yes/no setting accepts `true` or `false`, `1` or `0`, `yes` or `no`, `on` or `off`; any other value stops the node at boot, so a typo cannot pass unnoticed.

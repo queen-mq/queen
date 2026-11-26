@@ -97,6 +97,9 @@ verifiedBy:
 # facade/real.rs starts the repack beside the scrub and exports queen_dlq_bytes and
 # queen_dlq_bodies_not_kept_total; maintenance.rs bounds a queue's dead-letter byte estimate by what
 # all dead letters hold and deletes the oldest by their own size. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): phase2.rs hands them to the
+# collector with the group lag (group_lags_of); facade/real.rs changes only a test helper
+# (group_lags_for_test). Nothing this page states changes.
 ---
 
 In Kafka you choose a number of partitions and hash keys onto them, so a slow customer holds up every customer that shares its partition. Here a partition is one entity: a customer, an order, a conversation. The push that names it creates it, order holds inside it, and one queue has held ten million.

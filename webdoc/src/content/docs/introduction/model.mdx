@@ -84,6 +84,9 @@ digest: >-
 # scrub and exports queen_dlq_bytes and queen_dlq_bodies_not_kept_total; maintenance.rs bounds a
 # queue's dead-letter byte estimate by what all dead letters hold and deletes the oldest by their
 # own size. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): phase2.rs hands them to the
+# collector with the group lag (group_lags_of); facade/real.rs changes only a test helper
+# (group_lags_for_test). Nothing this page states changes.
 ---
 
 The model of QueenMQ is easy to understand. It rests on four ideas: partitions, leases, transactions and a simple interface.

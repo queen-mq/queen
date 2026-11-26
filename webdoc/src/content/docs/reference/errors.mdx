@@ -147,6 +147,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-26 (dead-letter budget): phase2/admin.rs joins the sources for the
 # 409 `no_body` a replay of a dead letter filed without its body answers; consume/ack.rs files
 # those past QUEEN_DLQ_MAX_BYTES_TOTAL. No other code this page lists changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): handlers/raft.rs exports
+# queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
+# families; phase2.rs hands them to the collector with the group lag (group_lags_of); facade/real.rs
+# changes only a test helper (group_lags_for_test). Nothing this page states changes.
 ---
 
 When QueenMQ refuses a call it answers a status code and a JSON body with a stable code, and the code

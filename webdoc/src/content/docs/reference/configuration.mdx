@@ -142,6 +142,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-26 (dead-letter budget): consume/mod.rs reads
 # QUEEN_DLQ_MAX_BYTES_TOTAL, now a row of the consumption engine table; facade/real.rs exports
 # queen_dlq_bodies_not_kept_total and queen_dlq_bytes. No other setting changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): facade/real.rs changes only a
+# test helper (group_lags_for_test). The generated table's QUEEN_METRICS_GROUP_LAG_MAX_CURSORS
+# now says 0 turns the partition gauges off too; no other setting changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

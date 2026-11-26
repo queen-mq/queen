@@ -113,6 +113,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-11-26 (dead-letter budget): consume/ack.rs files a dead letter past
 # QUEEN_DLQ_MAX_BYTES_TOTAL without its payload (consume/dlq_budget.rs); phase2/admin.rs answers 409
 # `no_body` to a replay of one. Two paragraphs say so; nothing else this page states changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): handlers/raft.rs exports
+# queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
+# families; facade/real.rs changes only a test helper (group_lags_for_test). Nothing this page
+# states changes.
 ---
 
 Every `failed` ack spends one retry. The message comes back after the queue's `retryDelay`, and its partition waits with it, for that consumer group. After `retryLimit` failures, the message goes to the dead-letter queue and the group moves on. You set both on the queue (see [Create and configure queues](/writing-applications/queues/)).

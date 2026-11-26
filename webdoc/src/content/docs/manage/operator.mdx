@@ -38,6 +38,9 @@ sourceOfTruth:
 # 400798d13): admin.rs answers openraft 0.10's refusal of a membership change by a leader that has
 # not yet committed an entry of its own term as in_flight (reference/errors.mdx says so). Nothing
 # this page states changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): handlers/raft.rs exports
+# queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
+# families. Nothing this page states changes.
 ---
 
 The [manifest](/manage/kubernetes/) installs a cluster, and a rolling update takes a new version

@@ -83,6 +83,10 @@ verifiedBy:
 # head, in the same entry; consume/txn.rs does the same for a transaction's acks; facade/real.rs
 # starts the repack beside the scrub and exports queen_dlq_bytes and
 # queen_dlq_bodies_not_kept_total. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): handlers/raft.rs exports
+# queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
+# families; facade/real.rs changes only a test helper (group_lags_for_test). Nothing this page
+# states changes.
 ---
 
 The ack, the order's new state, the next event and tomorrow's reminder commit as one log entry, or none of them does. That one call replaces the outbox table, the idempotency table and the cron job.

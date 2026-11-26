@@ -147,6 +147,9 @@ sourceOfTruth:
 # `handlers` (queue => class) and both engines run `queen:consume` for such a pool; the fork
 # server speaks protocol v2, which names the command (ForkServer, ForkServerClient, prefork.rs);
 # queen:consume stops for queue:restart under a supervisor (RestartSignal). The new section Pools of queen:consume handlers says so.
+# sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): phase2/reads.rs counts each
+# queue's partitions and each group's positions in the group lag walk (group_lags); phase2.rs hands
+# them to the collector with the group lag (group_lags_of). Nothing this page states changes.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number
