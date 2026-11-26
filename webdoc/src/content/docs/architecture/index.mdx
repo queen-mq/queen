@@ -84,6 +84,8 @@ digest: >-
 # consume/mod.rs reads QUEEN_DLQ_MAX_BYTES_TOTAL and keeps the dead-letter budget's count
 # (consume/dlq_budget.rs); rsm/mod.rs declares rsm/repack.rs, a background repack of the RAM tables
 # (off by default). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (the repack on by default, 5a2d311a3): rsm/mod.rs's comment on
+# the repack module says a pass runs every 10 minutes by default. Nothing this page states changes.
 ---
 
 A QueenMQ node is one process. Every write is decided once, on the leader, and then applied on every node. These pages follow a write through the process, from the request to the disk.

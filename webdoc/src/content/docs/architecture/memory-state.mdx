@@ -72,6 +72,9 @@ sourceOfTruth:
 # (consume/dlq_budget.rs); rsm/mod.rs declares rsm/repack.rs, a background repack of the RAM tables
 # (off by default). The page now says dead letters are the exception to messages not being in
 # memory, and names the budget.
+# sourceOfTruth re-read 2026-11-26 (the repack on by default, 5a2d311a3): rsm/mod.rs's comment on
+# the repack module says a pass runs every 10 minutes by default. The page now says each node
+# repacks its tables every 10 minutes.
 ---
 
 Each node keeps its whole state in memory: queues, partitions, consumer positions, KV, timers, request ids, and the dedup records of recent pushes. It is loaded once, at boot.
@@ -79,6 +82,8 @@ Each node keeps its whole state in memory: queues, partitions, consumer position
 Messages are not in memory. They stay in the queue log files and are read from there. So memory grows with the number of partitions and keys, and with the pushes of the dedup window, not with how many messages a queue keeps.
 
 Dead letters are the exception: each one keeps a copy of its message, in memory on every node. All of them together hold at most `QUEEN_DLQ_MAX_BYTES_TOTAL` (512 MiB), and past it a new dead letter is filed without its body ([limits](/reference/limits/#dead-letters)).
+
+Rows deleted and written again leave the allocator's pages half used, which is why a node uses less memory right after a restart. Every 10 minutes each node copies its tables' rows into fresh allocations and frees the old ones, as a restart would, without one (`QUEEN_STORE_REPACK_EVERY_S`, [configuration](/reference/configuration/)).
 
 <Fig id="memory-disk" caption="What lives in memory, and what lives on disk." />
 
