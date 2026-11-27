@@ -1774,7 +1774,7 @@ queen.<span class="f">feed</span>({ queues: [<span class="s">'bookings'</span>],
   -v /var/lib/queen:/var/lib/queen/raft \
   -e <span class="f">QUEEN_KAFKA_EMBEDDED</span>=<span class="n">true</span> \
   -e <span class="f">QUEEN_KAFKA_ADVERTISED_ADDR</span>=<span class="s">127.0.0.1:9092</span> \
-  ghcr.io/queen-mq/queen:<span class="n">2.10.0</span></pre>
+  ghcr.io/queen-mq/queen:<span class="n">2.11.0</span></pre>
         <ul class="facts">
           <li>Kafka producers, consumers and admin tools work as they are: change <code>bootstrap.servers</code>, nothing else.</li>
           <li>A topic is a queue, a Kafka consumer group is a QueenMQ group. Kafka clients and QueenMQ clients read and write the same data.</li>
@@ -1823,7 +1823,7 @@ queen.<span class="f">feed</span>({ queues: [<span class="s">'bookings'</span>],
       <div>
         <p class="eyebrow">The end</p>
         <h1>Try it in<br>five minutes</h1>
-<pre class="code try">docker run -p <span class="n">6632</span>:<span class="n">6632</span> ghcr.io/queen-mq/queen:<span class="n">2.10.0</span>
+<pre class="code try">docker run -p <span class="n">6632</span>:<span class="n">6632</span> ghcr.io/queen-mq/queen:<span class="n">2.11.0</span>
 npm install queen-mq</pre>
         <p class="lead" style="margin-top:18px">The dashboard is at <strong>localhost:6632</strong>, served by the same process.</p>
         <ul class="proofs">
