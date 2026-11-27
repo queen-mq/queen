@@ -3,7 +3,16 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## 2.11.0 - 2026-11-27
+
+**Upgrading from 2.10.x: a rolling restart.** 2.11.0 keeps the data format of 2.10.0 (cluster
+version 8), and nodes of the two releases replicate to each other while the roll runs. The clients
+stay where they are: the JavaScript client at 2.9.2, the PHP client at 2.10.0 with supervisor
+0.10.0, the Python, Go, Rust and C++ clients at 2.9.0, `queen-protocol` at 1.7.0 and queenctl at
+2.7.1. The JavaScript, Python and Rust packages changed only their descriptions (the new name), not
+their code, and every client talks to a 2.11.0 broker as to 2.10.0. Jepsen ran the whole suite, 568
+tests, on 2.11.0-rc.1 (`04541a304`), and all were valid; what 2.11.0 adds to it (the one timers
+read, the partition counts in Prometheus, the console) puts no new command in the log.
 
 **Server: an idle partition leaves the leader's memory on time, however many partitions came
 before it.** The leader keeps a small record for each consumer group's partition and drops it once
