@@ -9,6 +9,7 @@ import { describeApiError } from '@/api/errors'
 import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import ConsoleShell from '@/console/ConsoleShell.vue'
+import QcUp from '@/console/QcUp.vue'
 import QcChart from '@/console/QcChart.vue'
 import QcPopover from '@/console/QcPopover.vue'
 import QcDialog from '@/console/QcDialog.vue'
@@ -113,7 +114,7 @@ const sizeLine = computed(() => {
       <template v-else>
         <!-- name, facts, actions -->
         <header class="qp-head">
-          <h1 class="qn-mono qp-title">{{ name }}</h1>
+          <div class="qp-name"><QcUp to="/queues" label="Queues" /><h1 class="qn-mono qp-title">{{ name }}</h1></div>
           <span v-for="f in q.facts.value" :key="f" class="qn-tag">{{ f }}</span>
           <div style="flex: 1 1 0" />
           <!-- a reading queue takes no push: what it holds comes from its sources -->
@@ -263,7 +264,8 @@ const sizeLine = computed(() => {
 <style scoped>
 .qp { max-width: 1400px; margin: 0 auto; padding: 26px 32px 56px; }
 .qp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.qp-title { font-size: 22px; font-weight: 500; margin-right: 8px; overflow-wrap: anywhere; }
+.qp-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.qp-title { font-size: var(--qn-title); font-weight: 500; margin-right: 8px; overflow-wrap: anywhere; }
 .qp-verdict { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; font-size: 15px; margin-top: 14px; }
 .qp-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; }
 .qp-badge .qn-mark { align-self: center; }
@@ -284,5 +286,5 @@ const sizeLine = computed(() => {
 .qp-swatch { width: 12px; height: 2px; display: inline-block; }
 .qp-panel { min-height: 180px; }
 @media (max-width: 900px) { .qp-charts { grid-template-columns: minmax(0, 1fr); } }
-@media (max-width: 640px) { .qp { padding: 18px 16px 40px; } .qp-title { font-size: 19px; } }
+@media (max-width: 640px) { .qp { padding: 18px 16px 40px; } }
 </style>

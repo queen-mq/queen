@@ -62,7 +62,7 @@ const alerts = reactive(useAlertLines(where))
 
 <style scoped>
 .qs { max-width: 1400px; margin: 0 auto; padding: 26px 32px 56px; }
-.qs-title { font-size: 22px; font-weight: 500; }
+.qs-title { font-size: var(--qn-title); font-weight: 500; }
 .qs-split { display: flex; align-items: flex-start; gap: 24px 48px; margin-top: 22px; }
 .qs-side { flex: 0 0 220px; display: flex; flex-direction: column; gap: 2px; position: sticky; top: 76px; }
 .qs-li { height: 34px; }
@@ -78,6 +78,6 @@ const alerts = reactive(useAlertLines(where))
 }
 @media (max-width: 640px) {
   .qs { padding: 18px 16px 40px; }
-  .qs-title { font-size: 19px; }
+ 
 }
 </style>

@@ -10,6 +10,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ConsoleShell from '@/console/ConsoleShell.vue'
+import QcSkeleton from '@/console/QcSkeleton.vue'
 import { useWindow, clock } from '@/console/useWindow'
 import { useConsoleFrame } from '@/console/useConsoleFrame'
 import { useWorkloadPage, FALLBACK_TITLE } from '@/console/useWorkloadPage'
@@ -192,6 +193,7 @@ function pickFrom(value) {
               @measure="setMeasure" @zoom="range" @open="openRow"
             />
 
+            <QcSkeleton v-if="!loaded" card :rows="7" :widths="['100%']" />
             <div v-if="loaded" class="wl-lower" :class="{ open: drawer }">
               <!-- the rows -->
               <WlTable
@@ -238,7 +240,7 @@ function pickFrom(value) {
 <style scoped>
 .wl { max-width: 1400px; margin: 0 auto; padding: 26px 32px 56px; }
 .wl-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.wl-title { font-size: 22px; font-weight: 500; margin-right: 8px; }
+.wl-title { font-size: var(--qn-title); font-weight: 500; margin-right: 8px; }
 
 .wl-cols { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 0 40px; margin-top: 20px; align-items: start; }
 .wl-side { position: sticky; top: 68px; max-height: calc(100vh - 84px); overflow-y: auto; padding-bottom: 12px; }
@@ -291,7 +293,7 @@ function pickFrom(value) {
 }
 @media (max-width: 640px) {
   .wl { padding: 18px 16px 40px; }
-  .wl-title { font-size: 19px; }
+ 
   .wl-cols { margin-top: 14px; }
   .wl-issue { grid-template-columns: 8px minmax(0, 1fr); }
   .wl-issue > .wl-ilink { grid-column: 2; padding: 0 0 6px; }

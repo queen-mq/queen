@@ -124,7 +124,7 @@ const overdueMin = computed(() => Math.round(s.overdueAfterMs.value / 60000))
 <style scoped>
 .st { max-width: 1400px; margin: 0 auto; padding: 26px 32px 56px; }
 .st-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.st-title { font-size: 22px; font-weight: 500; margin-right: 8px; }
+.st-title { font-size: var(--qn-title); font-weight: 500; margin-right: 8px; }
 .st-verdict { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 15px; margin-top: 14px; }
 .st-verdict .qn-mark { margin-right: 4px; }
 .st-note { margin-top: 18px; color: var(--text2); max-width: 900px; }

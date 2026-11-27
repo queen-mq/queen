@@ -99,7 +99,7 @@ const gateLine = computed(() => (c.gate.value != null ? ` A node stops taking wr
 <style scoped>
 .cp { max-width: 1400px; margin: 0 auto; padding: 26px 32px 56px; }
 .cp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.cp-title { font-size: 22px; font-weight: 500; margin-right: 8px; }
+.cp-title { font-size: var(--qn-title); font-weight: 500; margin-right: 8px; }
 .cp-verdict { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; font-size: 15px; margin-top: 14px; }
 .cp-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; }
 .cp-badge .qn-mark { align-self: center; }
@@ -127,5 +127,5 @@ const gateLine = computed(() => (c.gate.value != null ? ` A node stops taking wr
   .cp-grid.open .cp-charts { grid-row: 4; }
   .cp-grid.open .cp-ops { grid-row: 5; }
 }
-@media (max-width: 640px) { .cp { padding: 18px 16px 40px; } .cp-title { font-size: 19px; } }
+@media (max-width: 640px) { .cp { padding: 18px 16px 40px; } }
 </style>

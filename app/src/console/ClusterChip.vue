@@ -74,6 +74,12 @@ const others = computed(() => props.clusters.filter((c) => !c.on))
 <style scoped>
 .qn-cms { display: inline-flex; align-items: baseline; gap: 12px; padding-left: 10px; margin-left: 2px; border-left: 1px solid var(--line); font-size: 12.5px; }
 .qn-cm { display: inline-flex; align-items: baseline; gap: 5px; }
+/* Each figure keeps its width as its value moves (2.9 MB/s, then 2.93 MB/s),
+   so the chip, and the band around it, never twitch on a refresh. */
+.qn-cm .qn-num { display: inline-block; text-align: right; }
+.qn-cm[data-m="cpu"] .qn-num, .qn-cm[data-m="mem"] .qn-num, .qn-cm[data-m="disk"] .qn-num { min-width: 4ch; }
+.qn-cm[data-m="net"] .qn-num { min-width: 9ch; }
+.qn-cm[data-m="commits"] .qn-num { min-width: 6ch; }
 :global(.qn.tone .qn-cms) { border-left-color: var(--bg3); }
 @media (max-width: 1180px) { .qn-cms { display: none; } }
 /* The commits a second go first: the band keeps one line down to 1180 px with

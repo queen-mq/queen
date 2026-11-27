@@ -7,6 +7,7 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ConsoleShell from '@/console/ConsoleShell.vue'
+import QcSkeleton from '@/console/QcSkeleton.vue'
 import { useConsoleFrame } from '@/console/useConsoleFrame'
 import { useStatePage } from '@/console/useStatePage'
 import { namespaceRows } from '@/composables/useKvSide'
@@ -77,7 +78,10 @@ function pickAny(v) {
           </label>
           <p class="st-side-h">KV namespaces</p>
           <p v-if="s.kvVerdict.value && s.kvVerdict.value !== 'paused'" class="st-side-note">Not served here.</p>
-          <p v-else-if="!settled" class="st-side-note">Reading them…</p>
+          <template v-else-if="!settled">
+            <p class="st-side-note">Reading them…</p>
+            <QcSkeleton :rows="5" :widths="['70%', '50%', '62%']" />
+          </template>
           <p v-else-if="!rows.length && find" class="st-side-note">Nothing matches “{{ find }}”. <button type="button" class="qn-link" @click="find = ''">Clear</button></p>
           <p v-else-if="!rows.length" class="st-side-note">None yet.</p>
           <button
@@ -114,7 +118,7 @@ function pickAny(v) {
 
 <style scoped>
 .st { max-width: 1400px; margin: 0 auto; padding: 26px 32px 56px; }
-.st-title { font-size: 22px; font-weight: 500; }
+.st-title { font-size: var(--qn-title); font-weight: 500; }
 .st-sum { font-size: 15px; margin-top: 14px; max-width: 920px; }
 .st-cols { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 24px 40px; margin-top: 26px; }
 .st-side { flex: 1 1 220px; max-width: 250px; min-width: 0; }
@@ -132,7 +136,7 @@ function pickAny(v) {
 .st-pickm select { flex: 1 1 0; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 13px; }
 @media (max-width: 640px) {
   .st { padding: 18px 16px 40px; }
-  .st-title { font-size: 19px; }
+ 
   .st-side { display: none; }
   .st-pickm { display: flex; }
   .st-cols { margin-top: 20px; }

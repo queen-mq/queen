@@ -173,7 +173,7 @@ const retryText = (ms) => (ms == null ? '' : ms < 1000 ? 'It tries again in a mo
 <style scoped>
 .cx { max-width: 1400px; margin: 0 auto; padding: 26px 32px 56px; }
 .cx-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.cx-title { font-size: 22px; font-weight: 500; margin-right: 8px; }
+.cx-title { font-size: var(--qn-title); font-weight: 500; margin-right: 8px; }
 .cx-verdict { display: flex; align-items: flex-start; gap: 10px; font-size: 15px; margin-top: 14px; }
 .cx-verdict > .qn-mark { margin-top: 7px; }
 .cx-vname { font-weight: 500; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
@@ -214,7 +214,7 @@ const retryText = (ms) => (ms == null ? '' : ms < 1000 ? 'It tries again in a mo
 /* a phone: the connector, its state and what it moved; a tap opens the rest below */
 @media (max-width: 640px) {
   .cx { padding: 18px 16px 40px; }
-  .cx-title { font-size: 19px; }
+ 
   .cx-table { --cols: minmax(0, 1.3fr) minmax(0, 1fr) 64px; min-width: 0; }
   .cx-table .qn-tr > :nth-child(3), .cx-table .qn-tr > :nth-child(n+5) { display: none; }
 }

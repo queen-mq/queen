@@ -51,6 +51,9 @@
   --r-card: 6px;
   --r-pop: 6px;
   --rail-w: 64px;
+  /* every page's title, one size (the Overview's headline is not a title);
+     the band's word is drawn to the same letter height */
+  --qn-title: 18px;
 
   font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
   font-size: 13px;
@@ -300,3 +303,6 @@
    more), and a story panel or a drawer is white on the paper. */
 .qn.light:not(.tone) .qn-rail { background: #efeeeb; }
 .qn.light:not(.tone) .qn-panel { background: #ffffff; }
+
+/* A page's title on a phone. */
+@media (max-width: 640px) { .qn { --qn-title: 17px; } }

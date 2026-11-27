@@ -1,5 +1,6 @@
 <script setup>
 import QcJson from '../QcJson.vue'
+import QcSkeleton from '../QcSkeleton.vue'
 // The keys of one namespace, 50 at a time in name order, with a prefix filter
 // (KV has no queries). A click opens the key beside the list: its value, its
 // facts, and Edit and Delete, each shown first in a QcDialog with its call.
@@ -209,7 +210,10 @@ async function onPut(key, putNs) {
         </p>
 
         <p v-if="keysError && !rows.length" class="stk-state"><span class="qn-mark red" aria-hidden="true" style="margin-right: 8px" />The broker did not answer: {{ keysError }}</p>
-        <p v-else-if="!keysPage" class="stk-state qn-t2">Reading the keys of <span class="qn-mono">{{ ns }}</span>…</p>
+        <template v-else-if="!keysPage">
+          <p class="stk-state qn-t2">Reading the keys of <span class="qn-mono">{{ ns }}</span>…</p>
+          <QcSkeleton :rows="8" :widths="['100%']" />
+        </template>
         <p v-else-if="!rows.length && prefix" class="stk-state qn-t2">No key in <span class="qn-mono">{{ ns }}</span> starts with “<span class="qn-mono">{{ prefix }}</span>”. <button type="button" class="qn-link" @click="draft = ''; applyNow()">Clear the filter</button></p>
         <p v-else-if="!rows.length" class="stk-state qn-t2">No keys in <span class="qn-mono">{{ ns }}</span><template v-if="pageNo"> after the last page</template>.</p>
 

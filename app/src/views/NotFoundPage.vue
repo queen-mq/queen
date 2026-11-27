@@ -20,7 +20,7 @@ const frame = useConsoleFrame()
 
 <style scoped>
 .nf { max-width: 1400px; margin: 0 auto; padding: 26px 32px 56px; }
-.nf-title { font-size: 22px; font-weight: 500; }
+.nf-title { font-size: var(--qn-title); font-weight: 500; }
 .nf-text { margin-top: 12px; font-size: 14.5px; overflow-wrap: anywhere; }
 .nf-back { margin-top: 18px; }
 @media (max-width: 640px) { .nf { padding: 18px 16px 40px; } }

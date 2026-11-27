@@ -1,11 +1,12 @@
 <script setup>
 // The frame of the new console: a 64 px icon rail (sections, Settings, your
-// account) and one band (where you are, search, the cluster, the time
-// window, the shortcuts). A page fills the rest.
+// account) and one band (the name, search, the cluster, the time window, the
+// shortcuts). A page fills the rest; its own title says where you are.
 import './console.css'
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import logoRaw from '@/assets/queenmq-icon.svg?raw'
+import wordRaw from '@/assets/queenmq-wordmark.svg?raw'
 import { useUiStore } from '@/stores/ui'
 import QcIcon from './QcIcon.vue'
 import QcPopover from './QcPopover.vue'
@@ -26,7 +27,9 @@ const offlineAt = computed(() => {
 })
 
 const props = defineProps({
-  path: { type: Array, default: () => [] },    // [{ label, to? }]: where you are
+  // [{ label, to? }]: where you are. The band no longer shows it: a page's
+  // title does, and a page one level down shows the way up before it (QcUp).
+  path: { type: Array, default: () => [] },
   attention: { type: Object, default: null },  // { tone, count } for the Overview icon's mark
   frame: { type: Object, default: null },      // a page's own useConsoleFrame(), to share its reads
 })
@@ -118,7 +121,7 @@ const initials = computed(() => {
 <template>
   <div ref="root" class="qn qn-shell" :class="[theme, areas === 'tone' ? 'tone' : '']">
     <nav class="qn-rail" aria-label="Sections">
-      <RouterLink to="/" class="qn-logo" aria-label="Queen: overview"><span class="qn-logo-mark" v-html="logoRaw" /></RouterLink>
+      <RouterLink to="/" class="qn-logo" aria-label="QueenMQ: overview"><span class="qn-logo-mark" v-html="logoRaw" /></RouterLink>
       <template v-for="(group, gi) in RAIL" :key="gi">
         <div v-if="gi" class="qn-sep" />
         <template v-for="item in group" :key="item.id">
@@ -170,13 +173,9 @@ const initials = computed(() => {
 
     <div class="qn-body">
       <header class="qn-band">
-        <nav aria-label="You are here" class="qn-path">
-          <template v-for="(p, i) in path" :key="i">
-            <span v-if="i" class="qn-t3" aria-hidden="true">/</span>
-            <RouterLink v-if="p.to && i < path.length - 1" :to="p.to" class="qn-t2">{{ p.label }}</RouterLink>
-            <span v-else :aria-current="i === path.length - 1 ? 'page' : undefined" :class="p.mono ? 'qn-mono' : ''" style="font-weight: 500">{{ p.label }}</span>
-          </template>
-        </nav>
+        <!-- The name, beside the rail's box: the two read as the app and its
+             name, and the word starts where the page's column does. -->
+        <RouterLink to="/" class="qn-word" aria-label="QueenMQ: overview"><span class="qn-word-mark" v-html="wordRaw" /></RouterLink>
         <div class="qn-gap" />
         <button type="button" class="qn-field qn-find" aria-haspopup="dialog" @click="searchOpen = true">
           <QcIcon name="search" :size="14" />
@@ -275,12 +274,20 @@ const initials = computed(() => {
 :global(.qn.tone .qn-tip) { border-color: transparent; }
 .qn-avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--bg3); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 500; color: var(--text2); }
 .qn-body { flex: 1 1 0; min-width: 0; height: 100vh; height: 100dvh; overflow-y: auto; display: flex; flex-direction: column; }
+/* The band's sides follow a page's column (1,400 px at most, centred, 32 px
+   in from it), so the word starts where a page's title does. */
 .qn-band {
   position: sticky; top: 0; z-index: 25; background: var(--bg); flex: 0 0 auto;
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px 10px;
-  min-height: 52px; padding: 8px 24px; border-bottom: 1px solid var(--line);
+  min-height: 52px; padding: 8px max(32px, calc((100% - 1400px) / 2 + 32px));
+  border-bottom: 1px solid var(--line);
 }
-.qn-path { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+/* The word: its viewBox is centred on the letters' x-height, so the letters
+   sit on the band's centre line, beside the rail's box. At 22 px its letters
+   are as tall as a page title's (--qn-title), not taller. */
+.qn-word { display: flex; align-items: center; color: var(--text); }
+.qn-word:hover { text-decoration: none; }
+.qn-word-mark :deep(svg) { height: 22px; width: auto; display: block; }
 .qn-gap { flex: 1 1 0; }
 .qn-tools { display: flex; align-items: center; gap: 10px; }
 .qn-sq { width: 32px; justify-content: center; padding: 0; }
@@ -305,12 +312,11 @@ const initials = computed(() => {
   .qn-ri { width: auto; height: 40px; flex: 0 1 40px; min-width: 28px; }
   .qn-sep { width: 1px; height: 24px; margin: 0 2px; flex: 0 0 1px; }
   .qn-tip { display: none; }
-  /* Two rows, the same on every page: where you are and Search, then the
-     cluster, the time, Refresh and the theme. A long name is cut, never pushed out. */
+  /* Two rows, the same on every page: the name and Search, then the
+     cluster, the time, Refresh and the theme. */
   .qn-band { position: static; padding: 8px 16px; gap: 8px; }
-  .qn-path { flex: 1 1 0; flex-wrap: nowrap; overflow: hidden; }
-  .qn-path > * { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .qn-path > [aria-hidden] { flex: none; }
+  .qn-word { margin-right: auto; }
+  .qn-word-mark :deep(svg) { height: 20px; }
   .qn-gap { display: none; }
   .qn-tools { flex: 1 1 100%; min-width: 0; gap: 8px; }
   .qn-tools > .qn-cluster { flex: 0 1 auto; min-width: 0; }

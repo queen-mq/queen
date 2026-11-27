@@ -357,7 +357,7 @@ function created({ name, ns }) { reveal(name, ns) }
 <style scoped>
 .qs { max-width: 1400px; margin: 0 auto; padding: 26px 32px 56px; }
 .qs-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.qs-title { font-size: 22px; font-weight: 500; margin-right: 8px; }
+.qs-title { font-size: var(--qn-title); font-weight: 500; margin-right: 8px; }
 .qs-tabs { margin-top: 18px; }
 .qs-verdict { display: flex; align-items: flex-start; gap: 10px; font-size: 15px; margin-top: 18px; }
 /* the mark sits on the first line, however the sentence wraps */
@@ -419,7 +419,7 @@ function created({ name, ns }) { reveal(name, ns) }
 /* a phone: the name, its state and what waits; the queue's page has the rest */
 @media (max-width: 640px) {
   .qs { padding: 18px 16px 40px; }
-  .qs-title { font-size: 19px; }
+ 
   .qs-find { width: 100%; }
   .qs-sortline { flex-basis: 100%; margin-left: 0; }
   .qs-table { min-width: 0; --cols: minmax(0, 1fr) auto 64px; }

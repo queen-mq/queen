@@ -1,5 +1,6 @@
 <script setup>
 import QcJson from '../QcJson.vue'
+import QcSkeleton from '../QcSkeleton.vue'
 // The timers of every queue, the next to fire first. There is no tenant-wide
 // timer read: it is one GET /api/v1/timers/:queue per queue, each its first
 // 100 by key. A click opens one with its payload (a peek); Cancel shows its
@@ -115,10 +116,13 @@ async function cancel() {
         <p class="stt-lead">{{ quiet.title }}.</p>
         <p class="qn-t2" style="margin-top: 6px; max-width: 640px">{{ quiet.detail }}</p>
       </template>
-      <p v-else-if="!timerList" class="stt-state qn-t2 qn-num">
+      <template v-else-if="!timerList">
+      <p class="stt-state qn-t2 qn-num">
         <template v-if="sweeping">Reading the timers of {{ fmt(sweepTotal) }} queues, one call each: {{ fmt(sweepDone) }} so far…</template>
         <template v-else>Reading the timers…</template>
       </p>
+      <QcSkeleton :rows="8" :widths="['100%']" />
+      </template>
       <template v-else-if="!all.length">
         <p class="stt-lead">No timers are waiting.</p>
         <p class="qn-t2" style="margin-top: 6px; max-width: 640px">A timer is a message scheduled for later: at its time it fires into its queue, in order with its partition. Steps schedule and cancel them in their transactions.</p>

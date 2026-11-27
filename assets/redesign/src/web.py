@@ -118,6 +118,8 @@ def main():
                      ("apple-touch-icon.png", "apple-touch-icon.png"), ("icon-512.png", "queen-tile.png")):
         shutil.copyfile(brand("favicon", src), site("public", dst))
     open(app("public", "queen-wordmark.svg"), "w").write(sign_in_logo())
+    # The console's band shows the word as the site's header does (ConsoleShell.vue).
+    open(app("src", "assets", "queenmq-wordmark.svg"), "w").write(wordmark())
     # The console's tab icons, and the placeholder the server commits for a build without the
     # console (server/webapp/dist), which the sign-in page reads its tab icon from.
     for name in ("favicon.svg", "favicon-32.png"):

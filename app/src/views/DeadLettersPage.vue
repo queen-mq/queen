@@ -7,6 +7,7 @@ import { computed, nextTick, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ConsoleShell from '@/console/ConsoleShell.vue'
 import QcPopover from '@/console/QcPopover.vue'
+import QcSkeleton from '@/console/QcSkeleton.vue'
 import { useConsoleFrame } from '@/console/useConsoleFrame'
 import { nowMs } from '@/console/useWindow'
 import { fmt } from '@/console/useQueuePage'
@@ -81,7 +82,10 @@ function narrow(name) { router.replace({ query: { ...route.query, queue: name ||
       </header>
 
       <p v-if="d.failed.value" class="dl-verdict">The broker did not answer: {{ d.failed.value }}</p>
-      <p v-else-if="!d.ready.value" class="dl-verdict qn-t2">Reading the dead letters…</p>
+      <template v-else-if="!d.ready.value">
+        <p class="dl-verdict qn-t2">Reading the dead letters…</p>
+        <QcSkeleton card :rows="6" style="margin-top: 18px" />
+      </template>
       <template v-else-if="!d.causes.value.length">
         <p class="dl-verdict"><span v-for="(p, i) in summary" :key="i" :class="{ 'qn-mono': p.mono }">{{ p.t }}</span></p>
         <p v-if="focus" style="margin-top: 12px"><RouterLink to="/dlq" class="qn-link">See every queue</RouterLink></p>
@@ -136,7 +140,7 @@ function narrow(name) { router.replace({ query: { ...route.query, queue: name ||
 <style scoped>
 .dl { max-width: 1400px; margin: 0 auto; padding: 26px 32px 56px; }
 .dl-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 32px; }
-.dl-title { font-size: 22px; font-weight: 500; }
+.dl-title { font-size: var(--qn-title); font-weight: 500; }
 .dl-chipname { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
 .dl-optname { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .dl-verdict { font-size: 15px; margin-top: 14px; }
@@ -171,6 +175,6 @@ function narrow(name) { router.replace({ query: { ...route.query, queue: name ||
 }
 @media (max-width: 640px) {
   .dl { padding: 18px 16px 40px; }
-  .dl-title { font-size: 19px; }
+ 
 }
 </style>

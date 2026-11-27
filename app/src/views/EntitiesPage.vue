@@ -9,6 +9,7 @@ import { traces as tracesApi } from '@/api'
 import { describeApiError } from '@/api/errors'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import ConsoleShell from '@/console/ConsoleShell.vue'
+import QcUp from '@/console/QcUp.vue'
 import QcSeg from '@/console/QcSeg.vue'
 import QcJson from '@/console/QcJson.vue'
 import { useConsoleFrame } from '@/console/useConsoleFrame'
@@ -138,7 +139,7 @@ const sheet = ref(false)
           <p class="qn-read" style="margin-top: 14px; max-width: 640px">A worker writes these with the trace call. A delivery the worker did not trace is not here: the broker keeps no delivery history per message yet.</p>
         </template>
         <template v-else>
-          <h1 class="qn-mono en-title">{{ name }}</h1>
+          <div class="en-name"><QcUp to="/entities" label="Entities" /><h1 class="qn-mono en-title">{{ name }}</h1></div>
           <p v-if="facts" class="en-facts">{{ facts }}</p>
           <p v-else-if="loading && !data" class="qn-t2 en-facts">Reading its timeline…</p>
           <p v-else-if="error" class="qn-t2 en-facts">The broker did not answer: {{ error }}</p>
@@ -183,7 +184,8 @@ const sheet = ref(false)
 .en-item.on { background: var(--bg3); color: var(--text); }
 .en-name { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
 .en-meta { flex: 0 0 auto; font-size: 11.5px; }
-.en-title { font-size: 20px; font-weight: 500; overflow-wrap: anywhere; }
+.en-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.en-title { font-size: var(--qn-title); font-weight: 500; overflow-wrap: anywhere; }
 .en-facts { margin-top: 10px; font-size: 14.5px; }
 .en-time { margin-top: 16px; border-top: 1px solid var(--line); }
 .en-ev { border-bottom: 1px solid var(--line2); }

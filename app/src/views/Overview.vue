@@ -8,6 +8,7 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import ConsoleShell from '@/console/ConsoleShell.vue'
 import QcChart from '@/console/QcChart.vue'
 import QcSpark from '@/console/QcSpark.vue'
+import QcSkeleton from '@/console/QcSkeleton.vue'
 import { useWindow, longDate, clock } from '@/console/useWindow'
 import { useOverview } from '@/console/useOverview'
 import { useOverviewPanels } from '@/console/useOverviewPanels'
@@ -83,6 +84,7 @@ onBeforeUnmount(() => shortMq?.removeEventListener?.('change', onShort))
           <!-- what needs you -->
           <h2 class="qn-h2">Needs you</h2>
           <p v-if="ov.ready.value && !ov.needs.value.length" class="qn-t2 ov-none">Nothing. Every queue drains on its own, and the cell is fine.</p>
+          <div v-if="!ov.ready.value" class="ov-skel"><QcSkeleton card :rows="3" /><QcSkeleton card :rows="3" /></div>
           <article v-for="(n, i) in ov.needs.value" :key="n.key" class="ov-need qn-card" :class="{ extra: i >= 2 }">
             <div class="ov-need-text">
               <h3 class="ov-need-head">
@@ -147,6 +149,7 @@ onBeforeUnmount(() => shortMq?.removeEventListener?.('change', onShort))
         <aside class="ov-sidecol" aria-labelledby="ov-inv-title">
           <h2 id="ov-inv-title" class="qn-h2">In this cluster</h2>
           <div class="ov-side qn-card">
+            <QcSkeleton v-if="!ov.ready.value && !ov.inventory.value.length" :rows="10" :widths="['100%']" />
             <ul class="ov-inv">
               <li v-for="r in ov.inventory.value" :key="r.id">
                 <RouterLink :to="r.to" class="ov-irow qn-row" :title="r.title || undefined">
@@ -215,6 +218,8 @@ onBeforeUnmount(() => shortMq?.removeEventListener?.('change', onShort))
 
 .ov-cols { display: flex; flex-wrap: wrap; gap: 24px 48px; padding-top: 22px; }
 .ov-main { flex: 999 1 560px; min-width: 0; }
+/* the two cards "Needs you" most often holds, while the first read runs */
+.ov-skel { display: grid; gap: 12px; margin-top: 10px; }
 .ov-sidecol { flex: 1 1 320px; min-width: 0; max-width: 380px; align-self: flex-start; }
 .ov-none { padding: 12px 0 4px; }
 

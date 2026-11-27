@@ -8,6 +8,7 @@ import { describeVerdict } from '@/composables/useGatedVerdict'
 import { LOCKS_NAMESPACE } from '@/composables/useLocks'
 import { nowMs, clock } from '../useWindow'
 import { fmt, span, ago, inOrAgo, leaseLeft } from './stateViews'
+import QcSkeleton from '../QcSkeleton.vue'
 
 const props = defineProps({ s: { type: Object, required: true } })
 const { lockList, locks, locksError, kvVerdict } = props.s
@@ -37,7 +38,10 @@ const read = computed(() => (locks.value?.absent ? 'GET /api/v1/resources/kv/nam
         <p class="qn-t2" style="margin-top: 6px; max-width: 640px">{{ quiet.detail }}</p>
       </template>
       <p v-else-if="locksError && !locks" class="stl-state"><span class="qn-mark red" aria-hidden="true" style="margin-right: 8px" />The broker did not answer: {{ locksError }}</p>
-      <p v-else-if="!locks" class="stl-state qn-t2">Reading the locks…</p>
+      <template v-else-if="!locks">
+        <p class="stl-state qn-t2">Reading the locks…</p>
+        <QcSkeleton :rows="4" :widths="['100%']" />
+      </template>
       <template v-else-if="!rows.length">
         <p class="stl-lead">No locks are held.</p>
         <p class="qn-t2" style="margin-top: 6px; max-width: 640px">

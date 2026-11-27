@@ -1,7 +1,7 @@
 // What the console's frame shows around every page: who you are, the cluster
 // and its cell (for the band's chip), the clusters to switch to, and what ⌘K
 // can find. It reads the stores the old shell reads, so both agree.
-import { computed } from 'vue'
+import { computed, shallowRef, watch } from 'vue'
 import { operator } from '@/api'
 import { useApi } from '@/composables/useApi'
 import { useAutoRefresh } from '@/composables/useRefresh'
@@ -15,6 +15,13 @@ import { useGroupsStore } from '@/stores/groupsStore'
 import { useQueueOpsStore } from '@/stores/queueOpsStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { queueAttention } from '@/composables/useAttention'
+
+// The cell's last answer, kept across pages: every page makes its own frame
+// and reads the cell again, and until that answer came the band's chip drew
+// the cluster's name alone, then grew by its figures on every page change.
+// A new frame draws from this at once while it reads. Kept for one cluster:
+// another cluster's figures are never shown.
+const lastCell = shallowRef(null) // { cluster, payload }
 
 export const PATHS = {
   queues: '/queues',
@@ -85,11 +92,18 @@ export function useConsoleFrame() {
   refreshCell()
   useAutoRefresh(refreshCell)
 
-  const status = computed(() => brokerStatus(members.data.value))
+  const cellKey = () => id.actingCluster.value?.id ?? 'local'
+  watch(() => members.data.value, (payload) => {
+    if (payload) lastCell.value = { cluster: cellKey(), payload }
+  })
+  const cellPayload = computed(() => members.data.value
+    ?? (lastCell.value?.cluster === cellKey() ? lastCell.value.payload : null))
+
+  const status = computed(() => brokerStatus(cellPayload.value))
   const cell = computed(() => {
     const st = status.value
     // The raw read too, so a page (Cluster) can use it instead of reading again.
-    const read = { payload: members.data.value, error: members.error.value }
+    const read = { payload: cellPayload.value, error: members.error.value }
     if (!st) return { mark: null, metrics: [], summary: id.can('operator') ? 'Reading its nodes…' : 'Its nodes are shown to operators.', nodes: [], issues: [], status: null, ...read }
     const issues = cellIssues(st)
     const worst = issues[0]
