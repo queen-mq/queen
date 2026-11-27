@@ -1,0 +1,40 @@
+# A throwaway three-node cluster for test/live/run.mjs, which starts it, stops
+# nodes on purpose and deletes it. The ports are published on loopback only.
+name: queen-debug-live
+
+x-node: &node
+  image: ${QUEEN_IMAGE:-ghcr.io/queen-mq/queen:2.10.0}
+  restart: "no"
+  stop_grace_period: 15s
+
+x-env: &env
+  QUEEN_RAFT_REPLICATOR: openraft
+  QUEEN_RAFT_PEERS: "1=queen-1:7400/queen-1:6632,2=queen-2:7400/queen-2:6632,3=queen-3:7400/queen-3:6632"
+  QUEEN_RAFT_TOKEN: ${QUEEN_RAFT_TOKEN:?the live test sets this}
+  QUEEN_RAFT_DIR: /var/lib/queen/raft
+  QUEEN_RAFT_DISK_HIGH_PCT: "99"
+
+services:
+  queen-1:
+    <<: *node
+    hostname: queen-1
+    environment: { <<: *env, QUEEN_RAFT_NODE_ID: "1" }
+    ports: ["127.0.0.1:17632:6632"]
+    volumes: ["queen-1:/var/lib/queen/raft"]
+  queen-2:
+    <<: *node
+    hostname: queen-2
+    environment: { <<: *env, QUEEN_RAFT_NODE_ID: "2" }
+    ports: ["127.0.0.1:17633:6632"]
+    volumes: ["queen-2:/var/lib/queen/raft"]
+  queen-3:
+    <<: *node
+    hostname: queen-3
+    environment: { <<: *env, QUEEN_RAFT_NODE_ID: "3" }
+    ports: ["127.0.0.1:17634:6632"]
+    volumes: ["queen-3:/var/lib/queen/raft"]
+
+volumes:
+  queen-1: {}
+  queen-2: {}
+  queen-3: {}
