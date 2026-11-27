@@ -1,10 +1,10 @@
 <script setup>
 import QcJson from '../QcJson.vue'
 import QcSkeleton from '../QcSkeleton.vue'
-// The timers of every queue, the next to fire first. There is no tenant-wide
-// timer read: it is one GET /api/v1/timers/:queue per queue, each its first
-// 100 by key. A click opens one with its payload (a peek); Cancel shows its
-// call first.
+// The timers of every queue, the next to fire first: one GET /api/v1/timers,
+// each queue's count and its first 100 by key, or on a broker without that
+// read one GET /api/v1/timers/:queue per queue. A click opens one with its
+// payload (a peek); Cancel shows its call first.
 import { computed, nextTick, ref, watch } from 'vue'
 import { timerAddr } from '@/api/timerPath'
 import { describeVerdict } from '@/composables/useGatedVerdict'
@@ -19,7 +19,7 @@ const props = defineProps({
   s: { type: Object, required: true },
   where: { type: String, default: '' },
 })
-const { timerList, sweep, sweeping, sweepDone, sweepTotal, timersVerdict, peekTimer, cancelTimer, rereadQueue, canWrite } = props.s
+const { timerList, sweep, sweeping, sweepDone, sweepTotal, sweepError, timersVerdict, peekTimer, cancelTimer, rereadQueue, canWrite } = props.s
 const now = nowMs
 const enc = encodeURIComponent
 
@@ -35,6 +35,8 @@ const list = computed(() => (queue.value ? all.value.filter((t) => t.queue === q
 const rows = computed(() => list.value.slice(0, shown.value))
 const perQueue = computed(() => [...(timerList.value?.perQueue || new Map())].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
 const truncated = computed(() => (sweep.value?.results || []).filter((r) => r.truncated).map((r) => r.queue).sort())
+// The one read counts every queue's timers, past the 100 shown.
+const heldBy = (q) => timerList.value?.perQueue?.get(q)
 const failed = computed(() => timerList.value?.failed || [])
 
 function at(ms) {
@@ -116,9 +118,13 @@ async function cancel() {
         <p class="stt-lead">{{ quiet.title }}.</p>
         <p class="qn-t2" style="margin-top: 6px; max-width: 640px">{{ quiet.detail }}</p>
       </template>
+      <template v-else-if="!timerList && sweepError && !sweeping">
+        <p class="stt-lead">The timers did not come.</p>
+        <p class="qn-t2" style="margin-top: 6px; max-width: 640px">The broker answered: {{ sweepError }}. The page asks again at its next refresh.</p>
+      </template>
       <template v-else-if="!timerList">
       <p class="stt-state qn-t2 qn-num">
-        <template v-if="sweeping">Reading the timers of {{ fmt(sweepTotal) }} queues, one call each: {{ fmt(sweepDone) }} so far…</template>
+        <template v-if="sweeping && sweepTotal">Reading the timers of {{ fmt(sweepTotal) }} queues, one call each: {{ fmt(sweepDone) }} so far…</template>
         <template v-else>Reading the timers…</template>
       </p>
       <QcSkeleton :rows="8" :widths="['100%']" />
@@ -155,17 +161,21 @@ async function cancel() {
           <button type="button" class="qn-btn2" @click="shown += SHOW">Show {{ fmt(Math.min(SHOW, list.length - rows.length)) }} more</button>
         </div>
         <p v-if="truncated.length" class="qn-t2" style="margin-top: 12px">
-          <template v-if="truncated.length === 1"><span class="qn-mono">{{ truncated[0] }}</span> holds more than 100: only its first 100 by key are here, so its soonest may be missing.</template>
+          <template v-if="truncated.length === 1"><span class="qn-mono">{{ truncated[0] }}</span> holds {{ heldBy(truncated[0]) > 100 ? fmt(heldBy(truncated[0])) : 'more than 100' }}: only its first 100 by key are here, so its soonest may be missing.</template>
           <template v-else>{{ fmt(truncated.length) }} queues hold more than 100 each: only their first 100 by key are here, so their soonest may be missing.</template>
         </p>
       </template>
 
+      <p v-if="timerList && sweepError" class="qn-t2" style="margin-top: 12px">
+        <span class="qn-mark red" aria-hidden="true" style="margin-right: 8px" />The last read did not answer ({{ clip(sweepError, 80) }}): these are from {{ ago(sweep.at, now) }}.
+      </p>
       <p v-if="failed.length" class="qn-t2" style="margin-top: 12px">
         <span class="qn-mark red" aria-hidden="true" style="margin-right: 8px" />{{ failed.length === 1 ? 'One queue' : `${fmt(failed.length)} queues` }} did not answer:
         <span class="qn-mono">{{ failed[0].queue }}</span> ({{ clip(failed[0].error, 80) }}){{ failed.length > 1 ? ' and others' : '' }}.
       </p>
       <p class="qn-read" style="margin-top: 12px">
-        Read from <span class="qn-mono">GET /api/v1/timers/{queue}</span>, one call per queue<template v-if="sweep">: {{ fmt(sweep.read) }} {{ sweep.read === 1 ? 'queue' : 'queues' }}<template v-if="sweep.read < sweep.total">, the first by name of {{ fmt(sweep.total) }}</template>, the first 100 timers of each by key, {{ ago(sweep.at, now) }}</template>.
+        <template v-if="sweep?.one">Read from <span class="qn-mono">GET /api/v1/timers</span>, one call for every queue: each queue's count and its first 100 timers by key<template v-if="sweep.complete === false">, as far as the broker's walk went (it stops at 200,000 timers)</template>, {{ ago(sweep.at, now) }}.</template>
+        <template v-else>Read from <span class="qn-mono">GET /api/v1/timers/{queue}</span>, one call per queue<template v-if="sweep">: {{ fmt(sweep.read) }} {{ sweep.read === 1 ? 'queue' : 'queues' }}<template v-if="sweep.read < sweep.total">, the first by name of {{ fmt(sweep.total) }}</template>, the first 100 timers of each by key, {{ ago(sweep.at, now) }}</template>.</template>
       </p>
     </div>
 

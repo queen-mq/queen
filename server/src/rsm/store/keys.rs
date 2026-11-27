@@ -745,6 +745,11 @@ pub fn timers_key_prefix(tenant: &str, queue: &str, prefix: &str) -> Vec<u8> {
     k
 }
 
+/// Every timer of one tenant, in (queue, timer key) byte order.
+pub fn timers_tenant_prefix(tenant: &str) -> Vec<u8> {
+    queues_prefix(tenant)
+}
+
 /// The timer key of a `timers` key, given the length of its queue prefix.
 pub fn timers_key_of(k: &[u8], prefix_len: usize) -> Option<String> {
     Some(read_name(k, prefix_len)?.0)

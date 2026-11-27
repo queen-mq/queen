@@ -1207,8 +1207,13 @@ pub(crate) fn build_raft_router(
         // handler turns each operation into the KV calls above (`locks.rs`).
         .route("/api/v1/locks", post(super::handle_locks_batch))
         // ------------------------------------ timers (WP-2.3) → facade, 025's wire
-        // The four timer routes; the handlers dispatch to the state machine.
-        .route("/api/v1/timers", post(super::handle_timers_batch))
+        // The five timer routes; the handlers dispatch to the state machine.
+        // `GET /api/v1/timers` is every queue's timers at once (the console's
+        // State page).
+        .route(
+            "/api/v1/timers",
+            get(super::handle_timers_list_all).post(super::handle_timers_batch),
+        )
         .route("/api/v1/timers/:queue", get(super::handle_timers_list))
         .route(
             "/api/v1/timers/:queue/*timerKey",
@@ -2250,10 +2255,11 @@ mod tests {
         );
     }
 
-    /// WP-2.3: the four timer routes, through the REAL handlers, over a REAL
+    /// WP-2.3: the five timer routes, through the REAL handlers, over a REAL
     /// `RaftFacade` — the same funnel a client goes through (body
     /// shape, server-owned fields, horizon, the ladder), the state machine
-    /// below it. Schedule → peek → list/count → it fires → the pop sees the
+    /// below it. Schedule → peek → list/count → every queue's list in one
+    /// read → it fires → the pop sees the
     /// message; cancel → `absent` with the caller's txn echoed; a bad call is
     /// the SP's `400 timers_bad_request`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
@@ -2338,6 +2344,37 @@ mod tests {
         .await;
         let (status, text) = body_of(resp).await;
         assert_eq!((status, text.as_str()), (StatusCode::OK, r#"{"count":1}"#));
+
+        // ---- GET /api/v1/timers: every queue's timers in one read -----------
+        let q: super::super::timers::TimersAllParams =
+            serde_json::from_str(r#"{"perQueue":"1"}"#).unwrap();
+        let resp =
+            super::super::handle_timers_list_all(State(st.clone()), tenant(), None, Query(q)).await;
+        let (status, text) = body_of(resp).await;
+        assert_eq!(status, StatusCode::OK, "every timer: {text}");
+        let all: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            (all["timers"].clone(), all["complete"].clone()),
+            (2.into(), true.into()),
+            "{text}"
+        );
+        let hq = &all["queues"][0];
+        assert_eq!(all["queues"].as_array().map(Vec::len), Some(1), "{text}");
+        assert_eq!(
+            (
+                hq["queue"].clone(),
+                hq["count"].clone(),
+                hq["truncated"].clone()
+            ),
+            ("hq".into(), 2.into(), true.into())
+        );
+        assert_eq!(
+            hq["rows"].as_array().map(Vec::len),
+            Some(1),
+            "perQueue=1: {text}"
+        );
+        assert_eq!(hq["rows"][0]["timerKey"], "later", "the first row by key");
+        assert_eq!(hq["rows"][0]["producerSub"], "svc-h");
 
         // ---- it fires on its own; the pop route sees the message ------------
         let mut fired = false;
@@ -2986,6 +3023,22 @@ mod tests {
         let (status, text) = body_of(resp).await;
         assert_eq!(status, StatusCode::OK, "{text}");
         assert!(text.contains("\"deleted\":true"), "embedded delete: {text}");
+
+        // The tenant-wide timer read names a queue as its timers were filed,
+        // through the router (a GET on the batch route's path).
+        let sched = json!({"operations": [{"op": "schedule", "queue": "laravel:default",
+            "timerKey": "k", "delayMs": 600000, "txn": "tx-k", "payload": "e30="}]});
+        let (s, v) = call(&router, Method::POST, "/api/v1/timers", Some(sched)).await;
+        assert_eq!(s, StatusCode::OK, "schedule {v}");
+        let (s, v) = call(&router, Method::GET, "/api/v1/timers?perQueue=5", None).await;
+        assert_eq!(s, StatusCode::OK, "every timer {v}");
+        assert_eq!(
+            (v["timers"].clone(), v["complete"].clone()),
+            (json!(1), json!(true)),
+            "{v}"
+        );
+        assert_eq!(v["queues"][0]["queue"], "laravel:default", "{v}");
+        assert_eq!(v["queues"][0]["rows"][0]["timerKey"], "k", "{v}");
 
         drop((router, st));
         if let Ok(f) = Arc::try_unwrap(facade) {

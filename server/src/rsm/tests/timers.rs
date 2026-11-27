@@ -29,8 +29,8 @@ use crate::rsm::effect::{Effect, TimerRow};
 use crate::rsm::entry::Outcome;
 use crate::rsm::facade::real::RaftFacade;
 use crate::rsm::facade::{
-    Deadline, PopReq, PushReq, ReqCtx, Rsm, RsmBuildCtx, RsmError, TimerPeekReq, TimersCountReq,
-    TimersListReq, TimersReq,
+    Deadline, PopReq, PushReq, ReqCtx, Rsm, RsmBuildCtx, RsmError, TimerPeekReq, TimersAllReq,
+    TimersCountReq, TimersListReq, TimersReq,
 };
 use crate::rsm::planner::timers::{
     parse_timer_ops, timers_results, TimerFireConfig, TimerOp, TimersCommand, TIMER_DLQ_GROUP,
@@ -983,6 +983,106 @@ async fn a_timer_cancelled_before_its_due_time_never_fires() {
     tokio::time::sleep(Duration::from_millis(900)).await;
     assert!(pop_all(&f, "q").await.is_empty(), "a cancelled timer fired");
     assert_eq!(peek(&f, "q", "k").await["found"], false);
+
+    f.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `GET /api/v1/timers`, the console's State page: every queue's timers in
+/// one read, each queue's count and its first rows by key, the very rows the
+/// per-queue list gives. A walk its budget stops says so, and a queue the
+/// caller may not see is left out whole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn every_queues_timers_come_in_one_read() {
+    let dir = scratch("all");
+    let f = RaftFacade::open_with(&build_ctx(&dir), fast_cfg()).expect("open");
+    let mut ops = Vec::new();
+    for (q, keys) in [
+        ("qa", &["a1", "a2", "a3"][..]),
+        ("qb", &["b1"][..]),
+        ("qc", &["c1", "c2"][..]),
+    ] {
+        for k in keys {
+            ops.push(sched_op(q, k, 600_000, &format!("tx-{q}-{k}"), "{}"));
+        }
+    }
+    let r = apply(&f, ops).await;
+    assert!(r.iter().all(|x| x["status"] == "scheduled"), "{r:?}");
+
+    let all: Value = serde_json::from_str(
+        &f.timers_list_all(ctx(), TimersAllReq { per_queue: 2 })
+            .await
+            .expect("every timer")
+            .body,
+    )
+    .unwrap();
+    assert_eq!(
+        (all["timers"].clone(), all["complete"].clone()),
+        (json!(6), json!(true)),
+        "{all}"
+    );
+    let shape = |v: &Value| -> Vec<(String, u64, usize, bool)> {
+        v["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|q| {
+                (
+                    q["queue"].as_str().unwrap().to_string(),
+                    q["count"].as_u64().unwrap(),
+                    q["rows"].as_array().unwrap().len(),
+                    q["truncated"].as_bool().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let want = |rows: &[(&str, u64, usize, bool)]| -> Vec<(String, u64, usize, bool)> {
+        rows.iter()
+            .map(|(q, n, r, t)| (q.to_string(), *n, *r, *t))
+            .collect()
+    };
+    assert_eq!(
+        shape(&all),
+        want(&[("qa", 3, 2, true), ("qb", 1, 1, false), ("qc", 2, 2, false)])
+    );
+    let list: Value = serde_json::from_str(
+        &f.timers_list(
+            ctx(),
+            TimersListReq {
+                queue: "qa".into(),
+                after: None,
+                limit: 2,
+            },
+        )
+        .await
+        .expect("qa's list")
+        .body,
+    )
+    .unwrap();
+    assert_eq!(
+        all["queues"][0]["rows"], list["rows"],
+        "the per-queue list's rows"
+    );
+
+    // A queue the caller may not see is left out; its timers count for no one.
+    let seen: Value =
+        serde_json::from_str(&f.timers_all_for_test("default", 2, 1000, &|q| q != "qb")).unwrap();
+    assert_eq!(
+        shape(&seen),
+        want(&[("qa", 3, 2, true), ("qc", 2, 2, false)])
+    );
+    assert_eq!(seen["timers"], 5, "{seen}");
+
+    // Past its budget the walk stops and says so: four timers walked (qb's
+    // one among them), qc never reached.
+    let cut: Value =
+        serde_json::from_str(&f.timers_all_for_test("default", 2, 4, &|q| q != "qb")).unwrap();
+    assert_eq!(shape(&cut), want(&[("qa", 3, 2, true)]));
+    assert_eq!(
+        (cut["timers"].clone(), cut["complete"].clone()),
+        (json!(3), json!(false)),
+        "{cut}"
+    );
 
     f.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);

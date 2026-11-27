@@ -327,7 +327,9 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
             || under(path, "/api/v1/analytics")
             || under(path, "/api/v1/status")
             || under(path, "/api/v1/resources")
-            || under(path, "/api/v1/consumer-groups");
+            || under(path, "/api/v1/consumer-groups")
+            // every queue's timers at once; one queue's (`/:queue`) stays free
+            || path == "/api/v1/timers";
         return if heavy {
             RouteClass::HeavyRead
         } else {
@@ -398,6 +400,9 @@ mod tests {
             RouteClass::HeavyRead
         );
         assert_eq!(c(Method::GET, "/api/v1/messagesx"), RouteClass::Free);
+        // every queue's timers is a walk of them all; one queue's stays free
+        assert_eq!(c(Method::GET, "/api/v1/timers"), RouteClass::HeavyRead);
+        assert_eq!(c(Method::GET, "/api/v1/timers/q"), RouteClass::Free);
         assert_eq!(
             c(Method::POST, "/streams/v1/state/get"),
             RouteClass::HeavyRead

@@ -129,7 +129,12 @@ const PROXY_ROUTES = "proxy/src/routes.rs";
 // more so: it hands out the payloads of every queue of the tenant at once.
 // POST on the exact path only, every other method `Blocked`. Re-read in full:
 // nothing else in the function moved, and `is_operator_route` is untouched.
-const CLASSIFY_FINGERPRINT = "4ae26555b5aecfd2";
+// 2026-11-27: the arm for the bare timers path took GET beside POST, as
+// `Gated(Timers, Read)`: `GET /api/v1/timers` is every queue's timers of the
+// tenant in one read (the console's State page). PUT and DELETE there stay
+// `Blocked`. Re-read in full: nothing else in the function moved, and
+// `is_operator_route` is untouched.
+const CLASSIFY_FINGERPRINT = "3c3fba1fad341b81";
 const OPERATOR_FINGERPRINT = "0eca43d77dc8c6f2";
 
 // --- mirror of `is_operator_route` -----------------------------------------
@@ -274,7 +279,7 @@ function classify(m, p) {
     return m === "POST" ? "gated (kv)" : "blocked";
   }
   if (p === "/api/v1/timers" || p === "/api/v1/timers/") {
-    return m === "POST" ? "gated (timers)" : "blocked";
+    return ["GET", "POST"].includes(m) ? "gated (timers)" : "blocked";
   }
   if (p.startsWith("/api/v1/timers/")) {
     return ["GET", "DELETE"].includes(m) ? "gated (timers)" : "blocked";

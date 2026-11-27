@@ -681,6 +681,33 @@ pub trait TypedReads: Reads {
         }
     }
 
+    /// Every timer of one tenant in (queue, timer key) BYTE order, at most
+    /// `limit`, until `cb` returns false. `cb` gets the queue, the timer key
+    /// and the stored row undecoded: a caller that only counts decodes none
+    /// (`rows::timer_decode` when it wants one).
+    fn scan_tenant_timers(
+        &self,
+        tenant: &str,
+        limit: usize,
+        cb: &mut dyn FnMut(&str, &str, &[u8]) -> bool,
+    ) -> Result<usize> {
+        let prefix = keys::timers_tenant_prefix(tenant);
+        let mut err: Option<StoreError> = None;
+        let n = self.scan_raw(Keyspace::Timers, &prefix, &prefix, limit, &mut |k, v| {
+            match keys::timers_parts(k) {
+                Some((_, queue, key)) => cb(&queue, &key, v),
+                None => {
+                    err = Some(StoreError::corrupt(Keyspace::Timers, "timer key"));
+                    false
+                }
+            }
+        })?;
+        match err {
+            Some(e) => Err(e),
+            None => Ok(n),
+        }
+    }
+
     /// Exactly how many of one queue's timers have a key starting with the
     /// LITERAL `prefix`: a prefix range walk, no row decoded.
     fn count_timers_with_prefix(&self, tenant: &str, queue: &str, prefix: &str) -> Result<u64> {

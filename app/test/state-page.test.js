@@ -146,6 +146,28 @@ test('timers of every queue merge into one list, the next to fire first', () => 
   assert.equal(r.perQueue.get('emails.send'), 2)
 })
 
+test('the one read counts every timer, past the hundred a queue shows', () => {
+  const t = (key, s) => ({ timerKey: key, partition: 'p', deliverAt: iso(T + s * 1000), attempts: 0, claimed: false })
+  // GET /api/v1/timers: each queue's count beside its first rows by key
+  const one = [
+    { queue: 'emails.send', rows: [t('b', 600), t('a', 60)], truncated: true, count: 5000 },
+    { queue: 'payments.capture', rows: [t('c', 30)], truncated: false, count: 1 },
+  ]
+  const r = timerRows(one)
+  assert.deepEqual(r.rows.map((x) => `${x.queue}/${x.key}`), ['payments.capture/c', 'emails.send/a', 'emails.send/b'])
+  assert.deepEqual([r.count, r.queues, r.more], [5001, 2, false])
+  assert.equal(r.perQueue.get('emails.send'), 5000, 'the picker says what the queue holds')
+  const kv = { keys: 9, bytes: 2048, namespaces: 2 }
+  assert.equal(
+    summaryLine({ kv, locks: { locks: 0, semaphores: 0 }, timers: r }),
+    '9 keys in 2 namespaces, 2 KB in all. No locks are held, and 5,001 timers wait in 2 queues.',
+  )
+  // a walk the broker stopped at its budget counts what it saw: a floor
+  const cut = timerRows(one, { complete: false })
+  assert.deepEqual([cut.count, cut.more], [5001, true])
+  assert.match(summaryLine({ kv, locks: { locks: 0, semaphores: 0 }, timers: cut }), /and over 5,001 timers wait in 2 queues\.$/)
+})
+
 test('parseJson answers in the parser words, without its prefix', () => {
   assert.equal(parseJson('').error, 'it is empty')
   assert.equal(parseJson('{"a":1}').compact, '{"a":1}')

@@ -85,7 +85,7 @@ use super::{
     AckOut, AckReq, ApiOut, ApiReq, DepthOut, DepthReq, DlqHeadOut, DlqHeadReq, KvFailure,
     KvListReq, KvOut, KvReq, PendingReq, PopDiscoverReq, PopOptions, PopOut, PopPinnedReq, PopReq,
     PushOut, PushReq, RaftHealth, RenewOut, RenewReq, ReqCtx, Rsm, RsmBuildCtx, RsmError,
-    TimerPeekReq, TimerReadOut, TimersCountReq, TimersListReq, TimersOut, TimersReq,
+    TimerPeekReq, TimerReadOut, TimersAllReq, TimersCountReq, TimersListReq, TimersOut, TimersReq,
 };
 
 /// The KV receiver (WP-2.2): 024's pass 1 here, the writes through the planner,
@@ -1846,6 +1846,21 @@ impl RaftFacade {
                 Ok(out)
             })
             .expect("read dlq rows")
+    }
+
+    /// Test-only: `GET /api/v1/timers`'s walk on this node's store for
+    /// `tenant`, with the budget and the scope filter a test picks.
+    #[cfg(test)]
+    pub(crate) fn timers_all_for_test(
+        &self,
+        tenant: &str,
+        per_queue: usize,
+        budget: usize,
+        allow: &dyn Fn(&str) -> bool,
+    ) -> String {
+        self.store
+            .read(|r| timers_all_json(r, tenant, per_queue, budget, allow))
+            .expect("read every timer")
     }
 
     /// Test-only: what the dashboard's group lag sampler reads on this node,
@@ -6989,6 +7004,85 @@ fn timers_bad_request(message: impl Into<String>) -> RsmError {
     }
 }
 
+/// The most timers one `GET /api/v1/timers` walks: past it the answer says
+/// `"complete": false`, and its counts are what the walk saw.
+pub(crate) const TIMERS_ALL_BUDGET: usize = 200_000;
+
+/// `GET /api/v1/timers`: one walk over `tenant`'s timers in (queue, timer key)
+/// order, at most `budget`. Per queue, its count and its first `per_queue`
+/// rows by key, the per-queue list's row shape (no payload); only those rows
+/// are decoded. A queue `allow` refuses is left out whole.
+///
+/// `{"queues": [{"queue", "count", "rows", "truncated"}], "timers": n,
+/// "complete": bool}`: `truncated` when the queue has more than its rows,
+/// `complete` false when the budget stopped the walk.
+pub(crate) fn timers_all_json<R: TypedReads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    per_queue: usize,
+    budget: usize,
+    allow: &dyn Fn(&str) -> bool,
+) -> crate::rsm::store::Result<String> {
+    use serde_json::{json, Value};
+    struct Group {
+        queue: String,
+        shown: bool,
+        count: u64,
+        rows: Vec<Value>,
+    }
+    fn close(out: &mut Vec<Value>, g: Option<Group>) {
+        if let Some(g) = g.filter(|g| g.shown) {
+            let truncated = g.count > g.rows.len() as u64;
+            out.push(
+                json!({"queue": g.queue, "count": g.count, "rows": g.rows, "truncated": truncated}),
+            );
+        }
+    }
+    let mut queues: Vec<Value> = Vec::new();
+    let mut cur: Option<Group> = None;
+    let (mut total, mut walked) = (0u64, 0usize);
+    let mut bad: Option<crate::rsm::store::StoreError> = None;
+    r.scan_tenant_timers(tenant, budget.saturating_add(1), &mut |queue, key, raw| {
+        walked += 1;
+        if walked > budget {
+            return false;
+        }
+        if cur.as_ref().is_none_or(|g| g.queue != queue) {
+            close(&mut queues, cur.take());
+            cur = Some(Group {
+                queue: queue.to_string(),
+                shown: allow(queue),
+                count: 0,
+                rows: Vec::new(),
+            });
+        }
+        let g = cur.as_mut().expect("a group for this queue");
+        if !g.shown {
+            return true;
+        }
+        g.count += 1;
+        total += 1;
+        if g.rows.len() < per_queue {
+            match rows::timer_decode(raw) {
+                Ok(row) => g.rows.push(list_row_json(queue, key, &row)),
+                Err(e) => {
+                    bad = Some(crate::rsm::store::StoreError::corrupt(
+                        crate::rsm::store::Keyspace::Timers,
+                        format!("{e}"),
+                    ));
+                    return false;
+                }
+            }
+        }
+        true
+    })?;
+    if let Some(e) = bad {
+        return Err(e);
+    }
+    close(&mut queues, cur.take());
+    Ok(json!({"queues": queues, "timers": total, "complete": walked <= budget}).to_string())
+}
+
 impl RaftFacade {
     /// The receiver of a timers call: 025's validation and the frame packing
     /// (O20 — the planner never packs), the R-108 key bound, then ONE
@@ -7146,6 +7240,37 @@ impl RaftFacade {
                     m.insert("nextAfter".into(), next_after);
                     Ok(serde_json::Value::Object(m).to_string())
                 })
+                .map_err(read_error)
+        })
+        .await
+    }
+
+    /// `GET /api/v1/timers`: the console's State page read every queue's
+    /// timers one call per queue (175 calls and 9.7 s on a 174-queue stage).
+    /// Here it is one walk of the tenant's timers ([`timers_all_json`]),
+    /// linearizable like the per-queue list.
+    async fn timers_list_all_impl(
+        &self,
+        ctx: ReqCtx,
+        req: TimersAllReq,
+    ) -> Result<TimerReadOut, RsmError> {
+        let tenant = ctx.tenant.clone();
+        let scope = ctx.scope.clone();
+        let per_queue = list_limit(req.per_queue);
+        self.timer_read(&ctx, move |store| {
+            // A queue the caller's scope does not cover is not shown at all.
+            let allow = |queue: &str| {
+                scope.as_deref().is_none_or(|s| {
+                    s.allows(&Ask::Timer {
+                        queue,
+                        key: Keys::All,
+                        partition: None,
+                        write: false,
+                    })
+                })
+            };
+            store
+                .read(|r| timers_all_json(r, &tenant, per_queue, TIMERS_ALL_BUDGET, &allow))
                 .map_err(read_error)
         })
         .await
@@ -7685,6 +7810,14 @@ impl Rsm for RaftFacade {
         req: TimersCountReq,
     ) -> Result<TimerReadOut, RsmError> {
         self.timers_count_impl(ctx, req).await
+    }
+
+    async fn timers_list_all(
+        &self,
+        ctx: ReqCtx,
+        req: TimersAllReq,
+    ) -> Result<TimerReadOut, RsmError> {
+        self.timers_list_all_impl(ctx, req).await
     }
 
     async fn api(&self, ctx: ReqCtx, req: ApiReq) -> Result<ApiOut, RsmError> {

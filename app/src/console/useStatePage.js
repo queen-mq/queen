@@ -9,11 +9,15 @@
 //                                                 lands in every access log on the way (§5.5)
 //   POST /api/v1/resources/kv/list {queen-locks}  the permits held, and only when that namespace
 //                                                 has rows: no namespace, no lock, no call
-//   GET  /api/v1/timers/:queue?limit=100          one call per queue, four at a time; every tick
-//                                                 on the Timers view, every tenth elsewhere. The
-//                                                 queue listing's `timerRows` is always 0 on a 2.x
-//                                                 broker (it does not measure timers), so this is
-//                                                 the only way to know
+//   GET  /api/v1/timers?perQueue=100              every queue's timers in one call (broker 2.11):
+//                                                 each queue's count and first 100 by key; every
+//                                                 tick on the Timers view, every tenth elsewhere.
+//                                                 The queue listing's `timerRows` is always 0 on a
+//                                                 2.x broker (it does not measure timers), so this
+//                                                 is the only way to know
+//   GET  /api/v1/timers/:queue?limit=100          the same, one call per queue, four at a time, on
+//                                                 a broker or proxy without the one read (405, or
+//                                                 404 route_blocked), remembered for the cluster
 // Writes, each shown first in a QcDialog with its call:
 //   PUT /api/v1/kv/:ns/:key   DELETE /api/v1/kv/:ns/:key   DELETE /api/v1/timers/:queue/:key
 import { computed, ref, shallowRef, watch } from 'vue'
@@ -43,6 +47,10 @@ const byteOrder = (a, b) => (a < b ? -1 : a > b ? 1 : 0)
 const listKv = routeSupport.guard('kv', (body, config) => kvApi.list(body, { ...config, probe: true, quiet: true }))
 const listNs = routeSupport.guard('kv', (config) => kvApi.namespaces({ ...config, probe: true, quiet: true }))
 const listTimers = routeSupport.guard('timers', (q, params, config) => timersApi.list(q, params, { ...config, probe: true, quiet: true }))
+// Its own route key: a broker without the one read still has every other
+// timers route, and the sweep below needs them.
+const ONE_READ = 'timers-all'
+const listAllTimers = routeSupport.guard(ONE_READ, (params, config) => timersApi.listAll(params, { ...config, probe: true, quiet: true }))
 const peekCall = routeSupport.guard('timers', (q, k, config) => timersApi.peek(q, k, { ...config, probe: true, quiet: true }))
 
 /** The broker's own sentence for a KV refusal, else the shared one. */
@@ -150,23 +158,56 @@ export function useStatePage({ view, nsAsked }) {
   }
   const lockList = computed(() => (locks.value ? lockRows(locks.value.permits) : null))
 
-  // ---- timers: one read per queue -------------------------------------------
-  const sweep = shallowRef(null) // the last complete sweep {results, at, total, read}
+  // ---- timers: one read for every queue, else one read per queue ---------------
+  // The last complete read: {results, at, one, complete} from the one read,
+  // {results, at, total, read} from the per-queue sweep.
+  const sweep = shallowRef(null)
   const sweeping = ref(false)
   const sweepDone = ref(0)
   const sweepTotal = ref(0)
+  const sweepError = ref(null) // the one read's failure; the last read stays on screen
   const timersVerdict = ref(null)
   let sweepEpoch = -1
+  /** The one read. True when it answered (or failed for good), false to sweep. */
+  async function readAll(at) {
+    if (routeSupport.missing(ONE_READ)) return false
+    try {
+      const r = await listAllTimers({ perQueue: TIMER_LIMIT })
+      if (at !== currentEpoch()) return true
+      const d = r.data || {}
+      const results = (Array.isArray(d.queues) ? d.queues : []).map((q) => ({
+        queue: q.queue, rows: q.rows || [], truncated: q.truncated === true, count: Number(q.count),
+      }))
+      timersVerdict.value = null
+      sweepError.value = null
+      sweep.value = { results, at: Date.now(), one: true, complete: d.complete !== false }
+      return true
+    } catch (e) {
+      if (at !== currentEpoch()) return true
+      // An older broker routes only POST here, and answers 405 for good.
+      if (e?.status === 405) routeSupport.remember(ONE_READ, e)
+      if (routeSupport.missing(ONE_READ)) return false
+      const v = gatedVerdict(e)
+      // The family is not here (or not in the plan): the per-queue reads say the same.
+      if (v === 'absent' || v === 'gated') timersVerdict.value = v
+      else sweepError.value = describeApiError(e)
+      return true
+    }
+  }
   async function sweepTimers() {
     const at = currentEpoch()
     if (sweeping.value && sweepEpoch === at) return
     if (timersVerdict.value && timersVerdict.value !== 'paused') return
-    if (!qs.lastFetched.value) return // the queue listing first
-    const names = [...new Set((qs.queues.value || []).map((q) => q.name || q.queue).filter(Boolean))].sort(byteOrder)
-    const list = names.slice(0, SWEEP_MAX)
     sweepEpoch = at
     sweeping.value = true
     sweepDone.value = 0
+    sweepTotal.value = 0
+    const answered = await readAll(at)
+    if (at !== currentEpoch()) return
+    // The per-queue sweep needs the queue listing first; its landing calls again.
+    if (answered || !qs.lastFetched.value) { sweeping.value = false; return }
+    const names = [...new Set((qs.queues.value || []).map((q) => q.name || q.queue).filter(Boolean))].sort(byteOrder)
+    const list = names.slice(0, SWEEP_MAX)
     sweepTotal.value = list.length
     const results = []
     let stop = null
@@ -193,10 +234,12 @@ export function useStatePage({ view, nsAsked }) {
     timersVerdict.value = null
     sweep.value = { results, at: Date.now(), total: names.length, read: list.length }
   }
-  const timerList = computed(() => (sweep.value ? timerRows(sweep.value.results) : null))
+  const timerList = computed(() => (sweep.value ? timerRows(sweep.value.results, { complete: sweep.value.complete !== false }) : null))
 
-  /** One queue again (after a cancel), patched into the last sweep. */
+  /** One queue again (after a cancel), patched into the last sweep; the one
+   *  read is read again whole, which keeps every count exact. */
   async function rereadQueue(q) {
+    if (sweep.value?.one) return sweepTimers()
     const at = currentEpoch()
     try {
       const r = await listTimers(q, timerListParams(undefined, TIMER_LIMIT))
@@ -258,7 +301,9 @@ export function useStatePage({ view, nsAsked }) {
   // when the namespaces land and the first one becomes `ns` (the watch above).
   if (ns.value) loadKeys()
   loadNamespaces().then(() => loadLocks())
-  watch(() => qs.lastFetched.value, (t) => { if (t && !sweep.value) sweepTimers() }, { immediate: true })
+  // The one read needs no queue listing, so it goes at once; the per-queue
+  // sweep it falls back to waits for the listing, which brings it here again.
+  watch(() => qs.lastFetched.value, () => { if (!sweep.value) sweepTimers() }, { immediate: true })
   watch(view, (v) => {
     if (v === 'keys') loadKeys()
     if (v === 'locks') loadLocks()
@@ -268,7 +313,7 @@ export function useStatePage({ view, nsAsked }) {
     nsData.value = null; nsError.value = null; kvVerdict.value = null
     keys.value = null; keysError.value = null; after.value = null; pageNo.value = 0; prefix.value = ''
     locks.value = null; locksError.value = null
-    sweep.value = null; sweeping.value = false; timersVerdict.value = null
+    sweep.value = null; sweeping.value = false; sweepError.value = null; timersVerdict.value = null
   })
 
   return {
@@ -276,7 +321,7 @@ export function useStatePage({ view, nsAsked }) {
     nsData, nsError, kvVerdict, ns, listed, loadNamespaces,
     prefix, pageNo, keysPage, keysError, keysLoading, nextPage, firstPage, loadKeys,
     locks, locksError, lockList, loadLocks,
-    sweep, sweeping, sweepDone, sweepTotal, timersVerdict, timerList, sweepTimers, rereadQueue, peekTimer,
+    sweep, sweeping, sweepDone, sweepTotal, sweepError, timersVerdict, timerList, sweepTimers, rereadQueue, peekTimer,
     kvTotals, lockSum, timerSum,
     putKey, deleteKey, cancelTimer, afterKvWrite,
   }

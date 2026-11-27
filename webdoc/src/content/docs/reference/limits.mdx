@@ -165,6 +165,12 @@ sourceOfTruth:
 # families; phase2/reads.rs counts each queue's partitions and each group's positions in the group
 # lag walk (group_lags); phase2.rs hands them to the collector with the group lag (group_lags_of);
 # facade/real.rs changes only a test helper (group_lags_for_test). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): handlers/raft.rs routes it beside POST on the same path;
+# handlers/timers.rs adds its handler (perQueue, 100 by default); facade/mod.rs adds its trait
+# method and request; facade/real.rs serves it as one linearizable walk of the tenant's timers, at
+# most 200,000; memguard.rs counts it as a large read. This page: the memory guard's large reads
+# name every queue's timers, and Timers gives both lists' sizes and the walk's 200,000.
 ---
 
 Most of QueenMQ's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -201,7 +207,7 @@ the command limit are refused, and those items answer `status: "error"` in the 2
 | Limit | Default | Setting | Applied in |
 |---|---|---|---|
 | The node's memory limit, which the guard below compares the process's anonymous memory with | the cgroup's `memory.max`; with neither, the guard is off | `QUEEN_MEMORY_LIMIT_BYTES` | `server/src/memguard.rs` |
-| Large reads (message, dead-letter and trace pages, analytics, status, resources and KV listings, consumer groups, stream states, fetch) answer 503 `memory_pressure` | past 80 % of the limit | `QUEEN_MEMGUARD_SOFT_PCT` | same |
+| Large reads (message, dead-letter and trace pages, analytics, status, resources and KV listings, every queue's timers, consumer groups, stream states, fetch) answer 503 `memory_pressure` | past 80 % of the limit | `QUEEN_MEMGUARD_SOFT_PCT` | same |
 | Writes that grow the stored state (push, transaction, stream cycle, KV, timer and trace writes) answer 503 `memory_pressure` too | past 90 % | `QUEEN_MEMGUARD_HARD_PCT` | same |
 | Large reads served at once; one that waits 2 s for a slot answers 503 `busy` | 32 | `QUEEN_HEAVY_READS_MAX` | same |
 | Open connections on the broker port; past it a new one is closed as it is accepted | 20,000 | `QUEEN_MAX_CONNECTIONS` | `server/src/main.rs` |
@@ -425,6 +431,11 @@ renew in the background do so every third of the lifetime.
 | Operations per call | 256 | 256 | `QUEEN_TIMERS_MAX_OPS_PER_CALL` (the route only) |
 | Schedules per tenant | share the KV write rate | not counted | `QUEEN_KV_WRITE_RATE` |
 | One `(queue, timerKey)` per call | yes | yes | |
+
+A list of one queue's timers (`GET /api/v1/timers/:queue`) gives 100 rows by default and at most
+1,000 (`limit`). The list of every queue's (`GET /api/v1/timers`) gives each queue's count and its
+first `perQueue` rows, 100 by default and at most 1,000, and walks at most 200,000 timers: past
+that it answers `"complete": false`, with the counts of the timers it walked.
 
 The leader fires due timers every 50 ms (`QUEEN_RAFT_TIMER_TICK_MS`), at most 256 timers and 4 MiB
 per tick. A fire that fails is retried with a backoff from 1 s to 60 s, and after 5 failed

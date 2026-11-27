@@ -62,6 +62,10 @@ verifiedBy:
 # states changes.
 # sourceOfTruth re-read 2026-11-15 (a transaction's reads at its own position, Jepsen W32): facade/real/kv.rs, kv_reads.rs: a transaction's `kv` reads are rendered by apply at its own position in the log (rsm/kv_reads), and one that reads logs a no-op last (planner/txn.rs). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-16 (locks): when the node that took an acquire judged the call's own write expired by its clock, locks.rs writes that slot again first: the call keeps the one permit it wrote and answers it without `already` (a semaphore no longer takes a second slot for the owner). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): handlers/timers.rs adds its handler (perQueue, 100 by
+# default); proxy routes.rs classes it as a timers read; PUT and DELETE on the path stay blocked.
+# This page: a Timers line names both reads, one queue's and every queue's.
 ---
 
 The transaction above already used two of the three: `kv.put` stored the order's state, and `timer()` scheduled tomorrow's reminder, which arrives as a message.
@@ -110,6 +114,7 @@ A timer is a message scheduled for later. It is named by its queue and its key, 
 - A cancel that answers `absent` may mean the timer already fired. A handler that compensates (a payment timeout) checks the entity's state before it acts.
 - For the same delay on every message of a queue, use the queue's `delayedProcessing` instead.
 - A schedule takes [headers](/writing-applications/headers/) (`headers`), and the message it fires carries them.
+- To see what is waiting, `GET /api/v1/timers/:queue` lists one queue's timers by key, and `GET /api/v1/timers` every queue's in one read: each queue's count and its first timers (`perQueue`, 100 by default). The console's **State** page shows it.
 
 <Why>a timer scheduled in the transaction of the step that wants it exists exactly when that step committed: no cron job, no table to scan, no reminder for an order that was never paid.</Why>
 

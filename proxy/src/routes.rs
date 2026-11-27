@@ -531,10 +531,11 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
 
     // --- timers (§8.1, §9.6) ---
     if p == "/api/v1/timers" || p == "/api/v1/timers/" {
-        return if *m == Method::POST {
-            RouteClass::Gated(Feature::Timers, GatedOp::Mixed)
-        } else {
-            RouteClass::Blocked
+        return match *m {
+            Method::POST => RouteClass::Gated(Feature::Timers, GatedOp::Mixed),
+            // every queue's timers at once (the console's State page)
+            Method::GET => RouteClass::Gated(Feature::Timers, GatedOp::Read),
+            _ => RouteClass::Blocked,
         };
     }
     if p.starts_with("/api/v1/timers/") {
@@ -1195,6 +1196,11 @@ mod tests {
             classify(&Method::GET, "/api/v1/timers/orders"),
             RouteClass::Gated(Feature::Timers, GatedOp::Read)
         );
+        // and so is every queue's list at once
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/timers"),
+            RouteClass::Gated(Feature::Timers, GatedOp::Read)
+        );
         // The batch carries both halves, so its class says "look at the body".
         assert_eq!(
             classify(&Method::POST, "/api/v1/timers"),
@@ -1202,6 +1208,10 @@ mod tests {
         );
         assert_eq!(
             classify(&Method::PUT, "/api/v1/timers"),
+            RouteClass::Blocked
+        );
+        assert_eq!(
+            classify(&Method::DELETE, "/api/v1/timers"),
             RouteClass::Blocked
         );
     }
@@ -1329,6 +1339,7 @@ mod tests {
             (Method::POST, "/api/v1/timers"),
             (Method::DELETE, "/api/v1/timers/q/k"),
             (Method::GET, "/api/v1/timers/q/k"),
+            (Method::GET, "/api/v1/timers"),
         ] {
             assert_ne!(classify(&m, p), RouteClass::Produce, "{m} {p}");
         }

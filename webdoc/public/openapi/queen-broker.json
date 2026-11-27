@@ -1254,6 +1254,55 @@
       }
     },
     "/api/v1/timers": {
+      "get": {
+        "operationId": "timers_list_all",
+        "tags": [
+          "Key/value state and timers"
+        ],
+        "summary": "GET /api/v1/timers",
+        "parameters": [
+          {
+            "name": "perQueue",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/timers.rs::handle_timers_list_all",
+        "x-queen-query-params": "typed",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
       "post": {
         "operationId": "timers_batch",
         "tags": [

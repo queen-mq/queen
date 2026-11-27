@@ -67,6 +67,15 @@ left out when `QUEEN_METRICS_GROUP_LAG_MAX_CURSORS` stops that pass. A filtered 
 are part of its group: they count among its positions, under its queue's name, and in no queue's
 partitions.
 
+**Server and console: every queue's timers in one read.** `GET /api/v1/timers` answers, for each
+queue of the tenant that holds timers, its count and its first `perQueue` timers by key (100 by
+default, at most 1,000), in the rows of `GET /api/v1/timers/:queue`, without payloads. It is one
+linearizable walk of the tenant's timers, at most 200,000: past that it answers `"complete": false`,
+and its counts are those of the timers it walked. Like the other listings, a client token cannot
+call it, and the memory guard counts it as a large read. The console's State page read each
+queue's timers with a call of its own, 175 calls and about 10 s on a stage cluster of 174 queues;
+it now makes one, and on a broker without the route it reads each queue as before.
+
 ## 2.10.0 - 2026-11-20
 
 **Upgrading from 2.9.x: a rolling restart.** 2.10.0 keeps the data format of 2.9.0 (cluster

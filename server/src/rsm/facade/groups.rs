@@ -360,6 +360,13 @@ impl Rsm for GroupRouter {
     ) -> Result<TimerReadOut, RsmError> {
         self.pick(&ctx.tenant).timers_count(ctx, req).await
     }
+    async fn timers_list_all(
+        &self,
+        ctx: ReqCtx,
+        req: TimersAllReq,
+    ) -> Result<TimerReadOut, RsmError> {
+        self.pick(&ctx.tenant).timers_list_all(ctx, req).await
+    }
     async fn api(&self, ctx: ReqCtx, req: ApiReq) -> Result<ApiOut, RsmError> {
         // The cluster link is the node's, not a tenant's: every group has its
         // own part in it.

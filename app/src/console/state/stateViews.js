@@ -332,14 +332,20 @@ export function leaseLeft(endsMs, now = Date.now()) {
  * The sweep's answers → one list, the next to fire first.
  * `results` is `[{queue, rows, truncated, error}]` (one per queue read).
  */
-export function timerRows(results) {
+export function timerRows(results, { complete = true } = {}) {
   const out = []
   const failed = []
   let more = false
   const queues = new Set()
+  // The one read (GET /api/v1/timers) counts every queue's timers; the
+  // per-queue reads only show rows, at most 100 a queue.
+  const counts = new Map()
+  let counted = true
   for (const r of Array.isArray(results) ? results : []) {
     if (!r) continue
     if (r.error) { failed.push({ queue: r.queue, error: r.error }); continue }
+    if (Number.isFinite(r.count)) counts.set(r.queue, r.count)
+    else counted = false
     if (r.truncated) more = true
     for (const t of Array.isArray(r.rows) ? r.rows : []) {
       queues.add(r.queue)
@@ -360,6 +366,14 @@ export function timerRows(results) {
   out.sort((a, b) => (a.atMs ?? Infinity) - (b.atMs ?? Infinity) || byteOrder(a.queue, b.queue) || byteOrder(a.key, b.key))
   const perQueue = new Map()
   for (const t of out) perQueue.set(t.queue, (perQueue.get(t.queue) || 0) + 1)
+  if (counted && counts.size) {
+    // Exact, past the rows on screen; short of the truth only where the
+    // broker's walk stopped (`complete: false`).
+    let count = 0
+    for (const [q, n] of counts) if (n > 0) { perQueue.set(q, n); count += n }
+    const holding = [...counts.values()].filter((n) => n > 0).length
+    return { rows: out, count, queues: holding, more: !complete, failed, perQueue }
+  }
   return { rows: out, count: out.length, queues: queues.size, more, failed, perQueue }
 }
 

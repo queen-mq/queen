@@ -281,6 +281,12 @@ export const kv = {
 export const timers = {
   /** Keyset page: `{after?, limit?}` → `{rows, truncated, nextAfter}`; `after` is exclusive on timerKey. */
   list: (queue, params, config) => client.get(timerQueueAddr(queue), { params, ...config }),
+  /** Every queue's timers of the tenant in one read (broker 2.11): `{perQueue?}` →
+   *  `{queues: [{queue, count, rows, truncated}], timers, complete}`, each queue's
+   *  first `perQueue` rows by key (the list's rows), `complete: false` when the
+   *  broker's walk stopped at its budget. An older broker answers 405 (it routes
+   *  only POST on this path), an older proxy 404 `route_blocked`. */
+  listAll: (params, config) => client.get('/api/v1/timers', { params, ...config }),
   /** Exact count under a NON-EMPTY prefix (the SP refuses a whole-queue count) → `{count}`. */
   count: (queue, prefix, config) =>
     client.get(timerQueueAddr(queue), { params: { mode: 'count', prefix }, ...config }),

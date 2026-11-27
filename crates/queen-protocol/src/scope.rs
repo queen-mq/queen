@@ -1103,6 +1103,7 @@ mod tests {
             ("GET", "/api/v1/pop/queue/commands/partition/"),
             ("POST", "/api/v1/configure"),
             ("GET", "/api/v1/resources/queues"),
+            ("GET", "/api/v1/timers"),
             ("POST", "/api/v1/resources/kv/list"),
             ("GET", "/api/v1/resources/kv/namespaces"),
             ("POST", "/api/v1/locks"),

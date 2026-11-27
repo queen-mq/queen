@@ -893,6 +893,14 @@ pub struct TimersCountReq {
     pub prefix: String,
 }
 
+/// `GET /api/v1/timers` — every queue's timers in one read: each queue's
+/// first `per_queue` rows by timer key (clamped to `[1, 1000]`) and its count,
+/// for the console's State page, which read them one queue at a time.
+#[derive(Clone, Debug)]
+pub struct TimersAllReq {
+    pub per_queue: i32,
+}
+
 /// A timer read, rendered: the JSON body 025's read procedures return.
 #[derive(Clone, Debug)]
 pub struct TimerReadOut {
@@ -1280,6 +1288,14 @@ pub trait Rsm: Send + Sync {
         &self,
         _ctx: ReqCtx,
         _req: TimersCountReq,
+    ) -> Result<TimerReadOut, RsmError> {
+        Err(RsmError::Unsupported)
+    }
+    /// `GET /api/v1/timers`: every queue's timers of the tenant in one read.
+    async fn timers_list_all(
+        &self,
+        _ctx: ReqCtx,
+        _req: TimersAllReq,
     ) -> Result<TimerReadOut, RsmError> {
         Err(RsmError::Unsupported)
     }

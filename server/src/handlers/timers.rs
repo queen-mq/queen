@@ -866,6 +866,37 @@ pub async fn handle_timers_list(
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct TimersAllParams {
+    #[serde(rename = "perQueue")]
+    per_queue: Option<String>,
+}
+
+/// `GET /api/v1/timers`: every queue's timers of the tenant in one read,
+/// each queue's first `perQueue` rows by key (default 100, clamped to
+/// `[1, 1000]` like the per-queue list) and its count.
+pub async fn handle_timers_list_all(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<Tenant>,
+    scope: Option<Extension<crate::scope::ClientScope>>,
+    Query(q): Query<TimersAllParams>,
+) -> Response {
+    if let Some(resp) = gated(&st, tenant.as_str(), crate::switches::Surface::TimerRead, 0) {
+        return resp;
+    }
+    let per_queue = q
+        .per_queue
+        .as_deref()
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(100);
+    let ctx = raft_ctx(&st, tenant.as_str()).with_scope(scope.map(|Extension(s)| s));
+    let req = crate::rsm::facade::TimersAllReq { per_queue };
+    match st.rsm.timers_list_all(ctx, req).await {
+        Ok(out) => json(StatusCode::OK, out.body),
+        Err(e) => raft_error_response(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
