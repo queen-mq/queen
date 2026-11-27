@@ -95,6 +95,10 @@ sourceOfTruth:
 # exports queen_dlq_bytes and queen_dlq_bodies_not_kept_total. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): facade/real.rs changes only a
 # test helper (group_lags_for_test). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (a test's hold on heartbeats): replicator/raft/log_store.rs gains
+# a gate that holds a leader's heartbeats to one member; only in test builds (#[cfg(test)]),
+# for the raft test that a heartbeat could beat to a member coming back. Nothing this page states
+# changes.
 ---
 
 A broker that promises "all or nothing" has to keep the promise exactly when something breaks. We test QueenMQ with Jepsen on five nodes, under kill -9, network partitions, paused processes, clock jumps, power loss and corrupted files. This page says what each API guarantees, what an answered write means, and where the guarantees stop.

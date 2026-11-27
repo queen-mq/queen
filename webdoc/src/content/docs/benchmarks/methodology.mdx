@@ -76,6 +76,10 @@ sourceOfTruth:
 # maintenance.rs bounds a queue's dead-letter byte estimate by what all dead letters hold and
 # deletes the oldest by their own size. No benchmark here files dead letters. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-26 (a test's hold on heartbeats): replicator/raft/log_store.rs gains
+# a gate that holds a leader's heartbeats to one member; only in test builds (#[cfg(test)]),
+# for the raft test that a heartbeat could beat to a member coming back. Nothing this page states
+# changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one

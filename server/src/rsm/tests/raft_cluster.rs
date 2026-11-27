@@ -884,6 +884,15 @@ async fn a_stream_the_purge_overtook_sends_no_hole() {
     }
     let _ = close(nodes[f].take().unwrap());
     let had = matched_by(nodes[l].as_ref().unwrap(), id).expect("matched");
+    // Heartbeats to the member wait until its stream has read. The stream to a
+    // member that was down connects only after its reopen pause, up to a
+    // second, and reads only then; a heartbeat goes every 100 ms. One that
+    // reached the member first would find its log gone: the leader forgets
+    // `had` at once and never reads after it (CI, 2026-11-26: "the stream to
+    // the member reads within 30 s"). Held from here, no heartbeat that left
+    // before the hold is still on its way when the member comes back.
+    let beats = nodes[l].as_ref().unwrap().log_for_test().heartbeat_gate();
+    beats.arm(id);
     std::fs::remove_dir_all(&dirs[f]).unwrap();
     std::fs::create_dir_all(&dirs[f]).unwrap();
     let second = propose_all(
@@ -923,6 +932,7 @@ async fn a_stream_the_purge_overtook_sends_no_hole() {
         had + 1,
         "the stream reads right after what the member had"
     );
+    beats.open();
     // A heartbeat finds the member empty: the leader forgets what it had (its
     // matched index leaves `had`) and plans a snapshot, which may be installed
     // already, at `had` itself, by the time this looks...

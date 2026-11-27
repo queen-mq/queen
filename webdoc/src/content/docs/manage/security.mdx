@@ -55,6 +55,10 @@ sourceOfTruth:
 # 400798d13): network.rs converts append answers to and from openraft 0.10's AppendResult in the
 # 2.9.0 wire form, and ends a replication session at its second request below the purge point; the
 # token check does not change. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-26 (a test's hold on heartbeats): replicator/raft/network.rs makes
+# the heartbeat client wait at that gate (log_store.rs); only in test builds (#[cfg(test)]),
+# for the raft test that a heartbeat could beat to a member coming back. Nothing this page states
+# changes.
 ---
 
 Out of the box a node authenticates nobody: its port is plain HTTP, and every route answers any caller that can reach it. That keeps the first run to one command, and it is the first thing to change. Put one of two front doors on it (the broker's own JWT for services, or the built-in proxy for API keys and people), keep the raft port private, and encrypt the queues whose payloads must not sit on disk in clear.

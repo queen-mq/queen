@@ -127,6 +127,10 @@ sourceOfTruth:
 # queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
 # families; facade/real.rs changes only a test helper (group_lags_for_test). Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-26 (a test's hold on heartbeats): replicator/raft/log_store.rs gains
+# a gate that holds a leader's heartbeats to one member; only in test builds (#[cfg(test)]),
+# for the raft test that a heartbeat could beat to a member coming back. Nothing this page states
+# changes.
 ---
 
 ## Upgrade one node at a time

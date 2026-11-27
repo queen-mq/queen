@@ -231,7 +231,8 @@ impl RaftNetworkFactory<TypeConfig> for HttpNetwork {
     }
 
     /// The same peer, marked: a test holds a member's replication sessions
-    /// and lets its heartbeats through (`log_store::StreamGate`).
+    /// and lets its heartbeats through (`log_store::StreamGate`), or holds its
+    /// heartbeats alone (`log_store::HeartbeatGate`).
     #[cfg(test)]
     async fn new_heartbeat_client(&mut self, target: NodeId, node: &Node) -> HttpPeer {
         let mut peer = self.new_client(target, node).await;
@@ -584,7 +585,9 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
         }
         Box::pin(async move {
             #[cfg(test)]
-            if !self.heartbeat {
+            if self.heartbeat {
+                self.log.heartbeat_gate().pass(self.target).await;
+            } else {
                 self.log.stream_gate().pass(self.target).await;
             }
             let open = self
@@ -615,6 +618,11 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
         rpc: AppendEntriesRequest<TypeConfig>,
         option: RPCOption,
     ) -> Result<AppendResult<TypeConfig>, RPCError<TypeConfig>> {
+        // The unary route's heartbeats wait at the same test gate.
+        #[cfg(test)]
+        if self.heartbeat {
+            self.log.heartbeat_gate().pass(self.target).await;
+        }
         let zstd = self.reads_zstd && wire::zstd_from_env() && !rpc.entries.is_empty();
         if zstd {
             wire::prepare_zstd(&rpc).await.map_err(|e| {

@@ -208,6 +208,51 @@ struct Inner {
     /// A test's hold on a leader's replication streams before they connect.
     #[cfg(test)]
     stream_gate: StreamGate,
+    /// A test's hold on a leader's heartbeats before they connect.
+    #[cfg(test)]
+    heartbeat_gate: HeartbeatGate,
+}
+
+/// A test's hold on a leader's heartbeats ([`super::network::HttpPeer`]'s
+/// heartbeat client): armed at a member, each heartbeat to it waits before it
+/// connects, until the test opens the gate. A member that comes back with its
+/// log gone then hears from the leader only through its replication stream,
+/// which reads before it sends; a heartbeat would tell the leader first.
+#[cfg(test)]
+pub(crate) struct HeartbeatGate(tokio::sync::watch::Sender<HeartbeatGateState>);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct HeartbeatGateState {
+    armed: Option<u64>,
+    open: bool,
+}
+
+#[cfg(test)]
+impl HeartbeatGate {
+    fn new() -> HeartbeatGate {
+        HeartbeatGate(tokio::sync::watch::Sender::new(
+            HeartbeatGateState::default(),
+        ))
+    }
+
+    /// Hold the heartbeats to member `target`.
+    pub(crate) fn arm(&self, target: u64) {
+        self.0.send_replace(HeartbeatGateState {
+            armed: Some(target),
+            open: false,
+        });
+    }
+
+    /// Let every heartbeat through, from now on.
+    pub(crate) fn open(&self) {
+        self.0.send_modify(|s| s.open = true);
+    }
+
+    pub(crate) async fn pass(&self, target: u64) {
+        let mut rx = self.0.subscribe();
+        let _ = rx.wait_for(|s| s.open || s.armed != Some(target)).await;
+    }
 }
 
 /// A test's hold on the replication streams' reads
@@ -656,6 +701,8 @@ impl LogStore {
                     read_gate: ReadGate::new(),
                     #[cfg(test)]
                     stream_gate: StreamGate::new(),
+                    #[cfg(test)]
+                    heartbeat_gate: HeartbeatGate::new(),
                 }),
             },
             writer: join,
@@ -780,6 +827,12 @@ impl LogStore {
     #[cfg(test)]
     pub(crate) fn stream_gate(&self) -> &StreamGate {
         &self.inner.stream_gate
+    }
+
+    /// The test's hold on the heartbeats before they connect.
+    #[cfg(test)]
+    pub(crate) fn heartbeat_gate(&self) -> &HeartbeatGate {
+        &self.inner.heartbeat_gate
     }
 
     fn send(&self, cmd: Cmd) -> io::Result<()> {
