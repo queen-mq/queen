@@ -173,6 +173,10 @@ sourceOfTruth:
 # queen_dlq_bodies_not_kept_total. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): facade/real.rs changes only a
 # test helper (group_lags_for_test). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): facade/real.rs serves it as one linearizable walk of the
+# tenant's timers, at most 200,000; proxy routes.rs classes it as a timers read; PUT and DELETE on
+# the path stay blocked. Nothing this page states changes.
 ---
 
 QueenMQ can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and running the workers, which Horizon's master does. Your job classes stay ordinary Laravel jobs, and `queue:work` stays the worker.

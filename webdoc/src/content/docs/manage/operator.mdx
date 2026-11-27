@@ -41,6 +41,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): handlers/raft.rs exports
 # queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
 # families. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): handlers/raft.rs routes it beside POST on the same path.
+# Nothing this page states changes.
 ---
 
 The [manifest](/manage/kubernetes/) installs a cluster, and a rolling update takes a new version

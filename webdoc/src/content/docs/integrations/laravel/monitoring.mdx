@@ -138,6 +138,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): phase2/reads.rs counts each
 # queue's partitions and each group's positions in the group lag walk (group_lags); phase2.rs hands
 # them to the collector with the group lag (group_lags_of). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): proxy routes.rs classes it as a timers read; PUT and DELETE
+# on the path stay blocked. Nothing this page states changes.
 ---
 
 The [dashboard](/integrations/laravel/dashboard/) shows what the supervisors are doing. This page is about

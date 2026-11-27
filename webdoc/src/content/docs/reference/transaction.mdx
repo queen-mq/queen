@@ -119,6 +119,10 @@ sourceOfTruth:
 # queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
 # families; facade/real.rs changes only a test helper (group_lags_for_test). Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): handlers/raft.rs routes it beside POST on the same path;
+# facade/real.rs serves it as one linearizable walk of the tenant's timers, at most 200,000. Nothing
+# this page states changes.
 ---
 
 `POST /api/v1/transaction` is the call QueenMQ was built around. It writes a worker's whole step

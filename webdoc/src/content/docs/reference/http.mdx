@@ -136,6 +136,10 @@ sourceOfTruth:
 # families; phase2/reads.rs counts each queue's partitions and each group's positions in the group
 # lag walk (group_lags); facade/real.rs changes only a test helper (group_lags_for_test). Nothing
 # this page states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): handlers/raft.rs routes it beside POST on the same path;
+# facade/mod.rs adds its trait method and request; facade/real.rs serves it as one linearizable walk
+# of the tenant's timers, at most 200,000. Nothing this page states changes.
 ---
 
 Every QueenMQ node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no

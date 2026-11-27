@@ -96,6 +96,10 @@ sourceOfTruth:
 # reference. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): facade/real.rs changes only a
 # test helper (group_lags_for_test). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): handlers/timers.rs adds its handler (perQueue, 100 by
+# default); facade/real.rs serves it as one linearizable walk of the tenant's timers, at most
+# 200,000. Nothing this page states changes.
 ---
 
 Every setting is an environment variable, and most installations need very few of them. When a node starts, it prints the settings it is really using, in lines that start with `config:`. Read them after every change. A yes/no setting accepts `true` or `false`, `1` or `0`, `yes` or `no`, `on` or `off`; any other value stops the node at boot, so a typo cannot pass unnoticed.

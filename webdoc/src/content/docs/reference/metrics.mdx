@@ -124,6 +124,10 @@ sourceOfTruth:
 # queen_consumer_group_partitions, and facade/real.rs changes only a test helper. The Consumer group
 # lag section lists both and its budget paragraph says the per-queue series go too; the generated
 # table lists them.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): handlers/raft.rs routes it beside POST on the same path;
+# facade/real.rs serves it as one linearizable walk of the tenant's timers, at most 200,000;
+# facade/groups.rs hands it to the tenant's group. Nothing this page states changes.
 ---
 
 Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`. Each node

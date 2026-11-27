@@ -87,6 +87,10 @@ verifiedBy:
 # queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
 # families; facade/real.rs changes only a test helper (group_lags_for_test). Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): handlers/raft.rs routes it beside POST on the same path;
+# facade/real.rs serves it as one linearizable walk of the tenant's timers, at most 200,000;
+# facade/groups.rs hands it to the tenant's group. Nothing this page states changes.
 ---
 
 The ack, the order's new state, the next event and tomorrow's reminder commit as one log entry, or none of them does. That one call replaces the outbox table, the idempotency table and the cron job.

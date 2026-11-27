@@ -183,6 +183,10 @@ sourceOfTruth:
 # commands this page lists work on it. Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): facade/real.rs changes only a
 # test helper (group_lags_for_test). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): handlers/timers.rs adds its handler (perQueue, 100 by
+# default); facade/real.rs serves it as one linearizable walk of the tenant's timers, at most
+# 200,000. Nothing this page states changes.
 ---
 
 Your job classes do not change: they implement `ShouldQueue`, keep their middleware, `tries`, `backoff` and failure events, and `queue:work` still runs them. What changes is where a job waits and what holds it while it runs. This page follows one job through QueenMQ, one idea at a time, with what Horizon does at the same point. The settings of each idea close its section ([configuration reference](/integrations/laravel/configuration/)).

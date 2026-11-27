@@ -87,6 +87,10 @@ digest: >-
 # sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): phase2.rs hands them to the
 # collector with the group lag (group_lags_of); facade/real.rs changes only a test helper
 # (group_lags_for_test). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): facade/real.rs serves it as one linearizable walk of the
+# tenant's timers, at most 200,000; facade/groups.rs hands it to the tenant's group. Nothing this
+# page states changes.
 ---
 
 The model of QueenMQ is easy to understand. It rests on four ideas: partitions, leases, transactions and a simple interface.

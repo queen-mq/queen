@@ -99,6 +99,9 @@ sourceOfTruth:
 # a gate that holds a leader's heartbeats to one member; only in test builds (#[cfg(test)]),
 # for the raft test that a heartbeat could beat to a member coming back. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): facade/real.rs serves it as one linearizable walk of the
+# tenant's timers, at most 200,000. Nothing this page states changes.
 ---
 
 A broker that promises "all or nothing" has to keep the promise exactly when something breaks. We test QueenMQ with Jepsen on five nodes, under kill -9, network partitions, paused processes, clock jumps, power loss and corrupted files. This page says what each API guarantees, what an answered write means, and where the guarantees stop.

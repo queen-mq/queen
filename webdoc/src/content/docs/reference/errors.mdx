@@ -151,6 +151,11 @@ sourceOfTruth:
 # queen_queue_partitions and queen_consumer_group_partitions beside the queen_consumer_group_lag_*
 # families; phase2.rs hands them to the collector with the group lag (group_lags_of); facade/real.rs
 # changes only a test helper (group_lags_for_test). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): handlers/raft.rs routes it beside POST on the same path;
+# handlers/timers.rs adds its handler (perQueue, 100 by default); facade/mod.rs adds its trait
+# method and request; facade/real.rs serves it as one linearizable walk of the tenant's timers, at
+# most 200,000. Nothing this page states changes.
 ---
 
 When QueenMQ refuses a call it answers a status code and a JSON body with a stable code, and the code

@@ -73,6 +73,9 @@ sourceOfTruth:
 # (off by default). Nothing this page states changes.
 # sourceOfTruth re-read 2026-11-26 (the repack on by default, 5a2d311a3): rsm/mod.rs's comment on
 # the repack module says a pass runs every 10 minutes by default. Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): facade/groups.rs hands it to the tenant's group. Nothing this
+# page states changes.
 ---
 
 A raft group has one leader. The other nodes are followers, and every node has a full copy of the data.

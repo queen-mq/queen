@@ -92,6 +92,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): phase2.rs hands them to the
 # collector with the group lag (group_lags_of); facade/real.rs changes only a test helper
 # (group_lags_for_test). Nothing this page states changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): facade/real.rs serves it as one linearizable walk of the
+# tenant's timers, at most 200,000. Nothing this page states changes.
 ---
 
 A queue is a named set of partitions that share one configuration. You never have to create one: the first push that names a queue creates it, with the defaults. Configure it when you want other settings.

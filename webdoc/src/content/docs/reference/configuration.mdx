@@ -145,6 +145,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-11-26 (partition counts in Prometheus, 3b92550f6): facade/real.rs changes only a
 # test helper (group_lags_for_test). The generated table's QUEEN_METRICS_GROUP_LAG_MAX_CURSORS
 # now says 0 turns the partition gauges off too; no other setting changes.
+# sourceOfTruth re-read 2026-11-27 (GET /api/v1/timers, every queue's timers of the tenant in one
+# read, for the console's State page): handlers/timers.rs adds its handler (perQueue, 100 by
+# default); facade/real.rs serves it as one linearizable walk of the tenant's timers, at most
+# 200,000. Nothing this page states changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no
